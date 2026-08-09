@@ -75,6 +75,19 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     assert RubyLLM.models.find(RubyLLM.config.default_model)
   end
 
+  test "elos da ModelChain e ids registrados a mao resolvem no registry" do
+    Llm::ModelChain.links.each do |link|
+      assert RubyLLM.models.find(link.model, link.provider),
+             "elo #{link.label} aponta para #{link.model} (#{link.provider}), fora do registry"
+    end
+    Llm::ModelRegistry.custom_models.each do |info|
+      assert RubyLLM.models.find(info.id),
+             "id registrado a mao (#{info.id}) nao resolve no registry"
+    end
+    assert RubyLLM.models.find("gemma-4-31b-it"),
+           "gemma-4-31b-it (registrado a mao no Llm::ModelRegistry) nao resolve"
+  end
+
   test "mensagem de sistema sai com o papel 'system', não 'developer'" do
     # A rota direta da Poolside IGNORA o papel 'developer' — medido 3/3 em
     # 2026-08-07: com 'developer' ela responde genérico em inglês; com 'system'
