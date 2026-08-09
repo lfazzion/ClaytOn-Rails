@@ -66,7 +66,7 @@
 
 | Data | Padrão | Contexto |
 |------|--------|----------|
-| 2026-08-09 | Split Gemini background/interactive + cadeia nous → poolside → openrouter | Substitui o cliente único Gemma 4 31B (`gemma_client.rb`, removido) por dois clientes Gemini por tier — `gemini_background_client.rb` (gemini-3.1-flash-lite, background) e `gemini_interactive_client.rb` (gemini-3.5-flash-lite, interactive) — e a cadeia de rotas do chat `ModelChain` (nous → poolside → openrouter). |
+| 2026-08-09 | Split Gemini background/interactive + cadeia nous → poolside → openrouter | Substitui o cliente único Gemma 4 31B (`gemma_client.rb`, removido) por dois clientes Gemini por tier — `gemini_background_client.rb` (gemini-3.1-flash-lite, background) e `gemini_interactive_client.rb` (gemini-3.5-flash-lite, interactive) — e pela `ModelChain` (nous → poolside → openrouter). A `ModelChain` ainda não é consumida pelo chat: o `ChatSessionManager` passará a usá-la após o merge do PR de sessões (dependência de ordem). |
 | 2026-03-30 | Swap via zRAM (ALGO=zstd, 50%) em vez de disco físico | Poupa limite agressivo de IOPS (3000) do boot volume da OCI. Melhoria pragmática nativa via `zram-tools`. |
 | 2026-03-26 | ruby_llm ~> 1.14 (não 1.12) | Suporte a Imagen via `RubyLLM.paint` — API mudou em 1.14 |
 | 2026-03-26 | OpenStruct removido da stdlib em Ruby 4.0 | Usar classes plain ou Mocha mocks em testes em vez de `require 'ostruct'` |
