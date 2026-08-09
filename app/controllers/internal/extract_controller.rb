@@ -21,11 +21,21 @@ module Internal
   # Falha de uma URL vira `error` dentro do array — nunca 500 no lote inteiro.
   class ExtractController < ActionController::API
     CONCURRENCY = (ENV["EXTRACT_CONCURRENCY"] || 4).to_i.clamp(1, 8)
-    # Lote limitado ao número de workers: o orçamento por URL
-    # (ExtractService::CHANNEL_TIMEOUT, 40s) só fecha abaixo dos 90s do reader
-    # se TODAS as URLs do lote rodarem em paralelo — 10 URLs com 4 workers
-    # seriam 3 ondas (~120s no pior caso) e o reader cortaria sem receber nada.
-    MAX_URLS    = CONCURRENCY
+    # Teto = duas vezes o número de workers. O orçamento é por ONDA, não por URL:
+    # o reader corta a chamada aos 90s. Cada URL é imposta em
+    # `Fetcher::ExtractService::TOTAL_PER_URL_TIMEOUT` (40s) por um Timeout.timeout
+    # externo que envolve TODA a extração em `ExtractService.call` — estático E
+    # browser inclusos, porque o caminho comum roda os dois SEQUENCIALMENTE
+    # (25s + 25s) quando o estático vem magro; sem o teto externo a conta abaixo
+    # não seria garantida. Com `workers = [CONCURRENCY, urls.size].min` (ver
+    # extract_all), o pior caso é
+    #   ceil(lote / workers) × TOTAL_PER_URL_TIMEOUT
+    # e este precisa ficar < 90s. Permitir até 2×CONCURRENCY URLs garante no máximo
+    # 2 ondas (ceil(2C/C) = 2 → 2 × 40s = 80s < 90s) para qualquer CONCURRENCY no
+    # clamp (1..8); acima disso viram 3 ondas (~120s) e o reader cortaria sem
+    # receber nada — por isso lotes 2×CONCURRENCY+1 em diante seguem rejeitados
+    # como 400.
+    MAX_URLS    = CONCURRENCY * 2
 
     before_action :authenticate!
 
