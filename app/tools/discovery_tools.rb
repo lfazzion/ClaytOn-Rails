@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 class ProspectsTool < ToolBase
-  description 'Lista perfis prospectos (potenciais patrocinadores)'
+  description 'Lista, do banco local de descoberta, os perfis JÁ CLASSIFICADOS como ' \
+              'PATROCINADOR_PROSPECTO pelo motor de classificação deste projeto — NÃO busca nem ' \
+              'classifica perfil agora, só lê o que já foi analisado.'
 
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 20)', required: false
 
@@ -22,7 +24,9 @@ class ProspectsTool < ToolBase
 end
 
 class UnclassifiedProfilesTool < ToolBase
-  description 'Lista perfis ainda não classificados'
+  description 'Lista, do banco local de descoberta, os perfis que AINDA NÃO foram classificados ' \
+              '(concorrente/prospecto/ignorar) pelo motor deste projeto — NÃO busca nem classifica ' \
+              'perfil agora.'
 
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 20)', required: false
 

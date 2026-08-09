@@ -1,13 +1,18 @@
 # frozen_string_literal: true
 
 class EngagementRateTool < ToolBase
-  description 'Calcula a taxa de engajamento de um perfil'
+  description 'Calcula a taxa de engajamento de um perfil JÁ MONITORADO, a partir dos últimos posts ' \
+              'JÁ SALVOS no banco local — NÃO lê a plataforma agora. Perfil não cadastrado aqui ' \
+              'devolve erro, mesmo que exista de verdade na rede.'
 
   param :username, type: :string, desc: 'Username do perfil', required: true
-  param :platform, type: :string, desc: 'Plataforma (twitter/instagram/youtube/tiktok)', required: true
+  param :platform, type: :string,
+        desc: 'Plataforma do perfil no banco local: twitter, instagram, youtube ou tiktok — ' \
+              'X/Twitter é "twitter" aqui ("x" só existe como valor em platform_search).',
+        required: true
 
   def run(username:, platform:)
-    profile = SocialProfile.find_by(platform: platform, platform_username: username)
+    profile = SocialProfile.where(platform: platform).where('LOWER(platform_username) = LOWER(?)', username).first
     return error("Perfil não encontrado: #{username} em #{platform}") unless profile
 
     rate = profile.engagement_rate
@@ -22,14 +27,19 @@ class EngagementRateTool < ToolBase
 end
 
 class SnapshotTrendTool < ToolBase
-  description 'Retorna tendência de snapshots de métricas de um perfil'
+  description 'Retorna a série histórica de seguidores/posts de um perfil JÁ MONITORADO, a partir dos ' \
+              'snapshots JÁ SALVOS no banco local (coleta periódica) — NÃO lê a plataforma agora nem ' \
+              'calcula projeção futura.'
 
   param :username, type: :string, desc: 'Username do perfil', required: true
-  param :platform, type: :string, desc: 'Plataforma (twitter/instagram/youtube/tiktok)', required: true
+  param :platform, type: :string,
+        desc: 'Plataforma do perfil no banco local: twitter, instagram, youtube ou tiktok — ' \
+              'X/Twitter é "twitter" aqui ("x" só existe como valor em platform_search).',
+        required: true
   param :days, type: :integer, desc: 'Número de dias para buscar (padrão 30)', required: false
 
   def run(username:, platform:, days: 30)
-    profile = SocialProfile.find_by(platform: platform, platform_username: username)
+    profile = SocialProfile.where(platform: platform).where('LOWER(platform_username) = LOWER(?)', username).first
     return error("Perfil não encontrado: #{username} em #{platform}") unless profile
 
     snapshots = profile.profile_snapshots
@@ -48,9 +58,13 @@ class SnapshotTrendTool < ToolBase
 end
 
 class ProfileRankingTool < ToolBase
-  description 'Retorna ranking de perfis por métrica'
+  description 'Rankeia por seguidores ou engajamento os perfis JÁ CADASTRADOS no banco local deste ' \
+              'projeto — NÃO busca perfil novo nem dado ao vivo.'
 
-  param :platform, type: :string, desc: 'Plataforma (opcional)', required: false
+  param :platform, type: :string,
+        desc: 'Plataforma do perfil no banco local (opcional): twitter, instagram, youtube ou ' \
+              'tiktok — X/Twitter é "twitter" aqui. Vazio rankeia todas juntas.',
+        required: false
   param :metric, type: :string, desc: 'Métrica (followers/engagement)', required: true
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 10)', required: false
 

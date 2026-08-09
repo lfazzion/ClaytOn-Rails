@@ -250,4 +250,16 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
 
     assert_equal :bloco_executado, resultado
   end
+
+  test "all_tool_classes registra as tools de busca (WebSearch, PlatformSearch e PageFetch com a flag)" do
+    ChatSessionManager.unstub(:all_tool_classes) # o setup stuba com [] — aqui provamos o metodo real
+    original = ENV["ENABLE_PAGE_FETCH"]
+    ENV["ENABLE_PAGE_FETCH"] = "true"
+    tools = ChatSessionManager.send(:all_tool_classes)
+    assert_includes tools, WebSearchTool
+    assert_includes tools, PlatformSearchTool
+    assert_includes tools, PageFetchTool
+  ensure
+    ENV["ENABLE_PAGE_FETCH"] = original
+  end
 end

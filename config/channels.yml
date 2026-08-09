@@ -1,0 +1,22 @@
+# Canais de leitura do /internal/extract.
+#
+# `hosts`: sufixo de hostname -> nome do canal. Roteado ANTES do fetch.
+# `content_types`: content-type -> nome do canal. Roteado DEPOIS do fetch
+#   estático, porque feed não é reconhecível pela URL: um blog pode servir Atom
+#   em /feed sem dizer na URL. O canal confirma pelo conteúdo e devolve nil se
+#   não for dele — `application/xml` cobre qualquer XML.
+#
+# Canal tirado daqui volta ao caminho comum, sem deploy de código.
+# EXTRACT_CHANNELS=0 desliga o roteador inteiro.
+hosts:
+  youtube.com: youtube
+  youtu.be: youtube
+  reddit.com: reddit
+  x.com: x
+  twitter.com: x
+
+content_types:
+  "application/rss+xml": rss
+  "application/atom+xml": rss
+  "application/xml": rss
+  "text/xml": rss
