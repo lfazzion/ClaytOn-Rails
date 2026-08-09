@@ -19,7 +19,10 @@ module Fetcher
       MAX_PER_WINDOW = 5
       HOST           = "polymarket.com"
       GAMMA_HOST     = "gamma-api.polymarket.com"
-      PATH_PATTERN   = %r{\A/(?:event|market)/([^/?#]+)\z}
+      # Só /event/: a Gamma API de eventos é consultada por slug de EVENTO;
+      # /market/<slug> responderia EventNotFound (erro duro) porque o slug de
+      # mercado não existe em /events — então market cai no caminho comum (nil).
+      PATH_PATTERN   = %r{\A/event/([^/?#]+)\z}
 
       class << self
         def call(url:, response: nil)
@@ -91,8 +94,14 @@ module Fetcher
           outcomes = parse_array_field(m["outcomes"])
           prices = parse_array_field(m["outcomePrices"])
 
+          # Sem preço não vira "0.0%": zero é informação falsa (CLAUDE.md Regra 3).
+          # Só monta o par quando preço veio de verdade.
           pairs = outcomes.zip(prices).filter_map do |o, p|
+            next nil if p.nil?
+
             price_val = p.to_f
+            next nil unless price_val.positive?
+
             pct = (price_val * 100).round(1)
             "#{o}: #{pct}%"
           end

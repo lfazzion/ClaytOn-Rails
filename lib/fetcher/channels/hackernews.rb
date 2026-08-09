@@ -56,7 +56,7 @@ module Fetcher
             m = uri.path.to_s.match(%r{\A/item/(\d+)\z})
             m ? m[1] : nil
           end
-        rescue URI::InvalidURIError, URI::InvalidComponentError
+        rescue URI::InvalidURIError, URI::InvalidComponentError, ArgumentError
           nil
         end
 
@@ -109,14 +109,20 @@ module Fetcher
         def render_markdown(title, author, points, id, ext_url, text, comments)
           hn_link = "https://news.ycombinator.com/item?id=#{id}"
           partes = ["# #{title}"]
-          partes << "por **#{author}** | #{points || 0} pontos | [Hacker News](#{hn_link})"
+          # Métrica ausente não vira "0 pontos": zero é informação falsa para o
+          # modelo (CLAUDE.md Regra 3). Sem pontos, omite o número.
+          meta = "por **#{author}** | [Hacker News](#{hn_link})"
+          meta = "por **#{author}** | #{points} pontos | [Hacker News](#{hn_link})" if points
+          partes << meta
           partes << "Link externo: #{ext_url}" if ext_url.present? && ext_url != hn_link
           partes << text if text.present?
 
           unless comments.empty?
             partes << "## Comentários"
             comments.each do |c|
-              partes << "- **#{c['author']}** (#{c['points']} pts): #{c['body']}"
+              score = c['points'].to_i
+              score_label = score.positive? ? " (#{score} pts)" : ""
+              partes << "- **#{c['author']}**#{score_label}: #{c['body']}"
             end
           end
 

@@ -38,6 +38,11 @@ module Fetcher
           http_resp = SafeHttpClient.get(issue_url, headers: headers)
 
           raise IssueNotFound, "issue/PR #{owner}/#{repo}##{number} não encontrado" if http_resp.status == 404
+          # 403/429 (cota do tier anônimo estourada) e 5xx não são "não existe":
+          # o canal se declara incompetente (nil) e o ExtractService escala para o
+          # HTML do GitHub, que funcionava antes deste canal existir. Sem isso, a
+          # cota anônima de 60 req/h derrubaria TODAS as issues com error duro.
+          return nil if http_resp.status.in?([403, 429]) || http_resp.status >= 500
           raise ApiError, "API do GitHub respondeu HTTP #{http_resp.status}" unless http_resp.success?
 
           payload = parse_json(http_resp.body)

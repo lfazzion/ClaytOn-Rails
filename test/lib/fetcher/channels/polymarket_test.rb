@@ -88,7 +88,7 @@ class Fetcher::Channels::PolymarketTest < ActiveSupport::TestCase
     assert_kind_of Fetcher::Channels::Error, err
   end
 
-  test "7. path com sufixo após o slug devolve nil (âncora total)" do
-    assert_nil Fetcher::Channels::Polymarket.call(url: "https://polymarket.com/event/us-2028/arbitrary")
+  test "7. path /market/ devolve nil (Gamma events só responde slug de evento)" do
+    assert_nil Fetcher::Channels::Polymarket.call(url: "https://polymarket.com/market/us-2028-biden")
   end
 end

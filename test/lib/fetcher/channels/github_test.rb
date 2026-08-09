@@ -68,12 +68,19 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
     stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
       .to_return(status: 403, body: JSON.generate({ "message" => "Rate limit exceeded" }))
 
-    err = assert_raises(Fetcher::Channels::Github::ApiError) do
+    # 403 = cota anônima estourada: o canal se declara incompetente (nil) e o
+    # ExtractService escala para o HTML — NÃO é erro duro.
+    assert_nil Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+  end
+
+  test "4b. 404 levanta IssueNotFound (não é fallback)" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 404, body: JSON.generate({ "message" => "Not Found" }))
+
+    err = assert_raises(Fetcher::Channels::Github::IssueNotFound) do
       Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
     end
-
     assert_kind_of Fetcher::Channels::Error, err
-    assert_includes err.message, "403"
   end
 
   test "5. API de comentários com erro levanta ApiError (não [] silencioso)" do

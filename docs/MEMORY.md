@@ -176,3 +176,13 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | 2026-03-30 | Deploy hardening (Propostas 1-3): set -Eeuo pipefail, healthcheck nativo docker-compose, image tagging com IMAGE_TAG, --wait em vez de health check loop, rollback sem rebuild, FASE 10.5 systemd timer cleanup. | Contexto Ativo |
 | 2026-03-30 | Correções script↔guia: KexAlgorithms pós-quântico (sntrup761x25519) no SSH, tabela de fases 9→10 com NTP/Chrony (FASE 7), Fail2Ban dual jail, troubleshooting zRAM. | Contexto Ativo |
 | 2026-08-09 | Decisão arquitetural registrada: execução Python via sidecar HTTP autenticado (8080, `PYTHON_SCRAPER_TOKEN`) em vez de `Open3` in-process. | Padrões Ratificados |
+
+---
+
+## Decisões arquiteturais — PR #32 (2026-08-09)
+
+- **Headers extras no SafeHttpClient com regra de origem**: `get(url, headers:)` envia os headers apenas na origem original; redirect SAME-ORIGIN (scheme+host+porta normalizada) preserva, qualquer mudança de origem (cross-host, downgrade HTTPS→HTTP, origem inparseável) limpa — fail-closed. Motivo: `Authorization: Bearer` do canal GitHub não pode vazar para outro domínio, mas repo transferido (redirect 301 same-host) precisa manter a autenticação.
+- **Teto externo por URL no ExtractService**: `TOTAL_PER_URL_TIMEOUT = CHANNEL_TIMEOUT` (40s) imposto por `Timeout.timeout` em volta de toda a extração em `ExtractService.call`. O caminho comum (estático 25s + browser 25s) roda SEQUENCIAL e gastaria 50s/URL; o teto externo torna a conta "2 ondas × 40s = 80s < 90s" do reader verdadeira. `Timeout::Error` vira failure no contrato, nunca 500.
+- **Política de erro de canal**: erro de API (não-2xx nomeado) NÃO faz fallback para o caminho comum — vira `error` por URL. Exceção deliberada: GitHub 403/429/5xx devolve nil (escala para o HTML) porque a cota anônima de 60 req/h estouraria e derrubaria TODAS as issues; 404 continua erro nomeado (`IssueNotFound`).
+- **Canais não cobram rate limit próprio**: `HostRateLimiter.exceeded?` só no ExtractService (via `budget_for` com `MAX_PER_WINDOW` do canal). Cobrança dupla (canal + serviço) derrubava o teto efetivo para 2/min (medido 09/08).
+- **`/market/` do Polymarket não é canal**: a Gamma API de eventos só responde slug de evento; rotear `/market/` produziria `EventNotFound` duro. Market cai no caminho comum (nil).
