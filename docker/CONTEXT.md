@@ -37,7 +37,7 @@ docker compose -f docker/docker-compose.yml down
 
 ## Regras Críticas para IA
 
-1. **Paths relativos à raiz**: SEMPRE rodar docker-compose da raiz com `-f docker/docker-compose.yml`
+1. **Paths relativos à raiz**: SEMPRE rodar docker compose da raiz com `-f docker/docker-compose.yml`
 2. **Chrome Host Header Bypass**: O `FerrumConfig` injeta `Host: localhost` no GET `/json/version` para contornar Chrome 120+
 3. **Shared Memory**: `shm_size: '2gb'` obrigatório no serviço `chrome` (vazamento de memória sem ele)
 4. **SQLite bind mount**: `storage/` montado em `/rails/storage`. NUNCA usar Docker volume nomeado
