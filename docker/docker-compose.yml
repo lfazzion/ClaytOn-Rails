@@ -191,8 +191,11 @@ services:
     # DISCORD_BOT_TOKEN e as chaves de LLM é o pior lugar possível para guardá-las.
     # `.env.sidecar` casa com o padrão `.env.*` do .gitignore; `sidecar.env` não
     # casaria e seria commitado com o token dentro.
+    # `required: false`: sem o arquivo (CI, dev), o serviço sobe com env vazio —
+    # sem isso o `docker compose` inteiro falha no load quando o arquivo falta.
     env_file:
-      - ./.env.sidecar
+      - path: ./.env.sidecar
+        required: false
     volumes:
       - ../scripts/python:/app/scripts
       - scraping-data:/data
@@ -233,8 +236,12 @@ services:
     # DISCORD_BOT_TOKEN, as chaves de LLM e o INTERNAL_EXTRACT_TOKEN.
     # `.env.searxng` casa com o padrão `.env.*` do .gitignore; `searxng.env` não
     # casaria e seria commitado com o segredo dentro.
+    # `required: false`: sem o arquivo (CI, dev), o serviço sobe sem a secret —
+    # o settings.yml do CI usa valor padrão. Sem isto o compose inteiro falha no
+    # load quando o arquivo falta.
     env_file:
-      - ./.env.searxng
+      - path: ./.env.searxng
+        required: false
     environment:
       SEARXNG_BASE_URL: "http://searxng:8080/"
     volumes:
