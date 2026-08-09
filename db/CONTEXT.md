@@ -26,7 +26,7 @@ db/
    - `db/migrate/` — tabelas da aplicação (SocialProfile, SocialPost, etc.)
    - `db/queue_migrate/` — tabelas do Solid Queue (NÃO mexer, gerenciado pelo gem)
    - `db/cache_migrate/` — tabelas do Solid Cache (NÃO mexer, gerenciado pelo gem)
-6. **Docker**: Rodar migrations via `docker-compose -f docker/docker-compose.yml exec app bin/rails db:migrate`
+6. **Docker**: Rodar migrations via `docker compose -f docker/docker-compose.yml exec app bin/rails db:migrate`
  7. **NUNCA apagar SQLite manualmente**: O arquivo fica em `storage/` (bind mount). Apagar = perder todos os dados
 
 ## Cross-References

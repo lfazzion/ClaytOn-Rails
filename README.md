@@ -78,7 +78,7 @@ O setup inteiro se compõe perfeitamente pelo Compose em Linux/Mac.
 ### Subindo os Serviços
 
 ```bash
-docker-compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml up -d
 ```
 Verifique via `docker ps` os **5 micro-serviços** criados:
 - **app**: Puma (Backend / Headless REST).
@@ -97,13 +97,13 @@ curl http://localhost:3000/up
 
 Para atualizar o Banco de dados recém-nascido e observar os logs:
 ```bash
-docker-compose -f docker/docker-compose.yml exec app bin/rails db:migrate
-docker-compose -f docker/docker-compose.yml logs -f discord-bot
+docker compose -f docker/docker-compose.yml exec app bin/rails db:migrate
+docker compose -f docker/docker-compose.yml logs -f discord-bot
 ```
 
 Rodando a suíte incansável de testes (Apenas inicie e espere 0 failures com o run selado):
 ```bash
-docker-compose -f docker/docker-compose.yml run --rm test
+docker compose -f docker/docker-compose.yml run --rm test
 ```
 
 ## Arquitetura de Banco Simplificada (E Backups Livres)
