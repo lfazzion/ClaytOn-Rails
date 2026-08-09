@@ -79,8 +79,9 @@ class PlatformSearchTool < ToolBase
 
     n = limit ? clamp(limit, MIN_LIMIT, MAX_LIMIT) : DEFAULT_LIMIT
     resultados = Array(ler(nome, canal, alvo, n))
+    reordenados = sort_resultados(resultados, alvo)
 
-    success({ platform: nome, query: alvo, count: resultados.size, results: resultados })
+    success({ platform: nome, query: alvo, count: reordenados.size, results: reordenados })
   rescue Fetcher::CookieJar::Expired => e
     # NUNCA lista vazia aqui: o modelo leria "não existe nada sobre isso" e
     # responderia isso ao usuário. O erro precisa dizer qual domínio renovar.
@@ -123,5 +124,16 @@ class PlatformSearchTool < ToolBase
     return canal.timeline(user: alvo, limit: limite) if por_perfil?(nome)
 
     canal.search(query: alvo, limit: limite)
+  end
+
+  def sort_resultados(resultados, query)
+    Research::Scorer.sort(resultados, query: query)
+  rescue StandardError => e
+    Rails.logger.error "[PlatformSearchTool] erro ao ordenar resultados com Scorer: #{e.class}: #{e.message}"
+    resultados.map do |r|
+      next r unless r.is_a?(Hash)
+
+      r.merge("score" => 0.0)
+    end
   end
 end

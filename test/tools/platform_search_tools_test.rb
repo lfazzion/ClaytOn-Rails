@@ -28,14 +28,29 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     assert_equal "https://www.youtube.com/watch?v=abc", result[:data][:results].first["url"]
   end
 
-  test "busca no reddit devolve os itens do canal" do
+  test "busca no reddit devolve os itens do canal pontuados" do
     Fetcher::Channels::Reddit.expects(:search).with(query: "ruby 4", limit: 10).returns(THREADS)
 
     result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "reddit")
 
     assert_equal :success, result[:status]
     assert_equal "reddit", result[:data][:platform]
-    assert_equal 54, result[:data][:results].first["score"]
+    assert_kind_of Float, result[:data][:results].first["score"]
+  end
+
+  test "resultados da busca sao reordenados pelo score composto" do
+    item_baixo = { "url" => "https://www.youtube.com/watch?v=1", "title" => "Bolo de cenoura" }
+    item_alto  = { "url" => "https://www.youtube.com/watch?v=2", "title" => "Ruby 4 novidades e tutorial" }
+
+    Fetcher::Channels::Youtube.expects(:search).with(query: "ruby 4", limit: 10).returns([item_baixo, item_alto])
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "youtube")
+
+    assert_equal :success, result[:status]
+    results = result[:data][:results]
+    assert_equal 2, results.size
+    assert_equal "https://www.youtube.com/watch?v=2", results.first["url"], "Item mais relevante deve vir primeiro"
+    assert results.first["score"] > results.last["score"]
   end
 
   test "nome de plataforma com maiuscula e espaco ainda casa" do
