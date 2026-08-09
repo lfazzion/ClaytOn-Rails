@@ -335,17 +335,26 @@ class ConversationCompactorTest < ActiveSupport::TestCase
   # de 32.000 e este teste passava a exercitar o padrão em vez da janela grande
   # que ele existe para cobrir — verde, e sem guardar nada. A asserção abaixo
   # trava isso: se a janela voltar a ser a padrão, o teste reprova.
-  JANELA_REAL_DO_PRIMARIO = 262_144
   # Amarrado ao elo primário REAL (lido da ENV do processo, sem stub) em vez de
   # cravado, para que trocar o elo 1 (troca de modelo, de provedor, ou uma
   # chave que suma) faça este teste reclamar sozinho — e não fique verde
-  # exercitando um par modelo/provider que já não é o primário de ninguém. O
-  # fallback só entra se rodar sem chave nenhuma (ex.: isolado, fora da suíte);
-  # nesse caso a asserção de JANELA_REAL_DO_PRIMARIO abaixo é quem trava.
+  # exercitando um par modelo/provider que já não é o primário de ninguém.
   MODELO_PRIMARIO = Llm::ModelChain.primary&.model || "poolside/laguna-xs-2.1"
   PROVEDOR_PRIMARIO = Llm::ModelChain.primary&.provider || :poolside
 
+  def janela_real_do_primario
+    info = RubyLLM.models.find(MODELO_PRIMARIO, PROVEDOR_PRIMARIO)
+    flunk("Modelo primário '#{MODELO_PRIMARIO}' (provedor #{PROVEDOR_PRIMARIO.inspect}) não foi encontrado no RubyLLM.models registry") if info.nil?
+
+    janela = info.context_window
+    flunk("context_window de '#{MODELO_PRIMARIO}' no registry é inválida: #{janela.inspect}") unless janela.to_i.positive?
+    janela
+  rescue StandardError => e
+    flunk("Erro ao buscar context_window no RubyLLM.models para '#{MODELO_PRIMARIO}' (#{PROVEDOR_PRIMARIO.inspect}): #{e.class.name} - #{e.message}")
+  end
+
   test "needs_compaction? dispara por CONTAGEM de mensagens vivas, mesmo com a janela real do modelo primário" do
+    janela_esperada = janela_real_do_primario
     limite_mensagens = ConversationRehydrator.rehydrate_limit
     (limite_mensagens + 5).times { |i| add_message(i.even? ? "user" : "assistant", "oi") }
 
@@ -356,7 +365,7 @@ class ConversationCompactorTest < ActiveSupport::TestCase
     # está bem abaixo do limiar real (isso é exatamente o que A1 não pegava).
     window = ConversationCompactor.window_for(MODELO_PRIMARIO, provider: PROVEDOR_PRIMARIO)
 
-    assert_equal JANELA_REAL_DO_PRIMARIO, window,
+    assert_equal janela_esperada, window,
                  "a janela veio do registry, não do DEFAULT_WINDOW — senão este teste não cobre nada"
 
     limite_tokens = (window * ConversationCompactor.threshold).to_i
@@ -366,11 +375,13 @@ class ConversationCompactorTest < ActiveSupport::TestCase
   end
 
   test "needs_compaction? continua falso com poucas mensagens e janela real, quando nada cruza limiar" do
+    janela_esperada = janela_real_do_primario
     limite_mensagens = ConversationRehydrator.rehydrate_limit
     (limite_mensagens - 1).times { |i| add_message(i.even? ? "user" : "assistant", "oi") }
 
-    assert_equal JANELA_REAL_DO_PRIMARIO,
-                 ConversationCompactor.window_for(MODELO_PRIMARIO, provider: PROVEDOR_PRIMARIO)
+    assert_equal janela_esperada,
+                 ConversationCompactor.window_for(MODELO_PRIMARIO, provider: PROVEDOR_PRIMARIO),
+                 "a janela veio do registry, não do DEFAULT_WINDOW"
     assert_not ConversationCompactor.needs_compaction?(@conversation, model_id: MODELO_PRIMARIO,
                                                                       provider: PROVEDOR_PRIMARIO)
   end
