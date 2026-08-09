@@ -35,10 +35,22 @@ module Fetcher
     THIN_CONTENT_CHARS = 400
     CACHE_PREFIX       = "page_extract:v2"
     CACHE_CONTENT_CAP  = MAX_MAX_CHARS
-    # Abaixo do teto do plugin do reader (90s) com folga: o controller limita o
-    # lote ao número de workers (MAX_URLS = CONCURRENCY), então o pior caso é
-    # uma onda só — CHANNEL_TIMEOUT, não N × CHANNEL_TIMEOUT.
+    # Teto TOTAL por URL, imposto em `call` (Timeout.timeout envolve toda a
+    # extração). Não é só o teto do canal: `CHANNEL_TIMEOUT` também é o teto do
+    # canal interno, mas o caminho comum (with_escalation) roda estático
+    # (SafeHttpClient::TOTAL_TIMEOUT = 25s) E browser (PageFetcher::OVERALL_TIMEOUT
+    # = 25s) SEQUENCIALMENTE quando o estático vem magro. Sem um teto externo,
+    # o pior caso real por URL seria 25 + 25 = 50s — e duas ondas dariam 100s,
+    # acima dos 90s do plugin do reader, que veria a chamada como timeout.
+    # Este teto externo (igual a CHANNEL_TIMEOUT) garante o orçamento de ~40s por
+    # URL; como ele começa ANTES do teto interno do canal (que só envolve
+    # channel.call), com valores iguais o externo vence primeiro — o canal nunca
+    # ganha tempo extra, e o caminho comum (estático + browser) fica coberto. A
+    # conta do controller (2 ondas × 40s = 80s < 90s) só fecha por causa dele.
     CHANNEL_TIMEOUT    = 40
+    # Alias com o nome que diz o papel: é o teto TOTAL imposto por URL, não o do
+    # canal. O controller usa esta conta para dimensionar MAX_URLS.
+    TOTAL_PER_URL_TIMEOUT = CHANNEL_TIMEOUT
     # Fatia mínima do container principal que o Readability precisa cobrir para
     # ser considerado a extração boa.
     MIN_ARTICLE_SHARE  = 0.4
@@ -75,10 +87,19 @@ module Fetcher
 
     # Sempre devolve um hash no contrato do plugin — erro vira campo, nunca exceção
     # que derrube o lote inteiro.
+    #
+    # O Timeout.timeout externo é o que dá valor REAL à premissa do controller
+    # (2 ondas × TOTAL_PER_URL_TIMEOUT < 90s): sem ele, o caminho comum
+    # (with_escalation) poderia gastar 25s (estático) + 25s (browser) = 50s por
+    # URL e duas ondas estourariam o corte do reader. Ele também cobre canais que
+    # esquecem de honrar o CHANNEL_TIMEOUT interno. `Timeout::Error` vira failure
+    # como qualquer erro esperado — nunca um 500 no lote.
     def call(url)
       requested = url.to_s
-      extracted = extract(requested)
+      extracted = Timeout.timeout(TOTAL_PER_URL_TIMEOUT) { extract(requested) }
       success(requested, extracted)
+    rescue Timeout::Error
+      failure(requested, "extração excedeu #{TOTAL_PER_URL_TIMEOUT}s por URL")
     rescue SsrfGuard::Blocked => e
       failure(requested, e.reason)
     # `Channels::Error` e não `Channels::Youtube::NoTranscript`: o registro carrega

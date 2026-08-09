@@ -168,4 +168,48 @@ class Fetcher::SafeHttpClientTest < ActiveSupport::TestCase
     assert_predicate response, :pdf?
     assert_not response.html?
   end
+
+  # ── Headers extras (Authorization) em redirect ─────────────────────────────
+  # O header é segredo da ORIGEM original: mesma origem (scheme+host+porta)
+  # preserva (repo do GitHub transferido precisa continuar autenticado);
+  # qualquer mudança de origem limpa (nunca vazar o token para outro domínio).
+
+  test "headers extras são enviados no primeiro hop e em redirect same-origin" do
+    stub_request(:get, "http://api.test/start").to_return(status: 301, headers: { "Location" => "http://api.test/same" })
+    stub_request(:get, "http://api.test/same").to_return(status: 200, body: "ok")
+
+    Fetcher::SafeHttpClient.get("http://api.test/start", headers: { "Authorization" => "Bearer token-x" })
+
+    assert_requested(:get, "http://api.test/start") { |req| req.headers["Authorization"] == "Bearer token-x" }
+    assert_requested(:get, "http://api.test/same")  { |req| req.headers["Authorization"] == "Bearer token-x" }
+  end
+
+  test "headers extras são removidos em redirect cross-origin" do
+    stub_request(:get, "http://api.test/start").to_return(status: 301, headers: { "Location" => "http://outro.test/final" })
+    stub_request(:get, "http://outro.test/final").to_return(status: 200, body: "ok")
+
+    Fetcher::SafeHttpClient.get("http://api.test/start", headers: { "Authorization" => "Bearer token-x" })
+
+    assert_requested(:get, "http://api.test/start") { |req| req.headers["Authorization"] == "Bearer token-x" }
+    assert_requested(:get, "http://outro.test/final") { |req| req.headers["Authorization"].nil? }
+  end
+
+  test "headers extras são removidos em downgrade https para http (mudança de origem)" do
+    stub_request(:get, "https://api.test/start").to_return(status: 302, headers: { "Location" => "http://api.test/plain" })
+    stub_request(:get, "http://api.test/plain").to_return(status: 200, body: "ok")
+
+    Fetcher::SafeHttpClient.get("https://api.test/start", headers: { "Authorization" => "Bearer token-x" })
+
+    assert_requested(:get, "https://api.test/start") { |req| req.headers["Authorization"] == "Bearer token-x" }
+    assert_requested(:get, "http://api.test/plain")  { |req| req.headers["Authorization"].nil? }
+  end
+
+  test "porta explícita igual à default é a mesma origem (mantém headers)" do
+    stub_request(:get, "http://api.test:80/start").to_return(status: 301, headers: { "Location" => "http://api.test/same" })
+    stub_request(:get, "http://api.test/same").to_return(status: 200, body: "ok")
+
+    Fetcher::SafeHttpClient.get("http://api.test:80/start", headers: { "Authorization" => "Bearer token-x" })
+
+    assert_requested(:get, "http://api.test/same") { |req| req.headers["Authorization"] == "Bearer token-x" }
+  end
 end

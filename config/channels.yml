@@ -14,6 +14,9 @@ hosts:
   reddit.com: reddit
   x.com: x
   twitter.com: x
+  news.ycombinator.com: hackernews
+  github.com: github
+  polymarket.com: polymarket
 
 content_types:
   "application/rss+xml": rss
