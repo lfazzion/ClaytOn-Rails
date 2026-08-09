@@ -134,10 +134,8 @@ class PlatformSearchTool < ToolBase
     Research::Scorer.sort(resultados, query: query)
   rescue StandardError => e
     Rails.logger.error "[PlatformSearchTool] erro ao ordenar resultados com Scorer: #{e.class}: #{e.message}"
-    resultados.map do |r|
-      next r unless r.is_a?(Hash)
-
-      r.merge("score" => 0.0)
-    end
+    # Fallback NUNCA sobrescreve chaves nativas (o "score" do Reddit são
+    # upvotes): devolve intactos — sem scoring, mas sem perda de informação.
+    resultados
   end
 end

@@ -38,6 +38,8 @@ class ResearchSignalsTest < ActiveSupport::TestCase
     # Data ausente é NEUTRO (0.5), não frescor máximo — item sem data não pode
     # superar item datado de hoje (achado de revisão).
     assert_equal 0.5, Research::Signals.freshness(nil)
+    # Data INVÁLIDA também é neutra (parsing falhou = não sabemos a idade).
+    assert_equal 0.5, Research::Signals.freshness("data-que-nao-existe-9999", reference: agora)
   end
 
   test "retweets do canal X é aceito como alias de reposts" do

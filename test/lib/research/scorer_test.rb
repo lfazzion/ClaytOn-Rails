@@ -48,4 +48,21 @@ class ResearchScorerTest < ActiveSupport::TestCase
     assert score >= 0.0
     assert score <= 1.0
   end
+
+  test "empate apos arredondamento segue os valores brutos" do
+    # Dois itens com BRUTOS distintos (0.504 / 0.501) que o round(2) expõe
+    # como o MESMO 0.5: a ordem final tem que seguir os brutos, não o exibido.
+    alto  = { "title" => "React hooks em profundidade", "url" => "https://youtube.com/watch?v=1" }
+    baixo = { "title" => "React hooks para iniciantes", "url" => "https://youtube.com/watch?v=2" }
+
+    Research::Scorer.stubs(:score).returns(0.504, 0.501)
+
+    # Entrada na ordem contrária: o stub sequencial dá 0.504 ao primeiro item
+    # da lista (alto) e 0.501 ao segundo (baixo); o sort tem que reverter.
+    sorted = Research::Scorer.sort([alto, baixo], query: "react hooks")
+
+    assert_equal "React hooks em profundidade", sorted.first["title"], "bruto maior vem primeiro"
+    assert_equal 0.5, sorted.first["relevance_score"]
+    assert_equal 0.5, sorted.last["relevance_score"]
+  end
 end

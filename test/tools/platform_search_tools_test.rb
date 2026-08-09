@@ -57,6 +57,35 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     assert results.first["relevance_score"] > results.last["relevance_score"]
   end
 
+  test "fallback do scorer nao sobrescreve o score nativo do reddit" do
+    Research::Scorer.stubs(:sort).raises(StandardError, "falha forçada")
+    Fetcher::Channels::Reddit.expects(:search).with(query: "ruby 4", limit: 10).returns(THREADS)
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "reddit")
+
+    assert_equal :success, result[:status]
+    assert_equal 1, result[:data][:count]
+    item = result[:data][:results].first
+    assert_equal 54, item["score"], "Fallback devolve intacto — upvotes do Reddit não podem virar 0.0"
+    refute item.key?("relevance_score")
+  end
+
+  test "x (por perfil) nao passa pelo scorer e mantem ordem cronologica" do
+    post_antigo = { "url" => "https://x.com/jack/status/2", "title" => "post antigo e popular" }
+    post_novo   = { "url" => "https://x.com/jack/status/1", "title" => "post novo" }
+
+    Research::Scorer.expects(:sort).never
+    Fetcher::Channels::X.expects(:timeline).with(user: "jack", limit: 10).returns([post_antigo, post_novo])
+
+    result = PlatformSearchTool.new.execute(query: "@jack", platform: "x")
+
+    assert_equal :success, result[:status]
+    urls = result[:data][:results].map { |r| r["url"] }
+    assert_equal ["https://x.com/jack/status/2", "https://x.com/jack/status/1"], urls,
+                 "X mantém a ordem cronológica do canal (posts mais recentes)"
+    refute result[:data][:results].first.key?("relevance_score")
+  end
+
   test "nome de plataforma com maiuscula e espaco ainda casa" do
     Fetcher::Channels::Youtube.expects(:search).returns([])
 

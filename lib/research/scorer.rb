@@ -12,7 +12,7 @@ module Research
   # Fórmula do Score Composto:
   #   score = (0.45 * relevância + 0.35 * engajamento_norm + 0.20 * qualidade) * freshness
   #
-  # Normalização de Engajamento (intra-plataforma):
+  # Normalização de Engajamento (por plataforma):
   #
   # engagement_raw já calcula o engajamento em escala logarítmica (soma ponderada de log1p).
   # A constante VOTE_LOG_REFERENCE[source] (ex: 7.6 para reddit, 10.3 para youtube) é a

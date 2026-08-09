@@ -123,8 +123,8 @@ module Research
     end
 
     def self.freshness(published_at, max_days: 30, reference: Time.now.utc)
-      # Data ausente NÃO ganha frescor máximo (isso favoreceria item sem data
-      # sobre item datado): neutro 0.5, sem mentir nem penalizar.
+      # Data ausente OU inválida NÃO ganha frescor máximo (isso favoreceria
+      # item sem data sobre item datado): neutro 0.5, sem mentir nem penalizar.
       return 0.5 if published_at.nil?
 
       ref = reference.is_a?(Time) ? reference : Time.parse(reference.to_s)
@@ -141,7 +141,7 @@ module Research
       days_fresh = 1.0 - (dias / max_days.to_f)
       days_fresh.clamp(0.0, 1.0)
     rescue ArgumentError, TypeError
-      1.0
+      0.5
     end
 
     def self.source_quality(source)
