@@ -57,8 +57,8 @@ module Fetcher
     Hop = Struct.new(:status, :headers, :body, keyword_init: true)
 
     class << self
-      def get(url, total_timeout: TOTAL_TIMEOUT)
-        new(total_timeout: total_timeout).get(url)
+      def get(url, total_timeout: TOTAL_TIMEOUT, headers: {})
+        new(total_timeout: total_timeout).get(url, headers: headers)
       end
     end
 
@@ -66,33 +66,57 @@ module Fetcher
       @total_timeout = total_timeout
     end
 
-    def get(url)
-      Timeout.timeout(@total_timeout) { follow(url) }
+    def get(url, headers: {})
+      Timeout.timeout(@total_timeout) { follow(url, headers: headers) }
     rescue Timeout::Error
       raise RequestTimeout, "timeout de #{@total_timeout}s"
     end
 
     private
 
-    def follow(url)
+    def follow(url, headers: {})
       current = url.to_s
       seen = []
+      # Headers extras (ex.: Authorization Bearer de uma API) são segredo da
+      # ORIGEM original. Em redirect CROSS-ORIGIN (scheme, host ou porta
+      # diferentes), reenviá-los vazaria o token para outro domínio — limpa.
+      # Redirect same-origin (ex.: repo do GitHub transferido/renomeado) mantém
+      # a autenticação: derrubá-la aí degradaria silenciosamente para o tier
+      # anônimo ou quebraria recurso privado.
+      current_origin = origin_of(current)
 
       (MAX_REDIRECTS + 1).times do
         # Revalidação por hop: scheme, host e IP são checados de novo aqui.
         resolution = SsrfGuard.resolve!(current)
         seen << current
 
-        hop = perform(resolution)
+        hop = perform(resolution, extra_headers: headers)
         location = hop.headers["location"]
 
         return build_response(hop, resolution.uri.to_s) unless redirect?(hop, location)
 
         current = next_location(resolution.uri, location)
         raise TooManyRedirects, "loop de redirect em #{current}" if seen.include?(current)
+
+        # Só preserva headers se o próximo hop mantém a MESMA origem
+        # (scheme + host + porta). Qualquer mudança — ou origem não resolvível
+        # (fail-closed) — limpa o Authorization.
+        next_origin = origin_of(current)
+        headers = {} unless next_origin && next_origin == current_origin
       end
 
       raise TooManyRedirects, "mais de #{MAX_REDIRECTS} redirects"
+    end
+
+    def origin_of(url)
+      uri = URI.parse(url.to_s)
+      port = uri.port
+      # Porta explícita igual à default do scheme normaliza para a mesma origem.
+      default = uri.scheme == "https" ? 443 : 80
+      port = default if port == default
+      [uri.scheme, uri.host.to_s.downcase, port]
+    rescue URI::Error
+      nil
     end
 
     def redirect?(hop, location)
@@ -107,7 +131,7 @@ module Fetcher
       raise Error, "Location inválido (#{e.message})"
     end
 
-    def perform(resolution)
+    def perform(resolution, extra_headers: {})
       uri = resolution.uri
       http = Net::HTTP.new(uri.host, uri.port)
       # Conecta NO IP validado. `uri.host` continua valendo para Host header,
@@ -120,7 +144,7 @@ module Fetcher
 
       hop = nil
       http.start do |session|
-        session.request(build_request(uri)) do |response|
+        session.request(build_request(uri, extra_headers: extra_headers)) do |response|
           hop = Hop.new(
             status: response.code.to_i,
             headers: downcased_headers(response),
@@ -144,8 +168,8 @@ module Fetcher
     # Headers no construtor de propósito: declarar `accept-encoding` ali é o que
     # desliga o `decode_content` do Net::HTTP. A descompressão é nossa — a dele
     # não respeita teto de bytes inflados.
-    def build_request(uri)
-      Net::HTTP::Get.new(
+    def build_request(uri, extra_headers: {})
+      req = Net::HTTP::Get.new(
         uri.request_uri,
         "host" => uri.host,
         "user-agent" => USER_AGENT,
@@ -153,6 +177,8 @@ module Fetcher
         "accept-language" => "pt-BR,pt;q=0.9,en;q=0.8",
         "accept-encoding" => "gzip"
       )
+      extra_headers.each { |k, v| req[k.to_s] = v.to_s }
+      req
     end
 
     def read_capped(response)
