@@ -262,11 +262,14 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
   end
 
   # ── DEFEITO 3: DNS rebinding no caminho Chrome ──────────────────────────
-  # O SsrfGuard valida e FIXA o IP, mas o Chrome re-resolve o hostname sozinho
-  # no go_to. O remoteIPAddress do documento tem de ser o IP validado — senão o
-  # DNS alternou entre a validação e o connect.
+  # O SsrfGuard valida que TODOS os IPs do host são públicos, mas o Chrome
+  # re-resolve o hostname sozinho no go_to. O `remoteIPAddress` do documento
+  # não pode ter vindo de IP privado/loopback/metadata — mas também não precisa
+  # ser o `ips.first`: CDN multi-registro e dual-stack (A+AAAA) fazem o Chrome
+  # conectar em QUALQUER IP público do conjunto. O cheque é `ip_blocked?`, não
+  # igualdade com o primeiro IP.
 
-  test "documento que veio de IP diferente do validado levanta SsrfGuard::Blocked" do
+  test "documento que veio de IP privado (10.x) levanta SsrfGuard::Blocked, mesmo com IP público no conjunto" do
     page = FakePage.new(body_text: "dados", document_remote_ip: "10.0.0.1")
     browser = FakeBrowser.new(context: FakeContext.new(page))
     fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
@@ -278,7 +281,50 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
 
     assert_match(/rebinding/i, erro.message)
     assert_match(/10\.0\.0\.1/, erro.message)
-    assert_match(/8\.8\.8\.8/, erro.message, "a mensagem cita o IP que a validação fixou")
+  end
+
+  test "documento que veio de loopback (127.0.0.1) levanta SsrfGuard::Blocked mesmo com outro IP público no conjunto" do
+    # validação aprovou um conjunto todo público; o Chrome conectou em
+    # loopback — rebinding de verdade, tem que bloquear.
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["8.8.8.8", "1.1.1.1"])
+    page = FakePage.new(body_text: "dados", document_remote_ip: "127.0.0.1")
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    erro = assert_raises(Fetcher::SsrfGuard::Blocked) do
+      fetcher.call("https://spa.test/")
+    end
+
+    assert_match(/127\.0\.0\.1/, erro.message)
+  end
+
+  test "documento que veio de IP público do conjunto (não o primeiro) passa — CDN/dual-stack" do
+    # O bug da 1a rodada: exigia igualdade com ips.first e derrubava
+    # youtube.com/reddit.com, que têm múltiplos registros A/AAAA.
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["8.8.8.8", "1.1.1.1"])
+    page = FakePage.new(body_text: "dados renderizados " * 40, document_remote_ip: "1.1.1.1")
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    payload = fetcher.call("https://spa.test/")
+
+    assert_equal "Título Renderizado", payload[:title]
+    assert_includes payload[:content], "dados renderizados"
+  end
+
+  test "documento que veio de AAAA público do conjunto passa — dual-stack" do
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["8.8.8.8", "2606:2800:220:1:248:1893:25c8:1946"])
+    page = FakePage.new(body_text: "dados renderizados " * 40, document_remote_ip: "2606:2800:220:1:248:1893:25c8:1946")
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    payload = fetcher.call("https://spa.test/")
+
+    assert_equal "Título Renderizado", payload[:title]
+    assert_includes payload[:content], "dados renderizados"
   end
 
   test "documento que veio do IP validado passa" do

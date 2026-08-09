@@ -199,12 +199,15 @@ module Fetcher
 
       # O Chrome (e o nodriver) seguem redirects por conta própria — a validação
       # pré-fetch só cobriu a URL inicial. Revalidar o destino final é o que
-      # impede um `302 -> http://127.0.0.1/` de virar payload de resposta.
-      final_resolution = revalidate_final_url!(raw[:final_url], uri)
-      # O Chrome re-resolve o hostname sozinho; o `remoteIPAddress` do documento
-      # tem de ser o IP que a validação fixou — senão o DNS alternou entre a
-      # validação e o connect (rebinding, TTL curto).
-      assert_document_ip!(raw[:document_ip], resolution, final_resolution, raw[:final_url])
+      # impede um `302 -> http://127.0.0.1/` de virar payload de resposta
+      # (`resolve!` levanta Blocked se o destino resolver para IP privado).
+      revalidate_final_url!(raw[:final_url], uri)
+      # O Chrome re-resolve o hostname sozinho e pode conectar em QUALQUER IP
+      # público do conjunto (CDN multi-registro, dual-stack A/AAAA) — exigir o
+      # `ips.first` derrubava tráfego legítimo. O cheque pós-navegação garante
+      # só o que importa: o documento não pode ter vindo de IP
+      # privado/loopback/metadata (rebinding de verdade, TTL curto).
+      assert_document_ip!(raw[:document_ip], raw[:final_url])
 
       if bot_blocked?(raw, host)
         reason = raw[:title].to_s[0, 80]
@@ -251,21 +254,23 @@ module Fetcher
       SsrfGuard.resolve!(final)
     end
 
-    # `remote_ip` é o IP que o Chrome usou no documento principal; `expected` é
-    # o IP que a validação fixou (o do destino final quando houve redirect).
-    # Divergência = DNS alternou entre a validação e o connect — conteúdo
-    # privado renderizado com cara de URL pública. Sem o campo (CDP antigo,
-    # caminho Python) o cheque desliga com log, melhor que derrubar o caminho.
-    def assert_document_ip!(remote_ip, resolution, final_resolution, final_url)
+    # `remote_ip` é o IP que o Chrome usou no documento principal. A validação
+    # pré-fetch (`SsrfGuard.resolve!`) já garantiu que TODOS os IPs do host são
+    # públicos; o Chrome re-resolve sozinho e pode conectar em qualquer IP
+    # público do conjunto (CDN com vários registros, dual-stack A/AAAA) — por
+    # isso exigir igualdade com `resolution.ip` (= `ips.first`) derrubava
+    # tráfego legítimo. O que importa: o documento não pode ter vindo de IP
+    # privado/loopback/metadata (rebinding de verdade). Sem o campo (CDP
+    # antigo, caminho Python) o cheque desliga com log, melhor que derrubar o
+    # caminho.
+    def assert_document_ip!(remote_ip, final_url)
       return if remote_ip.to_s.empty?
-
-      expected = final_resolution ? final_resolution.ip : resolution.ip
-      return if remote_ip == expected
+      return unless SsrfGuard.ip_blocked?(remote_ip)
 
       Rails.logger.warn "[Fetcher::PageFetcher] rebinding em #{final_url}: " \
-                        "Chrome conectou em #{remote_ip}, validação fixou #{expected}"
+                        "Chrome conectou em IP bloqueado/privado #{remote_ip}"
       raise SsrfGuard::Blocked.new(
-        "DNS rebinding detectado em #{final_url}: Chrome conectou em #{remote_ip}, validação fixou #{expected}"
+        "DNS rebinding detectado em #{final_url}: Chrome conectou em IP bloqueado/privado #{remote_ip}"
       )
     end
 

@@ -34,9 +34,10 @@ module Fetcher
         # host para constantes públicas (old.reddit.com, x.com), mas nada no
         # código garantia isso — uma URL privada passada aqui iria direto ao
         # `go_to`, que re-resolve o hostname sozinho. Validar ANTES (inclusive
-        # do lookup de cookie) fecha a porta, e `resolution.ip` é o alvo do
-        # cheque de rebinding pós-navegação.
-        resolution = SsrfGuard.resolve!(url.to_s)
+        # do lookup de cookie) fecha a porta — `resolve!` levanta Blocked se o
+        # host for privado; o cheque pós-navegação garante que o Chrome não
+        # conectou em IP bloqueado (rebinding).
+        SsrfGuard.resolve!(url.to_s)
         # Levanta `CookieJar::Expired` nomeando o domínio quando não há sessão em
         # fonte nenhuma — antes de gastar browser.
         cookies, origem = SessionCookies.for(host)
@@ -51,7 +52,7 @@ module Fetcher
             # Assinante ANTES do go_to: é o que captura o remoteIPAddress do
             # documento principal, para o cheque de rebinding abaixo.
             remote_ip = RebindingGuard.capture_document_remote_ip(page) { page.go_to(uri.to_s) }
-            assert_document_ip!(remote_ip, resolution, uri.to_s)
+            assert_document_ip!(remote_ip, uri.to_s)
             resultado = yield page
             # O contexto isolado é descartado no `ensure`, e com ele o que o
             # servidor rotacionou durante a visita. Sem gravar de volta, a sessão
@@ -69,13 +70,19 @@ module Fetcher
 
       private
 
-      # O `go_to` re-resolve o hostname; se o documento principal veio de um IP
-      # diferente do que a validação fixou, o DNS alternou no meio (rebinding).
-      def assert_document_ip!(remote_ip, resolution, url)
-        return if remote_ip.to_s.empty? || remote_ip == resolution.ip
+      # O `go_to` re-resolve o hostname sozinho. A validação pré-navegação
+      # (`SsrfGuard.resolve!`) já garantiu que TODOS os IPs do host são
+      # públicos, mas o Chrome pode conectar em qualquer IP público do conjunto
+      # (CDN multi-registro, dual-stack A/AAAA) — exigir igualdade com
+      # `resolution.ip` (= `ips.first`) derrubava tráfego legítimo. O que
+      # importa: o documento principal não pode ter vindo de IP
+      # privado/loopback/metadata (rebinding de verdade).
+      def assert_document_ip!(remote_ip, url)
+        return if remote_ip.to_s.empty?
+        return unless SsrfGuard.ip_blocked?(remote_ip)
 
         raise SsrfGuard::Blocked.new(
-          "DNS rebinding detectado em #{url}: Chrome conectou em #{remote_ip}, validação fixou #{resolution.ip}"
+          "DNS rebinding detectado em #{url}: Chrome conectou em IP bloqueado/privado #{remote_ip}"
         )
       end
 

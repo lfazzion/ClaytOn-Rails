@@ -143,7 +143,7 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     assert_nil @page.visitado
   end
 
-  test "documento que veio de IP diferente do validado levanta Blocked (DNS rebinding)" do
+  test "documento que veio de IP privado levanta Blocked (DNS rebinding)" do
     @page = FakePage.new(document_remote_ip: "10.0.0.1")
     @context = FakeContext.new(@page)
     Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
@@ -153,6 +153,28 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     end
 
     assert_match(/rebinding/i, erro.message)
+  end
+
+  test "documento que veio de loopback (127.0.0.1) levanta Blocked mesmo com outro IP público no conjunto" do
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["93.184.216.34", "1.1.1.1"])
+    @page = FakePage.new(document_remote_ip: "127.0.0.1")
+    @context = FakeContext.new(@page)
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
+
+    erro = assert_raises(Fetcher::SsrfGuard::Blocked) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+
+    assert_match(/127\.0\.0\.1/, erro.message)
+  end
+
+  test "documento que veio de IP público do conjunto (não o primeiro) passa — CDN/dual-stack" do
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["93.184.216.34", "1.1.1.1"])
+    @page = FakePage.new(document_remote_ip: "1.1.1.1")
+    @context = FakeContext.new(@page)
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
+
+    assert_equal :ok, Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
   end
 
   test "documento que veio do IP validado passa" do
