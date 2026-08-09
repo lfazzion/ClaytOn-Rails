@@ -13,8 +13,8 @@ class Phase3InfrastructureTest < ActiveSupport::TestCase
 
   test 'all Phase 3 LLM clients should exist' do
     assert defined?(Llm::BaseClient), 'Llm::BaseClient not found'
-    assert defined?(Llm::GeminiClient), 'Llm::GeminiClient not found'
-    assert defined?(Llm::GemmaClient), 'Llm::GemmaClient not found'
+    assert defined?(Llm::GeminiBackgroundClient), 'Llm::GeminiBackgroundClient not found'
+    assert defined?(Llm::GeminiInteractiveClient), 'Llm::GeminiInteractiveClient not found'
     assert defined?(Llm::OpenrouterClient), 'Llm::OpenrouterClient not found'
     assert defined?(Llm::PromptLoader), 'Llm::PromptLoader not found'
   end
@@ -74,8 +74,8 @@ class Phase3InfrastructureTest < ActiveSupport::TestCase
     content = File.read(Rails.root.join('config/initializers/scraping_modules.rb'))
 
     assert_includes content, 'llm/base_client'
-    assert_includes content, 'llm/gemini_client'
-    assert_includes content, 'llm/gemma_client'
+    assert_includes content, 'llm/gemini_background_client'
+    assert_includes content, 'llm/gemini_interactive_client'
     assert_includes content, 'llm/openrouter_client'
     assert_includes content, 'llm/prompt_loader'
   end
