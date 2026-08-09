@@ -12,7 +12,10 @@ A estrutura de `test/` espelha `app/`:
 - `test/scraping/` → testa scraping
 - `test/connectors/` → testa chrome_ws_connector
 - `test/setup/` → testa infraestrutura (initializer, SQLite, etc.)
-- `test/docker/` → testa configuração Docker
+- `test/docker/` → testa configuração Docker (compose e Dockerfiles)
+- `test/scripts/python/` → testa os scripts do sidecar rodando-os como processo,
+  com um módulo falso (`camoufox`, etc.) no `PYTHONPATH`. Dublar só a ponte Ruby
+  deixa o script livre para quebrar sem nenhum teste ficar vermelho
 
 ## Comandos (sempre dockerizado)
 

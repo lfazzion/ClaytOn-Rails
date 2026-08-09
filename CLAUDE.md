@@ -16,31 +16,31 @@ All commands run from the project root and are always Dockerized.
 
 ```bash
 # Start all services
-docker-compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml up -d
 
 # Build images
-docker-compose -f docker/docker-compose.yml build
+docker compose -f docker/docker-compose.yml build
 
 # Run all tests
-docker-compose -f docker/docker-compose.yml run --rm test
+docker compose -f docker/docker-compose.yml run --rm test
 
 # Run a single test file
-docker-compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb
+docker compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb
 
-# Run a single test by name
-docker-compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb -n "/test_name_pattern/"
+# Run a single test by name (Minitest converte o nome para underscore: "faz algo" → faz_algo)
+docker compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb -n "/test_name_pattern/"
 
 # Rails console
-docker-compose -f docker/docker-compose.yml exec app bin/rails console
+docker compose -f docker/docker-compose.yml exec app bin/rails console
 
 # Run migrations
-docker-compose -f docker/docker-compose.yml exec app bin/rails db:migrate
+docker compose -f docker/docker-compose.yml exec app bin/rails db:migrate
 
 # Check migration status
-docker-compose -f docker/docker-compose.yml exec app bin/rails db:migrate:status
+docker compose -f docker/docker-compose.yml exec app bin/rails db:migrate:status
 
-# Verify Ruby syntax (run for each modified .rb file)
-ruby -cw <file>
+# Verify Ruby syntax (run for each modified .rb file) — não há Ruby no host, roda no container
+docker compose -f docker/docker-compose.yml run --rm --entrypoint ruby test -cw <file>
 
 # Health checks
 curl http://localhost:3000/health
@@ -121,8 +121,8 @@ docs/
 
 A task is complete only when ALL are true:
 
-1. `docker-compose -f docker/docker-compose.yml run --rm test` → 0 failures, 0 errors
-2. `ruby -cw <file>` passes for each modified `.rb` file
+1. `docker compose -f docker/docker-compose.yml run --rm test` → 0 failures, 0 errors
+2. `docker compose -f docker/docker-compose.yml run --rm --entrypoint ruby test -cw <file>` passes for each modified `.rb` file
 3. Migrations run cleanly (if applicable)
 4. New code has a corresponding test mirroring the `app/` or `lib/` structure
 5. `docs/MEMORY.md` updated if an architectural decision was made
