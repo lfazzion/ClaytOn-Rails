@@ -10,6 +10,11 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-09]** Correção de documentação (PR3, revisão): a afirmação da
+  entrada de 2026-03-23 de que as sessões vivem "em memória com TTL 30min via
+  `ChatSessionManager`" ficou FALSA quando as conversas passaram a viver no
+  SQLite: o TTL de 30min só despeja o objeto quente do cache; a conversa
+  persiste no banco e a fronteira entre conversas é o comando `/new`.
 - **[2026-03-30]** Deploy hardening (Propostas 1-3: `chore/deploy-hardening`).
   - `set -Eeuo pipefail` em deploy.sh e recover-failure.sh (ERR trap propaga para rollback)
   - Healthcheck nativo docker-compose: `curl /up` (app) + `curl /json/version` (chrome)
@@ -50,7 +55,9 @@
 - **[2026-03-23]** Fase 5 implementada: UI Autônoma e Chatbot Tool Caller.
   - 16 tools em `app/tools/` (herdam de `RubyLLM::Tool` via `ToolBase`)
   - Discord Bot como serviço dedicado no compose (`discord-bot`)
-  - Sessões em memória com TTL 30min via `ChatSessionManager`
+  - Sessões com TTL 30min via `ChatSessionManager` (corrigido em 2026-08-09: o
+    TTL só despeja o objeto quente; a conversa vive no SQLite e a fronteira
+    entre conversas é o `/new`, não o TTL)
   - Digest semanal e de sexta via `WeeklyDigestJob` e `FridayIdeationJob`
   - Canal de digest criado automaticamente se não existir
   - 371 testes passando (0 failures, 0 errors)
@@ -155,6 +162,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
 | 2026-08-09 | Decisão de modelo único Gemma 4 31B (`gemma_client.rb`) substituída: split Gemini background/interactive + cadeia nous → poolside → openrouter. | Padrões Ratificados |
+| 2026-08-09 | Correção de documentação: o TTL 30min do `ChatSessionManager` só despeja o objeto quente — conversas vivem no SQLite e a fronteira entre conversas é o `/new` (entrada de 2026-03-23 corrigida). | Contexto Ativo |
 | 2026-03-30 | Atualização de arquitetura OCI Free Tier: Substituído o `/swapfile` (disco físico) por gerador de memória comprimida `zRAM`, minimizando o esgotamento de IOPS no boot volume. Ajustado swappiness de 10 para 100. Adição de parâmetros de cifra (Ciphers/MACS) estritos ao hardening SSH. | Contexto Ativo, Padrões Ratificados |
 | 2026-03-28 | Correções deploy.sh: rollback com git reset --hard (em vez de git checkout), snapshot de Docker image IDs pré-deploy para possibility de rollback completo de containers. | Contexto Ativo |
 | 2026-03-28 | Correções review PR #10: oracle-cloud-setup.sh — propagar $DOCKER_USER para limits.d (Phase 8) e chown (Phase 9), sshd -t antes de restart SSH, iptables idempotente com -C check, fstab append com grep -qF. ERROS.md checklist atualizada. | Contexto Ativo, Lições Aprendidas |

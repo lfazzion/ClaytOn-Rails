@@ -25,8 +25,9 @@ class ConversationCompactor
   FALLBACK_MAX_CHARS = 8_000
 
   # Usado SÓ quando a cadeia está vazia (nenhuma chave de LLM configurada).
-  # Não é o resumidor "normal" — ver `summary_link`. Mantido como constante
-  # pública (nome e papel de fallback) porque é referenciado em teste.
+  # Não é o resumidor "normal" — ver `summary_link`. Constante pública, e não
+  # string inline, porque `summary_model_id` a usa como fallback REAL de
+  # produção quando `summary_link` é nil — não é referência só de teste.
   FALLBACK_SUMMARY_MODEL = "openrouter/free"
 
   # Fração segura da janela do PRÓPRIO resumidor para o transcript de entrada.
@@ -108,9 +109,8 @@ class ConversationCompactor
     def needs_compaction?(conversation, model_id:, provider: nil)
       window = window_for(model_id, provider: provider)
       limite_tokens = (window * threshold).to_i
-      mensagens_vivas = live_messages(conversation)
-      ocupacao = estimated_tokens(conversation.summary.to_s) + estimated_tokens(mensagens_vivas.map(&:llm_content))
-      contagem = mensagens_vivas.size
+      ocupacao = live_tokens(conversation)
+      contagem = live_messages(conversation).size
       limite_mensagens = ConversationRehydrator.rehydrate_limit
 
       gatilho_tokens = ocupacao > limite_tokens

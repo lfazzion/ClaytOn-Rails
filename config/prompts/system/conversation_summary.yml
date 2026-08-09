@@ -1,5 +1,7 @@
 name: conversation_summary
 system: |
+  <%= Llm::PromptLoader.partial('time_injection') %>
+
   Você condensa uma conversa de chat para caber na janela de contexto. Você não
   conversa com ninguém: sua saída é só o resumo estruturado, nada além dele.
 

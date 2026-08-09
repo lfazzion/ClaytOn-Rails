@@ -233,8 +233,11 @@ class DiscordBotService
     end
 
     def pagina_inexistente(scope)
-      total = ChatSessionManager.page(scope, 1)&.total_pages || 1
-      plural = total == 1 ? "Só existe 1 página." : "Existem #{total} páginas."
+      # `sessions_total` é COUNT barato; não reexecuta a listagem inteira só
+      # para saber quantas páginas existem (o erro já veio de uma `page` que
+      # rodou `sessions`).
+      total_paginas = [(ChatSessionManager.sessions_total(scope).to_f / ChatSessionManager.page_size).ceil, 1].max
+      plural = total_paginas == 1 ? "Só existe 1 página." : "Existem #{total_paginas} páginas."
       "Essa página não existe. #{plural}"
     end
 
@@ -245,7 +248,7 @@ class DiscordBotService
         titulo = conversation.title.presence || "(sem título)"
         marca = conversation.active ? " *(em andamento)*" : ""
         "**#{pagina.first_index + i}.** #{titulo}#{marca} — " \
-          "#{time_ago(conversation.last_active_at)}, #{conversation.chat_messages.count} mensagens"
+          "#{time_ago(conversation.last_active_at)}, #{conversation.msg_count} mensagens"
       end.join("\n")
     end
 
@@ -259,7 +262,9 @@ class DiscordBotService
       resultado = ChatSessionManager.resume!(scope, index)
       case resultado
       when :fora_da_faixa
-        total = ChatSessionManager.sessions(scope).size
+        # `sessions_total` é COUNT barato; resume! já rodou a listagem inteira
+        # para achar o alvo — não reexecuta `sessions` só para o tamanho.
+        total = ChatSessionManager.sessions_total(scope)
         "Não existe conversa #{index}. A lista vai até #{total}."
       when nil
         "Não encontrei nenhuma conversa por aqui ainda. É só começar a falar."
@@ -296,7 +301,7 @@ class DiscordBotService
     def previa_de_exclusao(scope, alvo, index)
       titulo = alvo.title.presence || "(sem título)"
       sala = scope.shared ? " Esta conversa é da sala inteira." : ""
-      "Apagar **#{titulo}**? #{alvo.chat_messages.count} mensagens, última atividade " \
+      "Apagar **#{titulo}**? #{alvo.msg_count} mensagens, última atividade " \
         "#{time_ago(alvo.last_active_at)}.#{sala}\n" \
         "Isso não tem volta. Confirme com `!delete #{index} sim` — ou, pelo menu `/`, " \
         "repita `/delete` com o número #{index} e marque a opção **confirmar**."

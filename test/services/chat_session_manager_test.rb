@@ -65,6 +65,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     conv = Conversation.active_for(@scope.key)
     assert_not_nil conv
     assert_equal 0, conv.chat_messages.count
+    assert_nil conv.title, "titulo so e gravado junto da resposta; em branco nao existe pergunta"
     assert_nil ChatSessionManager.instance_variable_get(:@sessions)[@scope.key]
   end
 
@@ -183,5 +184,72 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     texto = ChatSessionManager.model_identity(@link)
     assert_includes texto, "<modelo_em_uso: openrouter/free>"
     assert_includes texto, "<rota_em_uso: openrouter>"
+  end
+
+  test "ask despeja o cache e nao deixa user orfao quando a persistencia falha" do
+    stub_chat("resposta")
+    # Falha na ULTIMA etapa da transacao (touch_activity!) com as duas
+    # mensagens ja inseridas: o rollback precisa desfazer o `user` e o
+    # `assistant`, e o rescue precisa despejar o cache quente — sem o despejo,
+    # a reidratacao leria do banco a pergunta sem resposta e duplicaria a fala.
+    Conversation.any_instance.stubs(:touch_activity!).raises(ActiveRecord::StatementInvalid, "SQLITE_BUSY")
+
+    assert_raises(ActiveRecord::StatementInvalid) do
+      ChatSessionManager.ask(scope: @scope, content: "oi bot", user_id: "101", username: "joao")
+    end
+
+    conv = Conversation.active_for(@scope.key)
+    assert_not_nil conv
+    assert_equal 0, conv.chat_messages.count, "rollback nao pode deixar user orfao"
+    assert_nil conv.reload.title, "titulo (movido para dentro da transacao) tambem volta"
+    assert_nil ChatSessionManager.instance_variable_get(:@sessions)[@scope.key], "cache quente despejado"
+  end
+
+  test "sessions carrega msg_count na mesma consulta e inclui conversas sem mensagem" do
+    com_msg = Conversation.create!(scope: @scope.key, discord_channel_id: @scope.channel_id, active: false, last_active_at: 2.hours.ago)
+    ChatMessage.create!(conversation: com_msg, role: "user", content: "m1", discord_user_id: @scope.user_id, discord_username: "joao")
+    sem_msg = Conversation.create!(scope: @scope.key, discord_channel_id: @scope.channel_id, active: true, last_active_at: 1.hour.ago)
+
+    lista = ChatSessionManager.sessions(@scope)
+
+    assert_equal [sem_msg, com_msg], lista
+    assert_equal 0, lista.first.msg_count
+    assert_equal 1, lista.last.msg_count
+  end
+
+  test "sessions_total conta as conversas do escopo" do
+    Conversation.create!(scope: @scope.key, discord_channel_id: @scope.channel_id, active: false, last_active_at: 2.hours.ago)
+    Conversation.create!(scope: @scope.key, discord_channel_id: @scope.channel_id, active: true, last_active_at: 1.hour.ago)
+
+    assert_equal 2, ChatSessionManager.sessions_total(@scope)
+  end
+
+  test "sessions_total respeita o teto de memoria da listagem" do
+    ChatSessionManager.stubs(:sessions_max).returns(1)
+    Conversation.create!(scope: @scope.key, discord_channel_id: @scope.channel_id, active: false, last_active_at: 2.hours.ago)
+    Conversation.create!(scope: @scope.key, discord_channel_id: @scope.channel_id, active: true, last_active_at: 1.hour.ago)
+
+    assert_equal 1, ChatSessionManager.sessions_total(@scope)
+  end
+
+  test "with_scope_lock revalida a identidade do mutex depois de um prune" do
+    mutexes = ChatSessionManager.instance_variable_get(:@mutexes)
+    atual = Mutex.new
+    mutexes["raced_key"] = atual
+    removido = Mutex.new
+
+    # Cenario real da corrida: entre scope_mutex devolver o mutex e o
+    # synchronize, o prune removeu o mutex e outra thread criou outro. A
+    # primeira chamada devolve o removido; o loop precisa perceber (identidade
+    # divergente sob o global) e tentar de novo com o registrado — exatamente
+    # 2 chamadas: nem 1 (retry nao aconteceu) nem mais (loop cego).
+    # (Mocha 3.1.0: `returns` com bloco devolve o Proc literal, por isso os
+    # valores consecutivos são passados explicitamente.)
+    ChatSessionManager.expects(:scope_mutex).with("raced_key").times(2)
+                      .returns(removido, atual)
+
+    resultado = ChatSessionManager.send(:with_scope_lock, "raced_key") { :bloco_executado }
+
+    assert_equal :bloco_executado, resultado
   end
 end
