@@ -72,7 +72,7 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_includes env_files, "./.env.sidecar",
                     "sidecar precisa do env_file dedicado"
     env_files.each do |path|
-      assert_match(/\.env\.[^.]+/, File.basename(path),
+      assert_match(/\.env(\.|\z)/, File.basename(path),
                    "#{path} não casa com o padrão `.env.*` do .gitignore e seria commitado")
     end
   end
@@ -105,7 +105,7 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_includes env_files, "./.env.searxng",
                     "searxng precisa do env_file dedicado"
     env_files.each do |path|
-      assert_match(/\.env\.[^.]+/, File.basename(path),
+      assert_match(/\.env(\.|\z)/, File.basename(path),
                    "#{path} não casa com o padrão `.env.*` do .gitignore e seria commitado")
     end
   end
@@ -253,6 +253,14 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_includes texto, "DISCORD_SESSIONS_PAGE_SIZE"
     assert_includes texto, "DISCORD_SESSIONS_MAX"
     assert_not_includes texto, "DISCORD_SESSIONS_LIMIT"
+  end
+
+  test "discord-bot declara as variáveis de raciocínio da cadeia de modelos" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    env = config["services"]["discord-bot"]["environment"]
+
+    assert_equal "${DISCORD_EFFORT_NOUS:-none}", env["DISCORD_EFFORT_NOUS"]
+    assert_equal "${DISCORD_POOLSIDE_THINKING:-}", env["DISCORD_POOLSIDE_THINKING"]
   end
 
   test "as chaves de API NÃO aparecem no bloco environment de nenhum serviço" do

@@ -7,13 +7,14 @@ Infraestrutura de containers do projeto.
 | Arquivo | Descrição |
 |---|---|
 | `Dockerfile` | Build multi-stage da imagem Rails (build + runtime) |
-| `Dockerfile.python` | Imagem do sidecar `python-scraper`; CMD roda `scripts/python/server.py` (API HTTP) |
+| `Dockerfile.python` | Imagem do sidecar `python-scraper`; CMD roda `scripts/python/server.py` (API HTTP — o `server.py` e o CMD novo chegam junto do PR de scraping) |
 | `docker-compose.yml` | Orquestração de `app`, `jobs`, `discord-bot`, `chrome`, `python-scraper`, `searxng` |
 
 ### `Dockerfile.python`: dois passos que existem só pelo camoufox
 
 O camoufox é Firefox, não Chromium — `playwright install chromium --with-deps`
-não cobre as duas necessidades abaixo, e sem elas o engine nunca sobe:
+não cobre as duas necessidades abaixo, e sem elas o engine nunca sobe.
+(As duas linhas abaixo descrevem o `Dockerfile.python` que chega junto do PR de scraping; o arquivo atual ainda não as tem.)
 
 - **`libgtk-3-0` no `apt-get`** — `libmozgtk.so` linka `libgtk-3.so.0` e
   `libgdk-3.so.0`; sem elas, `Couldn't load XPCOM`. Medido com `ldd` em
@@ -31,9 +32,9 @@ Detalhes e o contrato de saída do script: `scripts/python/CONTEXT.md`.
 
 ## Publicação de Portas
 
-`app` publica em `127.0.0.1:3000` — `/internal/extract` recebe URLs de conteúdo
-não-confiável e não pode ficar em `0.0.0.0` com o firewall do host como única
-camada. `searxng` idem (`127.0.0.1:8888`). O sidecar `python-scraper` não publica
+`app` publica em `127.0.0.1:3000` — `/internal/extract` (rota que chega junto
+do PR de fetcher/mcp) recebe URLs de conteúdo não-confiável e não pode ficar em
+`0.0.0.0` com o firewall do host como única camada. `searxng` idem (`127.0.0.1:8888`). O sidecar `python-scraper` não publica
 porta nenhuma: só é alcançável pela rede `internal`.
 
 **`chrome` NÃO publica porta nenhuma**, e isto é verificado, não prometido:
