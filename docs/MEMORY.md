@@ -82,6 +82,7 @@
 | 2026-03-14 | Headless Rails (sem ActionView/Sprockets) | API-only, sem frontend server-rendered |
 | 2026-03-14 | Jobs idempotentes com dedup window de 2h | Safe to re-run sem duplicatas |
 | 2026-03-13 | Gemini Flash como modelo primário de análise | Custo-benefício vs. capacidade — pesquisa em `docs/comparativo_IA_gemini_gemma.md` |
+| 2026-08-09 | Execução Python via sidecar HTTP autenticado (8080) | Scraping evasivo (nodriver/camoufox/curl_cffi) migrado de `Open3` in-process para `POST /run` no container `python-scraper`, com auth Bearer `PYTHON_SCRAPER_TOKEN`. |
 
 ---
 
@@ -107,6 +108,7 @@
 
 ---
 
+- Sidecar Python autenticado: o `PYTHON_SCRAPER_TOKEN` chega via `docker/.env.sidecar` (env_file do compose — PR #20 deps/infra; exemplo em `docker/.env.sidecar.example`). Sem o arquivo o `server.py` recusa subir (fail-closed, intencional).
 ## Decisões de Arquitetura Pendentes
 
 > Questões abertas aguardando validação do usuário ou mais investigação.
@@ -164,3 +166,4 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | 2026-03-29 | Correções pós-audit: deploy.sh (A1-A7) + oracle-cloud-setup.sh (B7,B9,B11-B14) | Contexto Ativo |
 | 2026-03-30 | Deploy hardening (Propostas 1-3): set -Eeuo pipefail, healthcheck nativo docker-compose, image tagging com IMAGE_TAG, --wait em vez de health check loop, rollback sem rebuild, FASE 10.5 systemd timer cleanup. | Contexto Ativo |
 | 2026-03-30 | Correções script↔guia: KexAlgorithms pós-quântico (sntrup761x25519) no SSH, tabela de fases 9→10 com NTP/Chrony (FASE 7), Fail2Ban dual jail, troubleshooting zRAM. | Contexto Ativo |
+| 2026-08-09 | Decisão arquitetural registrada: execução Python via sidecar HTTP autenticado (8080, `PYTHON_SCRAPER_TOKEN`) em vez de `Open3` in-process. | Padrões Ratificados |

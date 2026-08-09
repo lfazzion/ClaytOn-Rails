@@ -7,7 +7,7 @@ Infraestrutura de containers do projeto.
 | Arquivo | Descrição |
 |---|---|
 | `Dockerfile` | Build multi-stage da imagem Rails (build + runtime) |
-| `Dockerfile.python` | Imagem do sidecar `python-scraper`; CMD roda `scripts/python/server.py` (API HTTP — o `server.py` e o CMD novo chegam junto do PR de scraping) |
+| `Dockerfile.python` | Imagem do sidecar `python-scraper`: serviço HTTP de scraping com auth Bearer (`PYTHON_SCRAPER_TOKEN`) na 8080 |
 | `docker-compose.yml` | Orquestração de `app`, `jobs`, `discord-bot`, `chrome`, `python-scraper`, `searxng` |
 
 ### `Dockerfile.python`: dois passos que existem só pelo camoufox

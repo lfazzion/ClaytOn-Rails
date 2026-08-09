@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-require 'open3'
 require 'json'
-require 'timeout'
+require_relative 'sidecar_client'
 
 module ScrapingServices
   class CurlImpersonateClient
     SCRIPT_PATH = Rails.root.join('scripts/python/curl_impersonate.py')
+    TIMEOUT = SidecarClient::DEFAULT_TIMEOUT
 
     IMPERSONATE_PROFILES = %i[chrome safari firefox chrome_android edge].freeze
 
@@ -28,26 +28,30 @@ module ScrapingServices
     private
 
     def request(url, method:, headers: {}, body: nil)
-      command = build_command(url, method: method, headers: headers, body: body)
-      execute(command)
+      args = build_command(url, method: method, headers: headers, body: body)
+      execute(File.basename(SCRIPT_PATH.to_s), args)
     end
 
+    # Monta o vetor de argumentos que o sidecar recebe (a partir da URL). Sem o
+    # prefixo morto 'python3 -u SCRIPT_PATH': o sidecar já roda o script pelo
+    # nome, e este vetor É o contrato real (o split_command foi removido — os
+    # testes afirmam exatamente sobre estes elementos).
     def build_command(url, method:, headers: {}, body: nil)
-      cmd = ['python3', '-u', SCRIPT_PATH.to_s, url, '--method', method, '--profile', @profile.to_s]
+      args = [url, '--method', method, '--profile', @profile.to_s]
 
-      cmd += ['--proxy', @proxy] if @proxy
+      args += ['--proxy', @proxy] if @proxy
 
       headers.each do |key, val|
-        cmd += ['--header', "#{key}:#{val}"]
+        args += ['--header', "#{key}:#{val}"]
       end
 
-      cmd += ['--body', body] if body
+      args += ['--body', body] if body
 
-      cmd
+      args
     end
 
-    def execute(command)
-      stdout, stderr, status = Timeout.timeout(60) { Open3.capture3(*command) }
+    def execute(script, args)
+      stdout, stderr, status = SidecarClient.capture(script: script, args: args, timeout: TIMEOUT)
 
       if rate_limit?(stdout, stderr)
         raise RateLimitHandler.handle_error(

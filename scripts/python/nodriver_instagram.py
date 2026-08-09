@@ -11,13 +11,15 @@ except ImportError:
     print(json.dumps({"error": "nodriver not installed"}), file=sys.stderr)
     sys.exit(1)
 
+import browser_binary
+
 
 async def scrape_profile(username, proxy=None):
     browser_args = []
     if proxy:
         browser_args.append(f"--proxy-server={proxy}")
 
-    browser = await uc.start(headless=True, browser_args=browser_args)
+    browser = await uc.start(**browser_binary.start_kwargs(browser_args))
 
     try:
         page = await browser.get(f"https://www.instagram.com/{username}/")
@@ -62,7 +64,7 @@ async def scrape_posts(username, limit=12, proxy=None):
     if proxy:
         browser_args.append(f"--proxy-server={proxy}")
 
-    browser = await uc.start(headless=True, browser_args=browser_args)
+    browser = await uc.start(**browser_binary.start_kwargs(browser_args))
 
     try:
         page = await browser.get(f"https://www.instagram.com/{username}/")
