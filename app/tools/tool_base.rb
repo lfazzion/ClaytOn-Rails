@@ -1,12 +1,43 @@
 # frozen_string_literal: true
 
 class ToolBase < RubyLLM::Tool
+  # Modelo inventa parâmetro — é fato permanente de tool calling, não acidente.
+  # Medido em 05/08: o chatbot chamou `page_fetch(url:, engine: "youtube", ...)`
+  # porque o prompt citava `engine` como campo da RESPOSTA e ele leu como
+  # entrada. Keyword desconhecida levanta `ArgumentError` na própria chamada,
+  # ANTES do corpo do método — então nem o `rescue` de dentro da tool pega, a
+  # exceção sobe e o usuário fica sem resposta útil.
+  #
+  # O filtro mora aqui, e não em cada tool, porque a falha vale para as 19.
   def execute(**kwargs)
     Rails.logger.info "[#{self.class.name}] chamado com #{kwargs.inspect}"
-    run(**kwargs)
+
+    aceitos, ignorados = split_params(kwargs)
+    if ignorados.any?
+      Rails.logger.warn "[#{self.class.name}] parâmetros desconhecidos ignorados: #{ignorados.keys.inspect}"
+    end
+
+    faltando = required_params - aceitos.keys
+    return error("faltou parâmetro obrigatório: #{faltando.join(', ')}") if faltando.any?
+
+    run(**aceitos)
   end
 
   private
+
+  # Uma tool que declara `**extras` assume a responsabilidade e recebe tudo.
+  def split_params(kwargs)
+    parametros = method(:run).parameters
+    return [kwargs, {}] if parametros.any? { |tipo, _| tipo == :keyrest }
+
+    nomes = parametros.filter_map { |tipo, nome| nome if %i[key keyreq].include?(tipo) }
+    aceitos, ignorados = kwargs.partition { |chave, _| nomes.include?(chave) }
+    [aceitos.to_h, ignorados.to_h]
+  end
+
+  def required_params
+    method(:run).parameters.filter_map { |tipo, nome| nome if tipo == :keyreq }
+  end
 
   def clamp(value, min, max)
     [[value.to_i, min].max, max].min

@@ -1,9 +1,11 @@
 # frozen_string_literal: true
 
 class UpcomingCatalogTool < ToolBase
-  description 'Lista itens de catálogo com lançamentos futuros. Para jogos, usar source="rawg" para resultados mais relevantes.'
+  description 'Lista, do catálogo JÁ COLETADO no banco local (TMDB/IGDB/AniList/RAWG), itens com ' \
+              'lançamento futuro — NÃO consulta essas APIs agora. Para jogos, use source="rawg": ' \
+              'mais completo para esse media_type que os demais.'
 
-  param :source, type: :string, desc: 'Fonte: tmdb, igdb, anilist, rawg. Para jogos usar rawg.', required: false
+  param :source, type: :string, desc: 'Fonte: tmdb, igdb, anilist ou rawg. Para jogos usar rawg.', required: false
   param :media_type, type: :string, desc: 'Tipo de mídia (movie/tv/game/anime)', required: false
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 10)', required: false
 
@@ -39,9 +41,10 @@ class UpcomingCatalogTool < ToolBase
 end
 
 class PopularCatalogTool < ToolBase
-  description 'Lista itens de catálogo mais populares'
+  description 'Lista, do catálogo JÁ COLETADO no banco local (TMDB/IGDB/AniList/RAWG), os itens mais ' \
+              'populares — NÃO consulta essas APIs agora.'
 
-  param :source, type: :string, desc: 'Fonte (tmdb/igdb/anilist)', required: false
+  param :source, type: :string, desc: 'Fonte: tmdb, igdb, anilist ou rawg', required: false
   param :media_type, type: :string, desc: 'Tipo de mídia (movie/tv/game/anime)', required: false
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 10)', required: false
 

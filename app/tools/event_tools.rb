@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
 class UpcomingEventsTool < ToolBase
-  description 'Lista eventos futuros'
+  description 'Lista eventos futuros JÁ CADASTRADOS no banco local deste projeto (coletados via RSS) ' \
+              '— NÃO busca evento novo na internet agora.'
 
   param :event_type, type: :string, desc: 'Tipo de evento (bgs/ccxp/anime_friends/other)', required: false
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 10)', required: false
