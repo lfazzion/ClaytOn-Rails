@@ -55,13 +55,14 @@ class ResearchScorerTest < ActiveSupport::TestCase
     alto  = { "title" => "React hooks em profundidade", "url" => "https://youtube.com/watch?v=1" }
     baixo = { "title" => "React hooks para iniciantes", "url" => "https://youtube.com/watch?v=2" }
 
-    Research::Scorer.stubs(:score).returns(0.504, 0.501)
+    # Stub POR ITEM (não sequencial): o alto tem o bruto maior mesmo entrando
+    # DEPOIS do baixo — aí o sort prova que reverte uma entrada desordenada.
+    Research::Scorer.stubs(:score).with(has_entry("title" => "React hooks em profundidade"), anything).returns(0.504)
+    Research::Scorer.stubs(:score).with(has_entry("title" => "React hooks para iniciantes"), anything).returns(0.501)
 
-    # Entrada na ordem contrária: o stub sequencial dá 0.504 ao primeiro item
-    # da lista (alto) e 0.501 ao segundo (baixo); o sort tem que reverter.
-    sorted = Research::Scorer.sort([alto, baixo], query: "react hooks")
+    sorted = Research::Scorer.sort([baixo, alto], query: "react hooks")
 
-    assert_equal "React hooks em profundidade", sorted.first["title"], "bruto maior vem primeiro"
+    assert_equal "React hooks em profundidade", sorted.first["title"], "bruto maior vem primeiro (entrada revertida)"
     assert_equal 0.5, sorted.first["relevance_score"]
     assert_equal 0.5, sorted.last["relevance_score"]
   end
