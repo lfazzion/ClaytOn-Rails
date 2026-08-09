@@ -28,37 +28,26 @@ module ScrapingServices
     private
 
     def request(url, method:, headers: {}, body: nil)
-      command = build_command(url, method: method, headers: headers, body: body)
-      script, args = split_command(command)
-      execute(script, args)
+      args = build_command(url, method: method, headers: headers, body: body)
+      execute(File.basename(SCRIPT_PATH.to_s), args)
     end
 
-    # Mantém o formato `cmd` (vetor com 'python3', '-u', SCRIPT_PATH, url, ...) por
-    # causa dos testes que fazem `assert_includes cmd, 'safari'` etc. — o que
-    # importa é o array de strings, não o executor. O `split_command` traduz
-    # para o par (script, args) que o SidecarClient espera.
+    # Monta o vetor de argumentos que o sidecar recebe (a partir da URL). Sem o
+    # prefixo morto 'python3 -u SCRIPT_PATH': o sidecar já roda o script pelo
+    # nome, e este vetor É o contrato real (o split_command foi removido — os
+    # testes afirmam exatamente sobre estes elementos).
     def build_command(url, method:, headers: {}, body: nil)
-      cmd = ['python3', '-u', SCRIPT_PATH.to_s, url, '--method', method, '--profile', @profile.to_s]
+      args = [url, '--method', method, '--profile', @profile.to_s]
 
-      cmd += ['--proxy', @proxy] if @proxy
+      args += ['--proxy', @proxy] if @proxy
 
       headers.each do |key, val|
-        cmd += ['--header', "#{key}:#{val}"]
+        args += ['--header', "#{key}:#{val}"]
       end
 
-      cmd += ['--body', body] if body
+      args += ['--body', body] if body
 
-      cmd
-    end
-
-    def split_command(cmd)
-      # O comando local era ['python3', '-u', SCRIPT_PATH, url, --opcoes...].
-      # O sidecar recebe só o nome do script python e os argumentos a partir do URL.
-      script = File.basename(SCRIPT_PATH.to_s)
-      # encontra o índice do URL (primeiro argumento que não é flag e não é o caminho)
-      url_index = cmd.index { |a| !a.start_with?('-') && a != SCRIPT_PATH.to_s && a != 'python3' && a != '-u' }
-      args = url_index ? cmd[(url_index)..] : []
-      [script, args]
+      args
     end
 
     def execute(script, args)

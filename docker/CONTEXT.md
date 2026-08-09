@@ -7,7 +7,7 @@ Infraestrutura de containers do projeto.
 | Arquivo | Descrição |
 |---|---|
 | `Dockerfile` | Build multi-stage da imagem Rails (build + runtime) |
-| `Dockerfile.python` | Imagem Python para scraping alternativo |
+| `Dockerfile.python` | Imagem do sidecar `python-scraper`: serviço HTTP de scraping com auth Bearer (`PYTHON_SCRAPER_TOKEN`) na 8080 |
 | `docker-compose.yml` | Orquestração dos 3 serviços: `app`, `jobs`, `chrome` |
 
 ## Como Usar

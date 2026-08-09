@@ -50,7 +50,9 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     assert_equal 'UCn8Szh52CH89yEOItjCI6iw', result[:channel_id]
     assert_equal 'TeGeCe', result[:title]
     assert_equal 230_000, result[:subscriber_count]
-    assert_equal 2, result[:video_count]
+    # playlist_count da raiz conta ABAS (videos/shorts/streams), não vídeos:
+    # parse_metadata não pode preenchê-lo — só total_video_count (sob demanda).
+    assert_nil result[:video_count]
     assert_equal 'https://example.com/thumb_large.jpg', result[:thumbnail_url], 'deve selecionar o thumbnail de maior resolução'
     assert_equal result[:thumbnail_url], result[:avatar_url]
   end

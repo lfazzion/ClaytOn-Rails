@@ -36,7 +36,8 @@ module ScrapingServices
 
       # Busca uma URL arbitrária via Nodriver (fallback Python para domínios hard-blocked).
       # Retorna hash { title:, url:, content:, html_bytes: } ou nil em falha.
-      # Chamado por `Fetcher::PageFetcher` quando host está em `config/hard_domains.yml`.
+      # PLANEJADO, desligado neste branch: o chamador (`Fetcher::PageFetcher` +
+      # `config/hard_domains.yml`) é de outro PR e ainda não existe aqui.
       def fetch_page(url, proxy: nil)
         args = [url]
         args += ['--proxy', proxy] if proxy

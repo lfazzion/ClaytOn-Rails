@@ -13,10 +13,10 @@ module ScrapingServices
 
         return nil unless status.success? && output.strip.present?
 
-        metadata = parse_metadata(JSON.parse(output.strip))
-        total = total_video_count(channel_url, proxy)
-        metadata[:video_count] = total if total&.positive?
-        metadata
+        # video_count fica nil aqui: a contagem real enumera todas as entradas
+        # das 3 abas (--flat-playlist; medido 72,5s p/ 5259 vídeos) e ficou sob
+        # demanda — quem precisar chama `total_video_count` explicitamente.
+        parse_metadata(JSON.parse(output.strip))
       rescue JSON::ParserError => e
         Rails.logger.error "[YoutubeScraperService] JSON inválido ao extrair metadata: #{e.message}"
         nil
@@ -35,6 +35,18 @@ module ScrapingServices
       rescue StandardError => e
         Rails.logger.error "[YoutubeScraperService] Erro ao extrair videos detalhados: #{e.message}"
         extract_videos_flat(channel_url, limit: limit, proxy: proxy)
+      end
+
+      # Soma o total de vídeos do canal pelas abas /videos, /shorts e /streams.
+      # NÃO é chamado por extract_channel_metadata: cada aba é enumerada por
+      # inteiro (--flat-playlist --dump-single-json), medido 72,5s para 5259
+      # entradas em uma única aba — caro demais para rodar em toda extração.
+      # Público para chamadas sob demanda; o chamador arca com o custo.
+      def total_video_count(channel_url, proxy)
+        counts = TABS.map { |tab| count_tab(channel_url, tab, proxy) }.compact
+        return nil if counts.empty?
+
+        counts.sum
       end
 
       private
@@ -121,23 +133,17 @@ module ScrapingServices
           title:            data['channel'] || data['uploader'] || data['playlist_channel'] || data['playlist_uploader'] || data['title'],
           description:      data['description'],
           subscriber_count: data['channel_follower_count'],
-          video_count:      data['playlist_count'],
+          # playlist_count da raiz conta ABAS (ex.: 3), não vídeos; só
+          # total_video_count (sob demanda) preenche video_count.
+          video_count:      nil,
           thumbnail_url:    thumb,
           avatar_url:       thumb
         }
       end
 
       # `playlist_count` da raiz do canal conta abas (videos, shorts, streams),
-      # não vídeos. Para refletir o total que aparece no header do YouTube
-      # (ex.: "152 vídeos") somamos o playlist_count de cada aba via --flat-playlist.
+      # não vídeos. A contagem real por aba é feita por count_tab (sob demanda).
       TABS = %w[videos shorts streams].freeze
-
-      def total_video_count(channel_url, proxy)
-        counts = TABS.map { |tab| count_tab(channel_url, tab, proxy) }.compact
-        return nil if counts.empty?
-
-        counts.sum
-      end
 
       def count_tab(channel_url, tab, proxy)
         cmd = ['yt-dlp', '--flat-playlist', '--dump-single-json', '--skip-download', localize("#{channel_url}/#{tab}", persist: true)]

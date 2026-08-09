@@ -37,8 +37,16 @@ module ScrapingServices
       def capture(script:, args: [], timeout: DEFAULT_TIMEOUT)
         response = post_run(script: script, args: args, timeout: timeout)
         unpack(script, response)
+      rescue Net::OpenTimeout
+        # Sidecar que não aceita conexão é INDISPONIBILIDADE, não timeout de
+        # script: sobe em CONNECT_TIMEOUT (5s) e seria logado como "timeout de
+        # 190s" se caísse no rescue Timeout::Error abaixo (Net::OpenTimeout é
+        # subclasse de Timeout::Error). Trata como falha de scraping.
+        Rails.logger.error "[SidecarClient] #{script} indisponível (Net::OpenTimeout após #{CONNECT_TIMEOUT}s)"
+        failure("sidecar indisponível (não aceitou conexão após #{CONNECT_TIMEOUT}s)")
       rescue Timeout::Error
-        # Propaga: as jobs distinguem timeout (retry) de falha de scraping (nil).
+        # Timeout autoritativo (script estourou o teto do sidecar): propaga.
+        # Nenhuma job resgata Timeout::Error hoje — quem chamar decide.
         Rails.logger.error "[SidecarClient] timeout de #{timeout + RESPONSE_MARGIN}s em #{script}"
         raise
       rescue StandardError => e

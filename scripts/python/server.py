@@ -22,6 +22,7 @@ Stdlib apenas — sem framework, sem dependência nova na imagem.
 import hmac
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -114,32 +115,43 @@ def run_script(script, args, timeout):
     if not _slots.acquire(timeout=ACQUIRE_TIMEOUT):
         raise BadRequest("sidecar saturado (%d execuções simultâneas)" % MAX_CONCURRENCY, status=503)
     try:
-        completed = subprocess.run(
+        # Popen + start_new_session: o timeout do subprocess.run mata só o filho
+        # direto e o navegador (Firefox/Chromium) sobrevive reparentado. Com uma
+        # sessão própria, o TimeoutExpired derruba o grupo inteiro via killpg.
+        proc = subprocess.Popen(
             command,
-            capture_output=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=SCRIPTS_DIR,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return {
-            "exit_code": None,
-            "timed_out": True,
-            "stdout": "",
-            "stderr": "timeout de %ds no sidecar executando %s" % (timeout, script),
-            "data": None,
-        }
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                pass
+            proc.communicate()  # reap do grupo morto (evita zombie)
+            return {
+                "exit_code": None,
+                "timed_out": True,
+                "stdout": "",
+                "stderr": "timeout de %ds no sidecar executando %s" % (timeout, script),
+                "data": None,
+            }
     finally:
         _slots.release()
 
-    stdout = clip(completed.stdout)
-    stderr = clip(completed.stderr)
+    out_text = clip(stdout)
+    err_text = clip(stderr)
 
     return {
-        "exit_code": completed.returncode,
+        "exit_code": proc.returncode,
         "timed_out": False,
-        "stdout": stdout,
-        "stderr": stderr,
-        "data": try_parse(stdout),
+        "stdout": out_text,
+        "stderr": err_text,
+        "data": try_parse(out_text),
     }
 
 
@@ -164,14 +176,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] != "/health":
+            self.discard_unread_body()
             return self.send_json(404, {"error": "rota inexistente"})
         self.send_json(200, {"status": "ok", "scripts": sorted(ALLOWED_SCRIPTS)})
 
     def do_POST(self):
         if self.path.split("?")[0] != "/run":
+            self.discard_unread_body()
             return self.send_json(404, {"error": "rota inexistente"})
 
         if not authorized(self.headers.get("Authorization")):
+            self.discard_unread_body()
             return self.send_json(401, {"error": "token inválido"})
 
         try:
@@ -182,6 +197,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(exc.status, {"error": exc.message})
         except Exception as exc:  # noqa: BLE001 — nunca derrubar o servidor por um request
             self.log_error("erro inesperado: %s: %s", type(exc).__name__, exc)
+            # Estado da conexão desconhecido (a leitura do corpo pode ter
+            # falhado no meio): não reusar o keep-alive.
+            self.close_connection = True
             return self.send_json(500, {"error": "%s: %s" % (type(exc).__name__, exc)})
 
         self.send_json(200, result)
@@ -190,12 +208,39 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            # Não dá para saber onde o corpo termina: fecha em vez de
+            # interpretar bytes do corpo como request-line seguinte.
+            self.close_connection = True
             raise BadRequest("Content-Length inválido")
         if length <= 0:
             raise BadRequest("corpo vazio")
         if length > MAX_BODY_BYTES:
+            # Corpo grande demais para drenar no worker: fecha a conexão.
+            self.close_connection = True
             raise BadRequest("corpo excede %d bytes" % MAX_BODY_BYTES, status=413)
         return self.rfile.read(length)
+
+    def discard_unread_body(self):
+        """Consome o corpo antes de um erro precoce (401/404).
+
+        Com HTTP/1.1 keep-alive, o que sobra no socket é lido como a
+        request-line da PRÓXIMA requisição (medido: 501 com o JSON do corpo na
+        linha). Drena quando o tamanho é conhecido e comportável; corpo grande
+        demais ou Content-Length inválido fecha a conexão.
+        """
+        raw = self.headers.get("Content-Length")
+        if not raw:
+            return
+        try:
+            size = int(raw)
+        except ValueError:
+            self.close_connection = True
+            return
+        if size > MAX_BODY_BYTES:
+            self.close_connection = True
+            return
+        if size > 0:
+            self.rfile.read(size)
 
     def send_json(self, status, payload):
         body = json.dumps(payload).encode("utf-8")

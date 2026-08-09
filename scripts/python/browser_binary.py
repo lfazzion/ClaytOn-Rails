@@ -51,7 +51,8 @@ def start_kwargs(browser_args=None):
 
     # O container roda como root; o sandbox do Chrome recusa iniciar nesse caso
     # ("Failed to connect to browser"). Só desliga quando é de fato root.
+    # O kwarg certo do nodriver é `sandbox`, não `no_sandbox` (0.50.3 ignora).
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        kwargs["no_sandbox"] = True
+        kwargs["sandbox"] = False
 
     return kwargs

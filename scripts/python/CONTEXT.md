@@ -11,8 +11,8 @@ libs (nodriver, camoufox, curl_cffi, playwright) só existem na imagem
 | Script | Engine | Uso |
 |--------|--------|-----|
 | `server.py` | stdlib | API HTTP do sidecar: `GET /health`, `POST /run` (allowlist de scripts) |
-| `browser_binary.py` | — | Resolve o Chrome do playwright + `no_sandbox` para o nodriver |
-| `nodriver_fetch.py` | nodriver | Fetch de URL arbitrária (fallback do `PageFetcher` em hard domains) |
+| `browser_binary.py` | — | Resolve o Chrome do playwright + `sandbox=False` (root) para o nodriver |
+| `nodriver_fetch.py` | nodriver | Fetch de URL arbitrária (planejado; fallback do `PageFetcher` em hard domains — outro PR) |
 | `nodriver_twitter.py` | nodriver | Scraping de Twitter/X |
 | `nodriver_instagram.py` | nodriver | Scraping de Instagram |
 | `camoufox_scrape.py` | camoufox | Scraping com fingerprint realista (Firefox instrumentado) |
@@ -101,9 +101,6 @@ de evasão contra sites hostis e não pode guardar `SECRET_KEY_BASE`,
 mesmo valor dos dois lados — **sem ele o `server.py` recusa subir** (exit 1 com
 log `FATAL`). Fail-closed é intencional: auth desligada em silêncio é pior que
 deploy que quebra.
-
-Provas: `scripts/proofs/sidecar_env_proof.sh` (isolamento de segredo, recusa de
-boot sem token, e 401/400 no `/run`).
 
 ## Regras Críticas para IA
 
