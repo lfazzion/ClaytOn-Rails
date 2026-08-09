@@ -71,6 +71,15 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     assert RubyLLM.models.find("gemini-3.5-flash-lite")
   end
 
+  test "os modelos do ChatSessionManager (primário e fallback) resolvem no registry" do
+    # Regressão: o FALLBACK_MODEL (gemma-4-31b-it) era registrado no initializer
+    # antigo, removido por este PR; sem registro, a primeira mensagem de chat
+    # levanta ModelNotFoundError mesmo com o CI verde. Os asserts usam as
+    # constantes do código real, sem stub.
+    assert RubyLLM.models.find(ChatSessionManager::PRIMARY_MODEL), "PRIMARY_MODEL (#{ChatSessionManager::PRIMARY_MODEL}) fora do registry"
+    assert RubyLLM.models.find(ChatSessionManager::FALLBACK_MODEL), "FALLBACK_MODEL (#{ChatSessionManager::FALLBACK_MODEL}) fora do registry"
+  end
+
   test "o default_model é um modelo que existe no registry" do
     assert RubyLLM.models.find(RubyLLM.config.default_model)
   end

@@ -90,7 +90,11 @@ module Llm
           # --- OpenRouter ------------------------------------------------------------
           # Roteador que sorteia entre os modelos gratuitos disponíveis. O valor
           # substituído era o par de modelos gratuitos fixos google/gemma-4-31b-it:free
-          # e openai/gpt-oss-120b:free — não o `openrouter/auto`.
+          # e openai/gpt-oss-120b:free — não o `openrouter/auto`. Ressalva: o
+          # google/gemma-4-31b-it:free (rota OpenRouter) e o gemma-4-31b-it (rota
+          # direta do Gemini, seção abaixo) são ids diferentes. O gemma-4-31b-it,
+          # FALLBACK_MODEL do ChatSessionManager, voltou a ser registrado; o par
+          # :free substituído, não.
           RubyLLM::Model::Info.new(
             id: 'openrouter/free',
             name: 'OpenRouter Free Router',
@@ -100,7 +104,7 @@ module Llm
             context_window: 200_000
           ),
           # --- Gemini ----------------------------------------------------------------
-          # Os dois existem na API do Google mas não no registry embutido na gem.
+          # Os três existem na API do Google mas não no registry embutido na gem.
           RubyLLM::Model::Info.new(
             id: 'gemini-3.1-flash-lite',
             name: 'Gemini 3.1 Flash Lite',
@@ -114,6 +118,18 @@ module Llm
             provider: 'gemini',
             max_output_tokens: 65_536,
             context_window: 1_048_576
+          ),
+          # O gemma-4-31b-it é o FALLBACK_MODEL do ChatSessionManager. O origin o
+          # registrava no initializer antigo; este PR o perdeu junto com a remoção
+          # do arquivo, e o fallback do chat passou a levantar ModelNotFoundError.
+          # Restaurado aqui no formato do origin: provider 'gemini' (String, casa
+          # com o slug da classe), max_output_tokens 32_768, context_window 262_144.
+          RubyLLM::Model::Info.new(
+            id: 'gemma-4-31b-it',
+            name: 'Gemma 4 31B',
+            provider: 'gemini',
+            max_output_tokens: 32_768,
+            context_window: 262_144
           )
         ]
       end
