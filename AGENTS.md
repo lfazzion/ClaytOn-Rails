@@ -51,18 +51,18 @@ All commands from project root, always dockerized:
 
 ```bash
 # Docker
-docker-compose -f docker/docker-compose.yml up -d
-docker-compose -f docker/docker-compose.yml down
-docker-compose -f docker/docker-compose.yml build
+docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml down
+docker compose -f docker/docker-compose.yml build
 
 # Tests
-docker-compose -f docker/docker-compose.yml run --rm test
-docker-compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb
-docker-compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb -n "/test_name_pattern/"
+docker compose -f docker/docker-compose.yml run --rm test
+docker compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb
+docker compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb -n "/test_name_pattern/"
 
 # DB & Console
-docker-compose -f docker/docker-compose.yml exec app bin/rails db:migrate
-docker-compose -f docker/docker-compose.yml exec app bin/rails console
+docker compose -f docker/docker-compose.yml exec app bin/rails db:migrate
+docker compose -f docker/docker-compose.yml exec app bin/rails console
 ```
 
 ## Cross-Cutting Rules
@@ -84,9 +84,9 @@ A task is complete ONLY when ALL conditions are met:
 
 | # | Condition | Verification |
 |---|-----------|-------------|
-| 1 | Tests pass (0 failures, 0 errors) | `docker-compose -f docker/docker-compose.yml run --rm test` |
-| 2 | No syntax warnings on modified files | `ruby -cw <file>` for each changed `.rb` |
-| 3 | Migration runs cleanly (if applicable) | `docker-compose -f docker/docker-compose.yml exec app bin/rails db:migrate:status` |
+| 1 | Tests pass (0 failures, 0 errors) | `docker compose -f docker/docker-compose.yml run --rm test` |
+| 2 | No syntax warnings on modified files | `docker compose -f docker/docker-compose.yml run --rm --entrypoint ruby test -cw <file>` for each changed `.rb` |
+| 3 | Migration runs cleanly (if applicable) | `docker compose -f docker/docker-compose.yml exec app bin/rails db:migrate:status` |
 | 4 | New code has corresponding tests | Test file exists in `test/` mirroring `app/` or `lib/` |
 | 5 | MEMORY.md updated (if architectural decision) | Entry added with `[YYYY-MM-DD]` format |
 | 6 | No hardcoded secrets or credentials | Manual review of changed files |
@@ -101,8 +101,7 @@ When stuck, follow this order. NEVER skip steps.
 |------|--------|------|
 | 1 | Re-read the relevant `CONTEXT.md` and retry | First failure |
 | 2 | Check `docs/MEMORY.md` for "Lições Aprendidas" | Second failure |
-| 3 | Search `docs/memory/` for historical context | Third failure |
-| 4 | Document the problem in "Decisões Pendentes" and **STOP** | After 3 failures |
+| 3 | Document the problem in "Decisões Pendentes" and **STOP** | Third failure |
 
 **NEVER do these when stuck:**
 - Delete existing code to "fix" an error you don't understand
@@ -174,8 +173,4 @@ Toda atualização DEVE ser registrada no "Log de Mudanças na Memória" ao fina
 
 - Revisar o MEMORY.md **mensalmente**: remover entradas obsoletas, consolidar duplicatas, registrar remoções no Log.
 - Limite prático: manter o MEMORY.md com no máximo **200 linhas**. Acima disso, mover detalhes para topic files separados referenciados por link.
-- Entradas removidas do MEMORY.md devem ser arquivadas em `docs/memory/` (decisions/, resolved_bugs/, archived/) antes de deletar.
-
-### Cold Tier
-
-`docs/memory/` armazena conhecimento arquivado que NÃO deve ser carregado automaticamente. Consultar via `grep`/`rg` apenas no passo 3 das Escalation Rules. Ver `docs/memory/CONTEXT.md` para formato e regras.
+- Entradas removidas do MEMORY.md devem ser registradas no Log com formato de remoção antes de qualquer arquivo de arquivamento.

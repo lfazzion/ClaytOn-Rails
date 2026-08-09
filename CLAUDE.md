@@ -84,7 +84,6 @@ db/
   migrate/      — App migrations; queue_migrate/ and cache_migrate/ are auto-managed
 docs/
   MEMORY.md     — Living architectural memory; read before any systemic task
-  memory/       — Cold tier archive; search only via grep on escalation step 3
 ```
 
 ---
@@ -133,8 +132,7 @@ A task is complete only when ALL are true:
 
 1. Re-read the relevant `CONTEXT.md` and retry
 2. Check `docs/MEMORY.md` "Lições Aprendidas" section
-3. Search `docs/memory/` cold archive: `rg "<keyword>" docs/memory/`
-4. Document the problem in "Decisões Pendentes" and **stop**
+3. Document the problem in "Decisões Pendentes" and **stop**
 
 Never delete existing code, modify tests to force them to pass, or remove validations as a workaround.
 
