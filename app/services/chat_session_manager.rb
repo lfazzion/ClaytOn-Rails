@@ -193,7 +193,6 @@ class ChatSessionManager
     def cleanup_expired
       mutex.synchronize do
         sessions_cache.delete_if { |_key, session| session[:expires_at] < Time.current }
-        prune_mutexes
       end
       Rails.logger.info "[ChatSessionManager] Cleanup concluído. Sessões ativas: #{sessions_cache.size}"
     end
@@ -402,13 +401,15 @@ class ChatSessionManager
       response.respond_to?(:content) ? response.content.to_s : response.to_s
     end
 
-    # A corrida que este loop fecha: `scope_mutex` cria o Mutex sob o global e o
-    # solta; entre soltar o global e chegar aqui, `prune_mutexes` (sob o
-    # global) pode apagar o mutex e outra thread criar um novo — aí duas
-    # threads sincronizariam em mutexes DIFERENTES para o MESMO escopo e
-    # mutariam o mesmo RubyLLM::Chat em paralelo. A identidade é revalidada sob
-    # o global ANTES de travar: se o mutex registrado já não é o que pegamos,
-    # recomeça com o atual.
+    # `mutexes` nunca é podado: mutexes de escopo nascem e ficam. O vazamento é
+    # limitado ao número de escopos (canais/usuários), e o custo de mantê-los é
+    # menor que a janela de corrida que a poda abria — removê-los sob o global
+    # deixava um buraco entre a revalidação abaixo e o `synchronize`, quando
+    # outra thread podia deletar o mutex e criar um novo, e duas threads
+    # sincronizariam em mutexes DIFERENTES para o MESMO escopo, mutando o mesmo
+    # RubyLLM::Chat em paralelo. A revalidação de identidade sob o global ANTES
+    # de travar permanece como rede de segurança: se o mutex registrado já não
+    # é o que pegamos, recomeça com o atual.
     def with_scope_lock(scope_key, &block)
       loop do
         m = scope_mutex(scope_key)
@@ -418,26 +419,6 @@ class ChatSessionManager
 
     def scope_mutex(scope_key)
       mutex.synchronize { mutexes[scope_key] ||= Mutex.new }
-    end
-
-    # Chamado de dentro do synchronize de cleanup_expired — já sob o mutex
-    # global. Só remove o que try_lock consegue travar: se outra thread está no
-    # meio de um turno com este mutex de escopo preso, try_lock falha e o
-    # candidato sobrevive para a próxima rodada, em vez de arrancar o lock de
-    # baixo de quem o segura.
-    def prune_mutexes
-      mutexes.each_key.to_a.each do |scope_key|
-        next if sessions_cache.key?(scope_key)
-
-        candidate = mutexes[scope_key]
-        next unless candidate.try_lock
-
-        begin
-          mutexes.delete(scope_key)
-        ensure
-          candidate.unlock
-        end
-      end
     end
 
     def sessions_cache

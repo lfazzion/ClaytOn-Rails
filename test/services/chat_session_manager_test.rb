@@ -150,21 +150,19 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_raise(ActiveRecord::RecordNotFound) { c2.reload }
   end
 
-  test "cleanup_expired remove sessoes expiradas e limpa mutexes orfaos" do
+  # A limpeza de mutexes orfaos foi REMOVIDA de proposito (revisao de 2a rodada):
+  # o prune_mutexes abria janela de corrida de identidade no with_scope_lock; o
+  # custo de manter mutexes orfaos e limitado ao numero de escopos (canais/usuarios).
+  test "cleanup_expired remove sessoes expiradas e preserva as ativas" do
     sessions = ChatSessionManager.instance_variable_get(:@sessions)
-    mutexes = ChatSessionManager.instance_variable_get(:@mutexes)
 
     sessions["expired_key"] = { chat: mock("chat"), expires_at: 1.hour.ago }
     sessions["active_key"] = { chat: mock("chat"), expires_at: 30.minutes.from_now }
-    mutexes["expired_key"] = Mutex.new
-    mutexes["active_key"] = Mutex.new
 
     ChatSessionManager.cleanup_expired
 
     assert_nil sessions["expired_key"]
     assert_not_nil sessions["active_key"]
-    assert_nil mutexes["expired_key"]
-    assert_not_nil mutexes["active_key"]
   end
 
   test "build_chat constroi objeto RubyLLM::Chat com instrucoes e ferramentas" do
