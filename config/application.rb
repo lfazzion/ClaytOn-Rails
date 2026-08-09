@@ -20,8 +20,9 @@ module CleitinBot
     # Tools têm múltiplas classes por arquivo — require explícito necessário
     Rails.autoloaders.main.ignore(Rails.root.join("app/tools"))
 
-    config.active_record.database_selector = { delay: 2.seconds }
-    config.active_record.database_resolver = ActiveRecord::Middleware::DatabaseSelector::Resolver
-    config.active_record.database_resolver_context = ActiveRecord::Middleware::DatabaseSelector::Resolver::Session
+    # DatabaseSelector middleware requer uma role :reading via `connects_to`, que nunca foi
+    # configurada (não há réplica — SQLite single-file). Habilitá-lo sem essa role faz
+    # ActiveRecord::Base.connection falhar em requests GET/HEAD ("No database connection
+    # defined for reading"). Desativado até que uma réplica real seja implementada.
   end
 end

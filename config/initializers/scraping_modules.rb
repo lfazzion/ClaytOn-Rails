@@ -6,6 +6,7 @@ Rails.application.config.after_initialize do
   require Rails.root.join('lib/scraping/rate_limit_handler')
   require Rails.root.join('lib/scraping/services/rss_parser_service')
   require Rails.root.join('lib/scraping/services/youtube_scraper_service')
+  require Rails.root.join('lib/scraping/python_bridge/sidecar_client')
   require Rails.root.join('lib/scraping/python_bridge/nodriver_runner')
   require Rails.root.join('lib/scraping/python_bridge/camoufox_service')
   require Rails.root.join('lib/scraping/python_bridge/curl_impersonate_client')
@@ -21,7 +22,7 @@ Rails.application.config.after_initialize do
   # LLM Integration (lib/llm — excluído do autoload Zeitwerk)
   require Rails.root.join('lib/llm/prompt_loader')
   require Rails.root.join('lib/llm/base_client')
-  require Rails.root.join('lib/llm/gemini_client')
-  require Rails.root.join('lib/llm/gemma_client')
+  require Rails.root.join('lib/llm/gemini_background_client')
+  require Rails.root.join('lib/llm/gemini_interactive_client')
   require Rails.root.join('lib/llm/openrouter_client')
 end

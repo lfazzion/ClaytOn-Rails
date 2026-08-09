@@ -10,14 +10,34 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_04_000001) do
-  create_table "browser_session_cookies", force: :cascade do |t|
+ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
+  create_table "chat_messages", force: :cascade do |t|
+    t.text "content", null: false
+    t.integer "conversation_id", null: false
     t.datetime "created_at", null: false
-    t.string "domain", null: false
-    t.datetime "expires_at", null: false
-    t.text "payload", null: false
+    t.string "discord_user_id"
+    t.string "discord_username"
+    t.string "role", null: false
     t.datetime "updated_at", null: false
-    t.index ["domain"], name: "index_browser_session_cookies_on_domain", unique: true
+    t.index ["conversation_id", "id"], name: "index_chat_messages_on_conversation_id_and_id"
+    t.index ["conversation_id"], name: "index_chat_messages_on_conversation_id"
+  end
+
+  create_table "conversations", force: :cascade do |t|
+    t.boolean "active", default: true, null: false
+    t.datetime "created_at", null: false
+    t.string "discord_channel_id", null: false
+    t.string "discord_user_id"
+    t.datetime "last_active_at", null: false
+    t.string "scope", null: false
+    t.boolean "shared", default: false, null: false
+    t.text "summary"
+    t.integer "summary_covers_upto_id"
+    t.datetime "summary_failed_at"
+    t.string "title"
+    t.datetime "updated_at", null: false
+    t.index ["scope", "last_active_at"], name: "index_conversations_on_scope_and_last_active_at"
+    t.index ["scope"], name: "index_conversations_on_active_scope", unique: true, where: "active = 1"
   end
 
   create_table "discovered_profiles", force: :cascade do |t|
@@ -283,6 +303,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_04_000001) do
     t.index ["key"], name: "index_solid_queue_semaphores_on_key", unique: true
   end
 
+  add_foreign_key "chat_messages", "conversations"
   add_foreign_key "discovered_profiles", "social_profiles", column: "source_profile_id"
   add_foreign_key "profile_snapshots", "social_profiles"
   add_foreign_key "social_posts", "social_profiles"

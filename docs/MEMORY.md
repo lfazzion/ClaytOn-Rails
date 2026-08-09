@@ -10,6 +10,11 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-09]** Correção de documentação (PR3, revisão): a afirmação da
+  entrada de 2026-03-23 de que as sessões vivem "em memória com TTL 30min via
+  `ChatSessionManager`" ficou FALSA quando as conversas passaram a viver no
+  SQLite: o TTL de 30min só despeja o objeto quente do cache; a conversa
+  persiste no banco e a fronteira entre conversas é o comando `/new`.
 - **[2026-03-30]** Deploy hardening (Propostas 1-3: `chore/deploy-hardening`).
   - `set -Eeuo pipefail` em deploy.sh e recover-failure.sh (ERR trap propaga para rollback)
   - Healthcheck nativo docker-compose: `curl /up` (app) + `curl /json/version` (chrome)
@@ -50,7 +55,9 @@
 - **[2026-03-23]** Fase 5 implementada: UI Autônoma e Chatbot Tool Caller.
   - 16 tools em `app/tools/` (herdam de `RubyLLM::Tool` via `ToolBase`)
   - Discord Bot como serviço dedicado no compose (`discord-bot`)
-  - Sessões em memória com TTL 30min via `ChatSessionManager`
+  - Sessões com TTL 30min via `ChatSessionManager` (corrigido em 2026-08-09: o
+    TTL só despeja o objeto quente; a conversa vive no SQLite e a fronteira
+    entre conversas é o `/new`, não o TTL)
   - Digest semanal e de sexta via `WeeklyDigestJob` e `FridayIdeationJob`
   - Canal de digest criado automaticamente se não existir
   - 371 testes passando (0 failures, 0 errors)
@@ -66,7 +73,7 @@
 
 | Data | Padrão | Contexto |
 |------|--------|----------|
-| 2026-04-17 | Upgrade para Gemma 4 31B | Atualização do modelo interativo de curto contexto (google/gemma-4-31b) em substituição ao Gemma 3 27B. |
+| 2026-08-09 | Split Gemini background/interactive + cadeia nous → poolside → openrouter | Substitui o cliente único Gemma 4 31B (`gemma_client.rb`, removido) por dois clientes Gemini por tier — `gemini_background_client.rb` (gemini-3.1-flash-lite, background) e `gemini_interactive_client.rb` (gemini-3.5-flash-lite, interactive) — e pela `ModelChain` (nous → poolside → openrouter). A `ModelChain` ainda não é consumida pelo chat: o `ChatSessionManager` passará a usá-la após o merge do PR de sessões (dependência de ordem). |
 | 2026-03-30 | Swap via zRAM (ALGO=zstd, 50%) em vez de disco físico | Poupa limite agressivo de IOPS (3000) do boot volume da OCI. Melhoria pragmática nativa via `zram-tools`. |
 | 2026-03-26 | ruby_llm ~> 1.14 (não 1.12) | Suporte a Imagen via `RubyLLM.paint` — API mudou em 1.14 |
 | 2026-03-26 | OpenStruct removido da stdlib em Ruby 4.0 | Usar classes plain ou Mocha mocks em testes em vez de `require 'ostruct'` |
@@ -82,6 +89,7 @@
 | 2026-03-14 | Headless Rails (sem ActionView/Sprockets) | API-only, sem frontend server-rendered |
 | 2026-03-14 | Jobs idempotentes com dedup window de 2h | Safe to re-run sem duplicatas |
 | 2026-03-13 | Gemini Flash como modelo primário de análise | Custo-benefício vs. capacidade — pesquisa em `docs/comparativo_IA_gemini_gemma.md` |
+| 2026-08-09 | Execução Python via sidecar HTTP autenticado (8080) | Scraping evasivo (nodriver/camoufox/curl_cffi) migrado de `Open3` in-process para `POST /run` no container `python-scraper`, com auth Bearer `PYTHON_SCRAPER_TOKEN`. |
 
 ---
 
@@ -100,6 +108,7 @@
 | 2026-03-26 | `require_relative` errado em test de concern (`test/jobs/concerns/`) | Arquivo em subdiretório requer `../../../` em vez de `../../` para sair do concern | Verificar path relativo considerando profundidade do diretório |
 | 2026-03-28 | Deploy rollback com snapshot_images() era ineficaz | Snapshot tirado DEPOIS do `git pull` capturava imagens do novo código quebrado, não do código anterior funcional. Rollback marcava imagens atuais com `-rollback` em vez de restaurar as anteriores | Simplificar: `git reset --hard` + `docker compose build` para rebuild do código anterior |
 | 2026-03-28 | Migration falha não parava deploy | deploy.sh usava `WARNING` + `cat` sem `exit 1`, continuava deploy com banco incompatível | Adicionar `rollback` + `exit 1` no bloco de falha de migration |
+| 2026-08-09 | Limiar inerte no initializer de LLM: falha silenciosa que mascara bug nosso | `require 'ruby_llm'` e os `require` locais de `lib/llm/` dividiam o mesmo `rescue LoadError`; require errado ou registro incompleto subia a app "de pé", logando "Gem não disponível" enganoso, sem provedor nem modelo novo | `require 'ruby_llm'` é o único ponto coberto pelo rescue; `require` locais ficam FORA dele, então erro ali estoura o boot (regra 3/CLAUDE.md). Citações: `config/initializers/ruby_llm.rb` e `test/lib/llm/model_chain_test.rb` |
 
 <!-- Template para novas entradas:
 | YYYY-MM-DD | Descrição concisa do bug | O que causou | Como foi resolvido (`arquivo.rb`, classe, método) |
@@ -107,6 +116,7 @@
 
 ---
 
+- Sidecar Python autenticado: o `PYTHON_SCRAPER_TOKEN` chega via `docker/.env.sidecar` (env_file do compose — PR #20 deps/infra; exemplo em `docker/.env.sidecar.example`). Sem o arquivo o `server.py` recusa subir (fail-closed, intencional).
 ## Decisões de Arquitetura Pendentes
 
 > Questões abertas aguardando validação do usuário ou mais investigação.
@@ -118,7 +128,7 @@
 
 ## Cold Tier Protocol
 
-> Conhecimento arquivado em `docs/memory/`. **NÃO carregar automaticamente** — buscar via `grep`/`rg` apenas sob demanda.
+> Conhecimento arquivado fora do MEMORY.md ativo. **NÃO carregar automaticamente** — buscar via `grep`/`rg` apenas sob demanda.
 
 ### Quando arquivar
 
@@ -138,9 +148,9 @@
 
 ### Consulta
 
-Quando o agente está no passo 3 das Escalation Rules (terceira falha), buscar:
+Quando o agente está no passo 2 das Escalation Rules (segunda falha), consultar a seção "Lições Aprendidas" em `docs/MEMORY.md`:
 ```bash
-rg "<palavra-chave do problema>" docs/memory/
+rg "<palavra-chave do problema>" docs/MEMORY.md
 ```
 
 ---
@@ -151,7 +161,8 @@ rg "<palavra-chave do problema>" docs/memory/
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
-| 2026-04-17 | Upgraded default short-context interaction model from Gemma 3 27B to Gemma 4 31B (`gemma_client.rb` and docs). | Padrões Ratificados |
+| 2026-08-09 | Decisão de modelo único Gemma 4 31B (`gemma_client.rb`) substituída: split Gemini background/interactive + cadeia nous → poolside → openrouter. | Padrões Ratificados |
+| 2026-08-09 | Correção de documentação: o TTL 30min do `ChatSessionManager` só despeja o objeto quente — conversas vivem no SQLite e a fronteira entre conversas é o `/new` (entrada de 2026-03-23 corrigida). | Contexto Ativo |
 | 2026-03-30 | Atualização de arquitetura OCI Free Tier: Substituído o `/swapfile` (disco físico) por gerador de memória comprimida `zRAM`, minimizando o esgotamento de IOPS no boot volume. Ajustado swappiness de 10 para 100. Adição de parâmetros de cifra (Ciphers/MACS) estritos ao hardening SSH. | Contexto Ativo, Padrões Ratificados |
 | 2026-03-28 | Correções deploy.sh: rollback com git reset --hard (em vez de git checkout), snapshot de Docker image IDs pré-deploy para possibility de rollback completo de containers. | Contexto Ativo |
 | 2026-03-28 | Correções review PR #10: oracle-cloud-setup.sh — propagar $DOCKER_USER para limits.d (Phase 8) e chown (Phase 9), sshd -t antes de restart SSH, iptables idempotente com -C check, fstab append com grep -qF. ERROS.md checklist atualizada. | Contexto Ativo, Lições Aprendidas |
@@ -164,3 +175,4 @@ rg "<palavra-chave do problema>" docs/memory/
 | 2026-03-29 | Correções pós-audit: deploy.sh (A1-A7) + oracle-cloud-setup.sh (B7,B9,B11-B14) | Contexto Ativo |
 | 2026-03-30 | Deploy hardening (Propostas 1-3): set -Eeuo pipefail, healthcheck nativo docker-compose, image tagging com IMAGE_TAG, --wait em vez de health check loop, rollback sem rebuild, FASE 10.5 systemd timer cleanup. | Contexto Ativo |
 | 2026-03-30 | Correções script↔guia: KexAlgorithms pós-quântico (sntrup761x25519) no SSH, tabela de fases 9→10 com NTP/Chrony (FASE 7), Fail2Ban dual jail, troubleshooting zRAM. | Contexto Ativo |
+| 2026-08-09 | Decisão arquitetural registrada: execução Python via sidecar HTTP autenticado (8080, `PYTHON_SCRAPER_TOKEN`) em vez de `Open3` in-process. | Padrões Ratificados |

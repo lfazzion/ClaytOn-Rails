@@ -35,13 +35,14 @@ module Llm
 
       private
 
-      # Resolve partial('name') calls in the system template string
+      # Renderiza o bloco `system:` com ERB completo.
+      # Dá suporte a `<%= Llm::PromptLoader.partial('nome') %>` e também a tags
+      # de controle (`<% if %>`, `<% end %>`) necessárias para conditionais de
+      # feature flag (ex.: bullets sobre `page_fetch` condicionados a ENABLE_PAGE_FETCH).
       def render_system(template)
         return '' if template.nil?
 
-        template.gsub(/<%= Llm::PromptLoader\.partial\('([^']+)'\) %>/) do
-          partial(Regexp.last_match(1))
-        end
+        ERB.new(template).result(binding)
       end
 
       def render_template(template, **locals)

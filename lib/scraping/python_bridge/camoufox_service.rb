@@ -1,17 +1,17 @@
 # frozen_string_literal: true
 
-require 'open3'
 require 'json'
-require 'timeout'
+require_relative 'sidecar_client'
 
 module ScrapingServices
   class CamoufoxService
     CAMOUFOX_SCRIPT = 'camoufox_scrape.py'
+    TIMEOUT = SidecarClient::DEFAULT_TIMEOUT
 
     class << self
       def scrape_url(url, proxy: nil)
-        command = build_command(url, proxy)
-        result = execute(command)
+        script, args = build_command(url, proxy)
+        result = execute(script, args)
         return nil if result.nil?
 
         result.deep_symbolize_keys
@@ -26,15 +26,16 @@ module ScrapingServices
 
       private
 
+      # Retorna [script, args] — o script roda no sidecar, não neste container.
       def build_command(url, proxy)
-        script_path = Rails.root.join('scripts/python', CAMOUFOX_SCRIPT).to_s
-        cmd = ['python3', '-u', script_path, url]
-        cmd += ['--proxy', proxy] if proxy
-        cmd
+        script = CAMOUFOX_SCRIPT
+        args = [url]
+        args += ['--proxy', proxy] if proxy
+        [script, args]
       end
 
-      def execute(command)
-        stdout, stderr, status = Timeout.timeout(180) { Open3.capture3(*command) }
+      def execute(script, args)
+        stdout, stderr, status = SidecarClient.capture(script: script, args: args, timeout: TIMEOUT)
 
         if rate_limit?(stderr)
           raise RateLimitHandler.handle_error(

@@ -12,19 +12,20 @@ A estrutura de `test/` espelha `app/`:
 - `test/scraping/` → testa scraping
 - `test/connectors/` → testa chrome_ws_connector
 - `test/setup/` → testa infraestrutura (initializer, SQLite, etc.)
-- `test/docker/` → testa configuração Docker
+- `test/docker/` → testa configuração Docker (docker-compose.yml)
+- `test/scripts/python/` ainda nao existe neste branch — cobertura dos scripts do sidecar chega junto do PR de scraping
 
 ## Comandos (sempre dockerizado)
 
 ```bash
 # Todos os testes
-docker-compose -f docker/docker-compose.yml run --rm test
+docker compose -f docker/docker-compose.yml run --rm test
 
 # Arquivo específico
-docker-compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb
+docker compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb
 
 # Pelo nome do teste
-docker-compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb -n "/test_name_pattern/"
+docker compose -f docker/docker-compose.yml run --rm test test test/models/social_profile_test.rb -n "/test_name_pattern/"
 ```
 
 ## Regras Críticas para IA
