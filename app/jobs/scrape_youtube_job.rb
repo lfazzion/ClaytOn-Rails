@@ -73,15 +73,19 @@ class ScrapeYoutubeJob < ApplicationJob
         platform_post_id: video[:platform_post_id]
       )
 
+      # yt-dlp --flat-playlist é flaky: às vezes retorna view_count/posted_at,
+      # às vezes nil (depende de qual variante do Innertube responde).
+      # Não sobrescrever um valor já coletado com nil — preserva o melhor dado
+      # que já temos. CLAUDE.md regra 3: nil = falha, não dado.
       post.assign_attributes(
-        post_type: video[:post_type] || 'video',
-        content: video[:title],
-        posted_at: video[:posted_at],
-        views_count: video[:views_count],
-        thumbnail_url: video[:thumbnail_url],
-        video_url: video[:video_url],
-        likes_count: video[:likes_count],
-        comments_count: video[:comments_count]
+        post_type: video[:post_type] || post.post_type || 'video',
+        content: video[:title] || post.content,
+        posted_at: video[:posted_at] || post.posted_at,
+        views_count: video[:views_count] || post.views_count,
+        thumbnail_url: video[:thumbnail_url] || post.thumbnail_url,
+        video_url: video[:video_url] || post.video_url,
+        likes_count: video[:likes_count] || post.likes_count,
+        comments_count: video[:comments_count] || post.comments_count
       )
 
       post.save! if post.changed?

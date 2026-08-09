@@ -11,30 +11,28 @@ except ImportError:
     sys.exit(1)
 
 
+# curl_cffi >= 0.8 dobrou a versão dentro do próprio token de impersonate e
+# removeu o kwarg `impersonate_version` — passá-lo levanta TypeError em
+# Session.request().
 IMPERSONATE_PROFILES = {
     "chrome": {
-        "impersonate": "chrome",
-        "impersonate_version": "131",
+        "impersonate": "chrome131",
     },
     "safari": {
-        "impersonate": "safari",
-        "impersonate_version": "17_0",
+        "impersonate": "safari180",
     },
     "firefox": {
-        "impersonate": "firefox",
-        "impersonate_version": "135",
+        "impersonate": "firefox135",
     },
     "chrome_android": {
-        "impersonate": "chrome",
-        "impersonate_version": "131",
+        "impersonate": "chrome131_android",
         "extra_headers": {
             "Sec-Ch-Ua-Mobile": "?1",
             "Sec-Ch-Ua-Platform": '"Android"',
         },
     },
     "edge": {
-        "impersonate": "edge",
-        "impersonate_version": "131",
+        "impersonate": "edge101",
     },
 }
 
@@ -52,9 +50,6 @@ def do_request(url, method="GET", profile="chrome", proxy=None, headers=None, bo
         "timeout": timeout,
         "verify": False,
     }
-
-    if fp.get("impersonate_version"):
-        kwargs["impersonate_version"] = fp["impersonate_version"]
 
     if proxy:
         kwargs["proxy"] = proxy

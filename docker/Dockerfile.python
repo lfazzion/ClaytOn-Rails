@@ -1,23 +1,61 @@
 FROM python:3.12-slim
 
+# libgtk-3-0: o camoufox é um Firefox de verdade e o seu libmozgtk.so linka
+# libgtk-3.so.0 + libgdk-3.so.0. Sem elas todo launch morre em "XPCOMGlueLoad
+# error ... Couldn't load XPCOM", e `playwright install --with-deps` NÃO as traz
+# (o chromium headless não precisa de GTK). Medido em 05/08/2026 com
+# `ldd camoufox-bin` + `ldd *.so` sob LD_LIBRARY_PATH do próprio browser: estas
+# duas são as ÚNICAS bibliotecas externas ausentes, e o pacote libgtk-3-0 fecha
+# as duas. libasound2 e libdbus-glib-1-2 foram testadas e NÃO são necessárias —
+# com só a libgtk-3-0 instalada o navegador sobe e navega.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
     ca-certificates \
     lsb-release \
     ffmpeg \
+    libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# ASPAS OBRIGATÓRIAS em todo requisito. Sem elas `camoufox>=2.0.0` não é
+# requisito nenhum: `>` é redirecionamento de shell, o pip recebe só `camoufox` e
+# o shell cria um arquivo vazio chamado `=2.0.0`. Medido em 05/08/2026 na imagem
+# construída: `ls /` trazia `=0.0.35`, `=0.27.0`, `=2.0.0`, `=3.10.0` e `=0.7.0`
+# — este último com 14 KB, que era o stdout INTEIRO do pip engolido pelo
+# redirecionamento —, e `pip show camoufox` respondia 0.5.4. Ou seja: nenhum piso
+# de versão desta imagem estava valendo, e o piso declarado do camoufox (2.0.0)
+# nem existe no PyPI, então a linha só não quebrava o build porque o pip nunca a
+# via.
+#
+# `camoufox` é pinado EXATO, não por piso: é a lib que decide qual build do
+# Firefox o `camoufox fetch` abaixo baixa (medido: 0.5.4 →
+# browsers/official/152.0.4-beta.28). Sem pin, dois builds da mesma árvore dão
+# navegadores diferentes — e fingerprint é o produto deste container. Mesmo
+# motivo do digest da searxng no docker-compose.yml.
 RUN pip install --no-cache-dir \
-    nodriver>=0.0.35 \
-    camoufox>=2.0.0 \
-    httpx>=0.27.0 \
-    aiohttp>=3.10.0 \
-    playwright \
-    yt-dlp \
-    curl_cffi>=0.7.0
+    "nodriver>=0.0.35" \
+    "camoufox==0.5.4" \
+    "httpx>=0.27.0" \
+    "aiohttp>=3.10.0" \
+    "playwright" \
+    "yt-dlp" \
+    "curl_cffi>=0.7.0"
 
 RUN playwright install chromium --with-deps
+
+# O `pip install camoufox` traz só a biblioteca; o binário do Firefox
+# instrumentado é baixado na PRIMEIRA execução. Medido em 05/08/2026 num
+# container novo desta imagem: a primeira chamada falhou com "official/stable is
+# not installed. Please run `camoufox fetch`" e — pior — o progresso do download
+# do addon UBO saiu em STDOUT, que é justamente onde o `CamoufoxService` espera
+# JSON puro (`JSON.parse(stdout.strip)`). Baixar no build resolve as duas coisas
+# e tira o download do caminho quente de cada container novo.
+# Custo medido: 1,2 GB em /root/.cache/camoufox, dos quais 932 MB são os pacotes
+# de fontes de macOS e Windows. NÃO podar essas fontes: é com elas que a medição
+# de fonte e o canvas batem com o SO que o camoufox diz ser — podar troca peso de
+# imagem por fingerprint inconsistente, que é o defeito que o engine existe para
+# não ter.
+RUN python3 -m camoufox fetch
 
 RUN mkdir -p /app/scripts /data
 
@@ -26,4 +64,8 @@ COPY scripts/python /app/scripts
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
-CMD ["python3", "-u", "-m", "http.server", "8080"]
+EXPOSE 8080
+
+# API HTTP mínima: as pontes Ruby chamam POST /run em vez de rodar `python3`
+# dentro do container do Rails (onde nodriver/camoufox/curl_cffi não existem).
+CMD ["python3", "-u", "/app/scripts/server.py"]
