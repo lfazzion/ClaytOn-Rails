@@ -35,3 +35,4 @@ db/*.sqlite3-shm
 # Python bytecode dos scripts do sidecar
 __pycache__/
 *.pyc
+storage/backups/

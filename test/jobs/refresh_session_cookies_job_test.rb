@@ -117,4 +117,29 @@ class RefreshSessionCookiesJobTest < ActiveSupport::TestCase
     assert_nothing_raised { RefreshSessionCookiesJob.perform_now }
     assert_equal 2, Fetcher::CookieJar.for("youtube.com").size
   end
+
+  # O portao de leitura do jar e `expires_at > Time.current`; o job estende o
+  # prazo JUNTO da rotacao (`expires_at: 7.days.from_now`) porque acabou de
+  # provar a sessao viva. Sem esta assercao, tirar o `expires_at:` do job deixa
+  # a suite verde e a sessao morre em T0+7d com o payload recém-rotacionado.
+  test "renovacao estende o expires_at do registro (portao de leitura vivo)" do
+    carregar! # expires_at: 3.days.from_now
+    ok = Struct.new(:success?).new(true)
+    Open3.stubs(:capture3).with do |*args|
+      caminho = args[args.index("--cookies") + 1]
+      File.write(caminho, [
+        "# Netscape HTTP Cookie File",
+        [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "SID", "abc"].join("\t"),
+        [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "__Secure-1PSIDTS", "sidts-NOVO"].join("\t")
+      ].join("\n"))
+      true
+    end.returns(["x", "", ok])
+
+    RefreshSessionCookiesJob.perform_now
+
+    registro = BrowserSessionCookie.all.find { |r| r.domain.include?("youtube") }
+    assert_not_nil registro, "rotacao deveria ter persistido o registro"
+    assert_operator registro.expires_at, :>, 5.days.from_now,
+                   "o job tem que estender o prazo (7d) junto da rotacao — o carregar! usou 3d"
+  end
 end
