@@ -1,0 +1,5 @@
+# Domínios conhecidos por bloqueio agressivo (Cloudflare, DataDome, Akamai Bot Manager).
+# `Fetcher::PageFetcher` skipa Ferrum e delega direto para `ScrapingServices::NodriverRunner.fetch_page`.
+# Promoção manual via PR após log recorrente de `BotBlocked` no host.
+# Match: sufixo no hostname.
+hard_domains: []

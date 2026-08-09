@@ -1,0 +1,12 @@
+# Hosts cujas páginas renderizam valores em tempo real via JS (preços, cotações).
+# Cache TTL reduzido para 60s em `Fetcher::TtlPolicy`.
+# Match é feito por sufixo no hostname (download.coingecko.com casa com coingecko.com).
+live_hosts:
+  - coingecko.com
+  - coinmarketcap.com
+  - tradingview.com
+  - finance.yahoo.com
+  - investing.com
+  - br.investing.com
+  - bloomberg.com
+  - google.com/finance

@@ -40,6 +40,7 @@ What are you doing? Go read the CONTEXT.md for that workspace.
 | Tool LLM, tool call | `lib/llm/CONTEXT.md` | `lib/scraping/` | Regras no próprio AGENTS.md (seção futura) |
 | Integração LLM, prompt | `lib/llm/CONTEXT.md`, `config/prompts/CONTEXT.md` | `lib/scraping/`, `app/jobs/` | |
 | Scraper Ferrum, Chrome, Python | `lib/scraping/CONTEXT.md`, `scripts/python/CONTEXT.md` | `config/prompts/`, `app/tools/` | |
+| Endpoint HTTP, fetch de URL externa | `docker/CONTEXT.md` | `app/tools/` | URL de fora passa por `Fetcher::SafeHttpClient`; nunca `Net::HTTP` direto |
 | Escrever testes | `test/CONTEXT.md` | — | Sempre dockerizado |
 | Configurar Docker | `docker/CONTEXT.md` | `app/`, `lib/` | |
 | Consultar docs / estratégia | `docs/CONTEXT.md` | — | Apenas leitura |
