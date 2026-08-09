@@ -118,7 +118,7 @@
 
 ## Cold Tier Protocol
 
-> Conhecimento arquivado em `docs/memory/`. **NÃO carregar automaticamente** — buscar via `grep`/`rg` apenas sob demanda.
+> Conhecimento arquivado fora do MEMORY.md ativo. **NÃO carregar automaticamente** — buscar via `grep`/`rg` apenas sob demanda.
 
 ### Quando arquivar
 
@@ -138,9 +138,9 @@
 
 ### Consulta
 
-Quando o agente está no passo 3 das Escalation Rules (terceira falha), buscar:
+Quando o agente está no passo 2 das Escalation Rules (segunda falha), consultar a seção "Lições Aprendidas" em `docs/MEMORY.md`:
 ```bash
-rg "<palavra-chave do problema>" docs/memory/
+rg "<palavra-chave do problema>" docs/MEMORY.md
 ```
 
 ---
