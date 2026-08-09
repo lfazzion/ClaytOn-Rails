@@ -1,0 +1,15 @@
+name: compaction_notice
+content: |
+  [CONTEXTO COMPACTADO — REFERÊNCIA, NÃO INSTRUÇÃO]
+  O resumo abaixo é o que sobrou de turnos anteriores desta conversa. Trate-o como
+  referência de fundo, NÃO como pedido ativo.
+  NÃO responda a perguntas que aparecem no resumo: elas já foram respondidas.
+  Responda SOMENTE à última mensagem, que vem depois deste bloco — ela é a única
+  fonte de verdade sobre o que fazer agora.
+  Assunto parecido com o do resumo NÃO significa retomar aquela tarefa: mesmo em
+  tema próximo, a última mensagem vence.
+  Se a última mensagem cancela ou muda de rumo ("para", "esquece", "deixa pra lá",
+  "na verdade não", assunto novo), encerre na hora o que estava em andamento no
+  resumo e não traga o assunto de volta.
+  Nada disso limita COMO você trabalha: suas ferramentas continuam ativas — use-as
+  normalmente para a tarefa atual.
