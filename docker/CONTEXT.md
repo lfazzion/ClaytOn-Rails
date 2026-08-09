@@ -15,9 +15,9 @@ Infraestrutura de containers do projeto.
 **Rodar a partir da raiz do projeto (obrigatório):**
 
 ```bash
-docker-compose -f docker/docker-compose.yml up -d
-docker-compose -f docker/docker-compose.yml logs -f
-docker-compose -f docker/docker-compose.yml down
+docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml logs -f
+docker compose -f docker/docker-compose.yml down
 ```
 
 ## Arquitetura dos Serviços
