@@ -60,7 +60,10 @@ class DockerComposeTest < ActiveSupport::TestCase
 
   test "python-scraper must not load the shared .env" do
     config = YAML.load_file(DOCKER_COMPOSE_PATH)
-    env_files = Array(config["services"]["python-scraper"]["env_file"]).map(&:to_s)
+    # env_file pode ser string ou hash com path/required — o path e o que importa.
+    env_files = Array(config["services"]["python-scraper"]["env_file"]).map do |e|
+      e.is_a?(Hash) ? e["path"].to_s : e.to_s
+    end
 
     # O sidecar roda engines de evasão contra sites hostis. Carregar ../.env
     # daria a ele SECRET_KEY_BASE, DISCORD_BOT_TOKEN e as chaves de LLM.
@@ -87,7 +90,11 @@ class DockerComposeTest < ActiveSupport::TestCase
 
   test "searxng must not load the shared .env" do
     config = YAML.load_file(DOCKER_COMPOSE_PATH)
-    env_files = Array(config["services"]["searxng"]["env_file"]).map(&:to_s)
+    # env_file pode ser string (`- ./.env.searxng`) ou hash com path/required
+    # (`- path: ./.env.searxng, required: false`); o path e o que importa aqui.
+    env_files = Array(config["services"]["searxng"]["env_file"]).map do |e|
+      e.is_a?(Hash) ? e["path"].to_s : e.to_s
+    end
 
     # Mesma classe de exposição do sidecar: o searxng busca e parseia HTML de
     # sites arbitrários da internet. Ele precisa de UMA variável
