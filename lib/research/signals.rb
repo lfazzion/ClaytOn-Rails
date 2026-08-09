@@ -21,6 +21,10 @@ module Research
       "polymarket" => [["volume", 0.60], ["liquidity", 0.40]]
     }.freeze
 
+    # Alias de campo por canal: o scoring procura `reposts`, o canal X entrega
+    # `retweets` — sem o alias, item com só retweet vira engagement nil.
+    FIELD_ALIASES = { "reposts" => "retweets" }.freeze
+
     VOTE_LOG_REFERENCE = {
       "reddit"     => 7.6,
       "hackernews" => 6.2,
@@ -98,11 +102,15 @@ module Research
       else
         weights = ENGAGEMENT_WEIGHTS[src]
         if weights
-          has_any = weights.any? { |field, _| !fetch_val(engagement, field).nil? }
+          has_any = weights.any? do |field, _|
+            !fetch_val(engagement, field).nil? ||
+              (FIELD_ALIASES[field] && !fetch_val(engagement, FIELD_ALIASES[field]).nil?)
+          end
           return nil unless has_any
 
           weights.sum do |field, weight|
             val = fetch_val(engagement, field)
+            val = fetch_val(engagement, FIELD_ALIASES[field]) if val.nil? && FIELD_ALIASES[field]
             log1p(val) * weight
           end
         else
@@ -115,7 +123,9 @@ module Research
     end
 
     def self.freshness(published_at, max_days: 30, reference: Time.now.utc)
-      return 1.0 if published_at.nil?
+      # Data ausente NÃO ganha frescor máximo (isso favoreceria item sem data
+      # sobre item datado): neutro 0.5, sem mentir nem penalizar.
+      return 0.5 if published_at.nil?
 
       ref = reference.is_a?(Time) ? reference : Time.parse(reference.to_s)
       pub = case published_at

@@ -35,7 +35,17 @@ class ResearchSignalsTest < ActiveSupport::TestCase
     assert_in_delta 1.0, Research::Signals.freshness(agora, reference: agora), 0.01
     assert_in_delta 0.5, Research::Signals.freshness(agora - (15 * 86400), reference: agora), 0.05
     assert_equal 0.0, Research::Signals.freshness(agora - (31 * 86400), reference: agora)
-    assert_equal 1.0, Research::Signals.freshness(nil)
+    # Data ausente é NEUTRO (0.5), não frescor máximo — item sem data não pode
+    # superar item datado de hoje (achado de revisão).
+    assert_equal 0.5, Research::Signals.freshness(nil)
+  end
+
+  test "retweets do canal X é aceito como alias de reposts" do
+    eng_x = { "retweets" => 1_000_000 }
+    raw = Research::Signals.engagement_raw("x", eng_x)
+
+    refute_nil raw, "retweets deve alimentar o campo reposts via FIELD_ALIASES"
+    assert raw > 0
   end
 
   test "source_quality usa tabela com fallback 0.6" do

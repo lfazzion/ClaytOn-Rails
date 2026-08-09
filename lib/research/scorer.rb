@@ -12,23 +12,21 @@ module Research
   # Fórmula do Score Composto:
   #   score = (0.45 * relevância + 0.35 * engajamento_norm + 0.20 * qualidade) * freshness
   #
-  # Justificativa da Normalização Cross-Platform de Engajamento:
+  # Normalização de Engajamento (intra-plataforma):
   #
   # engagement_raw já calcula o engajamento em escala logarítmica (soma ponderada de log1p).
-  # Como cada plataforma possui escalas nativas muito distintas (ex: views no YouTube
-  # chegam a milhões, enquanto scores no HackerNews chegam a centenas), utilizamos a
-  # constante VOTE_LOG_REFERENCE[source] (ex: 7.6 para reddit, 10.3 para youtube) que
-  # representa o teto logarítmico esperado de um post altamente engajado na plataforma.
-  #
-  # A normalização é calculada como:
+  # A constante VOTE_LOG_REFERENCE[source] (ex: 7.6 para reddit, 10.3 para youtube) é a
+  # referência de escala logarítmica da plataforma, então:
   #   engajamento_norm = [1.0, raw / ref].min
   #
-  # Isso garante que:
-  # 1. O score fica estritamente no intervalo [0.0, 1.0].
-  # 2. A comparação entre plataformas é justa: atingir a referência máxima da sua
-  #    plataforma gera engajamento_norm = 1.0 em qualquer canal.
-  # 3. Métrica ausente ou engagement_raw nil produz engajamento_norm = 0.0 (sem penalizar
-  #    excessivamente o score final se a relevância e qualidade forem altas).
+  # Isso mantém o score em [0.0, 1.0] e dá uma calibração razoável POR PLATAFORMA
+  # (um item no teto da própria plataforma chega a 1.0). NÃO é comparabilidade
+  # cross-platform comprovada: cada chamada da tool usa uma plataforma só, e a
+  # referência original do last30days normaliza votos de comentário — a calibração
+  # agregada aqui é uma aproximação documentada, não um benchmark.
+  #
+  # Métrica ausente ou engagement_raw nil produz engajamento_norm = 0.0 (sem penalizar
+  # excessivamente o score final se a relevância e qualidade forem altas).
   class Scorer
     class << self
       def score(item, query:)
@@ -55,7 +53,10 @@ module Research
         fresh = Signals.freshness(published_at)
 
         composite = (0.45 * relevance + 0.35 * eng_norm + 0.20 * quality) * fresh
-        composite.clamp(0.0, 1.0).round(2)
+        # Valor COMPLETO, sem arredondar: o sort ordena por ele e o round(2)
+        # ficaria com empates que degradam a ordem nativa da plataforma.
+        # O campo exposto ("relevance_score") é que arredonda para o modelo.
+        composite.clamp(0.0, 1.0)
       rescue StandardError => e
         Rails.logger.error "[Research::Scorer] erro ao pontuar item: #{e.class}: #{e.message}"
         0.0
@@ -66,13 +67,19 @@ module Research
 
         pq = query.is_a?(Relevance::PreparedQuery) ? query : Relevance::PreparedQuery.build(query)
 
-        Array(items).map do |item|
-          next item unless item.is_a?(Hash)
+        # Ordena pelos BRUTOS (sem round): arredondar antes do sort criava
+        # empates que degradavam a ordem nativa da plataforma. O campo exposto
+        # "relevance_score" é que arredonda para o modelo.
+        Array(items).filter_map do |item|
+          next nil unless item.is_a?(Hash)
 
           scored = item.dup
-          scored["score"] = score(item, query: pq)
-          scored
-        end.sort_by { |item| -(item.is_a?(Hash) ? (item["score"] || item[:score] || 0.0) : 0.0) }
+          # Campo próprio do scorer — NÃO sobrescreve "score" (o canal Reddit usa
+          # "score" para upvotes; apagar isso roubava informação do modelo).
+          bruto = score(item, query: pq)
+          scored["relevance_score"] = bruto.round(2)
+          [scored, bruto]
+        end.sort_by { |_scored, bruto| -bruto }.map(&:first)
       end
 
       private

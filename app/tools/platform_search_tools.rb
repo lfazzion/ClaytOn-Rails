@@ -79,7 +79,11 @@ class PlatformSearchTool < ToolBase
 
     n = limit ? clamp(limit, MIN_LIMIT, MAX_LIMIT) : DEFAULT_LIMIT
     resultados = Array(ler(nome, canal, alvo, n))
-    reordenados = sort_resultados(resultados, alvo)
+
+    # Plataformas POR_PERFIL (X) têm contrato cronológico ("posts mais
+    # recentes") — reordenar por popularidade quebraria a promessa da tool.
+    # O scoring temático só se aplica a busca por ASSUNTO (youtube/reddit).
+    reordenados = por_perfil?(nome) ? resultados : sort_resultados(resultados, alvo)
 
     success({ platform: nome, query: alvo, count: reordenados.size, results: reordenados })
   rescue Fetcher::CookieJar::Expired => e

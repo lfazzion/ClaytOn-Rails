@@ -28,14 +28,18 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     assert_equal "https://www.youtube.com/watch?v=abc", result[:data][:results].first["url"]
   end
 
-  test "busca no reddit devolve os itens do canal pontuados" do
+  test "busca no reddit devolve os itens do canal pontuados e PRESERVA o score nativo" do
     Fetcher::Channels::Reddit.expects(:search).with(query: "ruby 4", limit: 10).returns(THREADS)
 
     result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "reddit")
 
     assert_equal :success, result[:status]
     assert_equal "reddit", result[:data][:platform]
-    assert_kind_of Float, result[:data][:results].first["score"]
+    item = result[:data][:results].first
+    # O scoring expõe o composto em "relevance_score" e NÃO apaga os 54 upvotes
+    # que o canal Reddit entrega em "score" (colisão de campo = perda de info).
+    assert_kind_of Float, item["relevance_score"]
+    assert_equal 54, item["score"]
   end
 
   test "resultados da busca sao reordenados pelo score composto" do
@@ -50,7 +54,7 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     results = result[:data][:results]
     assert_equal 2, results.size
     assert_equal "https://www.youtube.com/watch?v=2", results.first["url"], "Item mais relevante deve vir primeiro"
-    assert results.first["score"] > results.last["score"]
+    assert results.first["relevance_score"] > results.last["relevance_score"]
   end
 
   test "nome de plataforma com maiuscula e espaco ainda casa" do
