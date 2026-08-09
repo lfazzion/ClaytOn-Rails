@@ -13,6 +13,8 @@ Models ActiveRecord do projeto. Herdam de `ApplicationRecord`.
 | `NewsArticle` | Artigo RSS coletado | `url` |
 | `ExternalCatalog` | Item de catálogo de fontes externas (TMDB, IGDB, Anilist) | `source` + `external_id` |
 | `Event` | Evento nerd brasileiro (RSS, manual) | `source_url` |
+| `Conversation` | Conversa do Discord; `scope` decide individual (`u:<user>:c:<channel>`) ou compartilhada (`c:<channel>`); a fronteira entre conversas é o `/new` | `scope` (índice parcial único com `active`) |
+| `ChatMessage` | Fala persistida da conversa (`user`/`assistant`); `content` literal, nunca reescrito | `conversation_id` |
 
 ## Regras Críticas para IA
 

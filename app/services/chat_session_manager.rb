@@ -55,7 +55,6 @@ class ChatSessionManager
     def ask(scope:, content:, user_id:, username:)
       with_scope_lock(scope.key) do
         conversation = conversation_for(scope)
-        conversation.assign_title_from(content)
 
         chat = prepare_chat(scope, conversation)
         texto = ask_through_chain(chat, outgoing_content(conversation, content, username),
@@ -63,12 +62,27 @@ class ChatSessionManager
 
         next handle_blank_response(scope) if texto.blank?
 
-        # A fala só é persistida DEPOIS da resposta — ver outgoing_content — e só
-        # quando há resposta de verdade para acompanhá-la (ver handle_blank_response).
-        ChatMessage.create!(conversation: conversation, role: "user", content: content,
-                            discord_user_id: user_id, discord_username: username)
-        ChatMessage.create!(conversation: conversation, role: "assistant", content: texto)
-        conversation.touch_activity!
+        # Título e mensagens só são persistidos DEPOIS da resposta — ver
+        # outgoing_content — e em transação. O título antes da resposta gravava
+        # uma pergunta que não existe quando a cadeia vinha em branco ou
+        # estourava; e três escritas soltas deixavam `user` órfão se a segunda
+        # falhasse (ex.: SQLITE_BUSY). O rescue despeja o cache quente: sem o
+        # despejo, a próxima reidratação leria do banco a pergunta sem resposta
+        # e duplicaria a fala do usuário.
+        begin
+          ActiveRecord::Base.transaction do
+            conversation.assign_title_from(content)
+            ChatMessage.create!(conversation: conversation, role: "user", content: content,
+                                discord_user_id: user_id, discord_username: username)
+            ChatMessage.create!(conversation: conversation, role: "assistant", content: texto)
+            conversation.touch_activity!
+          end
+        rescue StandardError => e
+          Rails.logger.error "[ChatSessionManager] Falha ao persistir o turno " \
+                             "(#{e.class.name}: #{e.message}) — despejando cache quente"
+          evict(scope.key)
+          raise
+        end
         texto
       end
     end
@@ -96,9 +110,24 @@ class ChatSessionManager
     # Lista ordenada INTEIRA (até o teto de memória). Quem fatia é `page`. Isso é
     # o que permite numeração contínua: o índice 25 é o índice 25 da lista toda,
     # independentemente de qual página está na tela.
+    #
+    # `left_joins` + `group` carregam a contagem de mensagens NA MESMA consulta
+    # (msg_count) — antes, cada linha da listagem disparava um COUNT separado
+    # (N+1) no renderizador. Bônus da troca por left_joins: conversas sem
+    # mensagem aparecem com 0, em vez de sumirem da lista.
     def sessions(scope)
-      Conversation.where(scope: scope.key).joins(:chat_messages).distinct
+      Conversation.where(scope: scope.key)
+                  .left_joins(:chat_messages)
+                  .group(:id)
+                  .select("conversations.*, COUNT(chat_messages.id) AS msg_count")
                   .recent.limit(sessions_max).to_a
+    end
+
+    # Total de conversas visíveis na listagem (respeitando o teto de memória).
+    # É um COUNT barato: nos caminhos de erro o bot usa isto em vez de
+    # reexecutar `sessions` inteira só para saber o tamanho da lista.
+    def sessions_total(scope)
+      [Conversation.where(scope: scope.key).count, sessions_max].min
     end
 
     # nil quando a página pedida não existe. Lista vazia devolve página 1 vazia,
@@ -153,7 +182,7 @@ class ChatSessionManager
         next :fora_da_faixa if alvo.nil?
         next :em_andamento if alvo.active
 
-        resultado = Apagada.new(title: alvo.title, message_count: alvo.chat_messages.count)
+        resultado = Apagada.new(title: alvo.title, message_count: alvo.msg_count)
         alvo.destroy!
         resultado
       end
@@ -373,8 +402,18 @@ class ChatSessionManager
       response.respond_to?(:content) ? response.content.to_s : response.to_s
     end
 
+    # A corrida que este loop fecha: `scope_mutex` cria o Mutex sob o global e o
+    # solta; entre soltar o global e chegar aqui, `prune_mutexes` (sob o
+    # global) pode apagar o mutex e outra thread criar um novo — aí duas
+    # threads sincronizariam em mutexes DIFERENTES para o MESMO escopo e
+    # mutariam o mesmo RubyLLM::Chat em paralelo. A identidade é revalidada sob
+    # o global ANTES de travar: se o mutex registrado já não é o que pegamos,
+    # recomeça com o atual.
     def with_scope_lock(scope_key, &block)
-      scope_mutex(scope_key).synchronize(&block)
+      loop do
+        m = scope_mutex(scope_key)
+        return m.synchronize(&block) if mutex.synchronize { mutexes[scope_key].equal?(m) }
+      end
     end
 
     def scope_mutex(scope_key)
