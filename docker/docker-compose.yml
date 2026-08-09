@@ -203,7 +203,6 @@ services:
       - scraping-data:/data
     environment:
       - PYTHONUNBUFFERED=1
-
     # Sem `ports:` de propósito — só alcançável pela rede interna (app/jobs).
     networks:
       - internal
@@ -268,5 +267,4 @@ services:
 
 volumes:
   scraping-data:
-
   chrome-profile:
