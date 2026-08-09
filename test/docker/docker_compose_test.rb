@@ -143,6 +143,21 @@ class DockerComposeTest < ActiveSupport::TestCase
     end
   end
 
+  test "app, jobs e discord-bot montam o storage por bind mount" do
+    # Regressão do achado 1 da rodada 1: o volume nomeado storage-data perdia o
+    # banco a cada container recriado. O banco de produção vive em storage/ no
+    # host — o mount tem que ser relativo ao compose (../storage), nunca nomeado.
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+
+    %w[app jobs discord-bot].each do |service_name|
+      volumes = Array(config["services"][service_name]["volumes"])
+      assert_includes volumes, "../storage:/rails/storage",
+                      "#{service_name} precisa do bind mount ../storage:/rails/storage"
+      assert_not_includes volumes, "storage-data:/rails/storage",
+                          "#{service_name} não pode usar o volume nomeado storage-data"
+    end
+  end
+
   test "jobs service should run solid queue via bin/jobs" do
     config = YAML.load_file(DOCKER_COMPOSE_PATH)
     jobs = config["services"]["jobs"]
@@ -253,6 +268,14 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_includes texto, "DISCORD_SESSIONS_PAGE_SIZE"
     assert_includes texto, "DISCORD_SESSIONS_MAX"
     assert_not_includes texto, "DISCORD_SESSIONS_LIMIT"
+  end
+
+  test "discord-bot declara as variáveis de raciocínio da cadeia de modelos" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    env = config["services"]["discord-bot"]["environment"]
+
+    assert_equal "${DISCORD_EFFORT_NOUS:-none}", env["DISCORD_EFFORT_NOUS"]
+    assert_equal "${DISCORD_POOLSIDE_THINKING:-}", env["DISCORD_POOLSIDE_THINKING"]
   end
 
   test "as chaves de API NÃO aparecem no bloco environment de nenhum serviço" do
