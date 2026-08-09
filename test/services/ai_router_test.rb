@@ -1,27 +1,24 @@
 require 'test_helper'
 
 class AiRouterTest < ActiveSupport::TestCase
-  test 'should route background context to GeminiClient' do
-    client = AiRouter.send(:select_client, :background, 100)
-    assert_instance_of Llm::GeminiClient, client
+  # ── Roteamento por contexto (API nova: select_client recebe UM argumento) ──
+  test 'should route :background context to GeminiBackgroundClient' do
+    client = AiRouter.send(:select_client, :background)
+    assert_instance_of Llm::GeminiBackgroundClient, client
   end
 
-  test 'should route interactive short prompt to GemmaClient' do
-    client = AiRouter.send(:select_client, :interactive, 1000)
-    assert_instance_of Llm::GemmaClient, client
-  end
-
-  test 'should route interactive long prompt to GemmaClient now that it is limiteless' do
-    client = AiRouter.send(:select_client, :interactive, 90000)
-    assert_instance_of Llm::GemmaClient, client
+  test 'should route :interactive context to GeminiInteractiveClient' do
+    client = AiRouter.send(:select_client, :interactive)
+    assert_instance_of Llm::GeminiInteractiveClient, client
   end
 
   test 'should raise ArgumentError for unknown context' do
     assert_raises(ArgumentError) do
-      AiRouter.send(:select_client, :unknown, 100)
+      AiRouter.send(:select_client, :unknown)
     end
   end
 
+  # ── extract_messages (preservado do teste antigo; mesma forma pública) ──
   test 'extract_messages should handle string prompt' do
     system_msg, user_msg = AiRouter.send(:extract_messages, 'hello world')
 
@@ -37,48 +34,111 @@ class AiRouterTest < ActiveSupport::TestCase
     assert_equal 'hello', user_msg
   end
 
-  test 'estimate_tokens should return 0 for nil' do
-    assert_equal 0, AiRouter.send(:estimate_tokens, nil)
+  # ── Identidade dos clientes: MODEL_ID, MAX_DAILY, daily_quota_key ─────────
+  test 'GeminiBackgroundClient model_id should be gemini 3.1 flash lite' do
+    assert_equal 'gemini-3.1-flash-lite', Llm::GeminiBackgroundClient::MODEL_ID
   end
 
-  test 'estimate_tokens should estimate based on character count' do
-    # 4 chars ≈ 1 token
-    tokens = AiRouter.send(:estimate_tokens, 'a' * 400)
-    assert_equal 100, tokens
+  test 'GeminiBackgroundClient MAX_DAILY should be 480' do
+    assert_equal 480, Llm::GeminiBackgroundClient::MAX_DAILY
   end
 
-  test 'gemma_tpm_threshold should be infinity' do
-    assert_equal Float::INFINITY, AiRouter.gemma_tpm_threshold
+  test 'GeminiBackgroundClient daily_quota_key should identify the background bucket' do
+    assert_equal 'gemini_background_daily', Llm::GeminiBackgroundClient.new.daily_quota_key
   end
 
-  test 'GeminiClient model_id should be gemini flash lite' do
-    assert_equal 'google/gemini-3.1-flash-lite', Llm::GeminiClient::MODEL_ID
+  test 'GeminiInteractiveClient model_id should be gemini 3.5 flash lite' do
+    assert_equal 'gemini-3.5-flash-lite', Llm::GeminiInteractiveClient::MODEL_ID
   end
 
-  test 'GemmaClient model_id should be gemma 4 31b' do
-    assert_equal 'gemma-4-31b-it', Llm::GemmaClient::MODEL_ID
+  test 'GeminiInteractiveClient MAX_DAILY should be 480' do
+    assert_equal 480, Llm::GeminiInteractiveClient::MAX_DAILY
   end
 
-  test 'OpenrouterClient model_id should be gemma 4 31b' do
-    assert_equal 'google/gemma-4-31b-it:free', Llm::OpenrouterClient::MODEL_ID
+  test 'GeminiInteractiveClient daily_quota_key should identify the interactive bucket' do
+    assert_equal 'gemini_interactive_daily', Llm::GeminiInteractiveClient.new.daily_quota_key
   end
 
-  test 'GeminiClient daily quota should be 480' do
-    assert_equal 480, Llm::GeminiClient::MAX_DAILY
+  test 'OpenrouterClient model_id should be openrouter/free' do
+    assert_equal 'openrouter/free', Llm::OpenrouterClient::MODEL_ID
   end
 
-  test 'GemmaClient daily quota should be 1450' do
-    assert_equal 1_450, Llm::GemmaClient::MAX_DAILY
+  test 'OpenrouterClient MAX_DAILY should be 400' do
+    assert_equal 400, Llm::OpenrouterClient::MAX_DAILY
   end
 
-  test 'BaseClient should raise QuotaExceededError when quota exceeded' do
-    client = Llm::GeminiClient.new
+  # ── BaseClient: quota ─────────────────────────────────────────────────────
+  test 'BaseClient should raise QuotaExceededError when daily quota is reached' do
+    client = Llm::GeminiBackgroundClient.new
 
-    # Mock Rails.cache to return quota reached
-    Rails.cache.expects(:read).with(regexp_matches(/gemini_daily/)).returns(480)
+    Rails.cache.stubs(:read).returns(480) # max_daily_requests
 
     assert_raises Llm::BaseClient::QuotaExceededError do
       client.send(:check_quota!)
     end
+  end
+
+  test 'BaseClient should NOT raise when under the daily quota' do
+    client = Llm::GeminiBackgroundClient.new
+
+    Rails.cache.stubs(:read).returns(0)
+
+    assert_nothing_raised do
+      client.send(:check_quota!)
+    end
+  end
+
+  # ── complete: extrai prompt, delega ao cliente certo ─────────────────────
+  test 'complete with :background delegates to GeminiBackgroundClient with user message' do
+    Llm::GeminiBackgroundClient.any_instance
+                                .expects(:complete)
+                                .with('hello', system: nil, tools: [])
+                                .returns('ok')
+
+    assert_equal 'ok', AiRouter.complete('hello', context: :background)
+  end
+
+  test 'complete with :interactive delegates to GeminiInteractiveClient' do
+    Llm::GeminiInteractiveClient.any_instance
+                                .expects(:complete)
+                                .with('hello', system: nil, tools: [])
+                                .returns('ok')
+
+    assert_equal 'ok', AiRouter.complete('hello', context: :interactive)
+  end
+
+  test 'complete with hash prompt forwards system and user to the client' do
+    Llm::GeminiInteractiveClient.any_instance
+                                .expects(:complete)
+                                .with('hello', system: 'be brief', tools: [])
+                                .returns('ok')
+
+    assert_equal 'ok', AiRouter.complete({ system: 'be brief', user: 'hello' })
+  end
+
+  test 'complete falls back to OpenrouterClient on QuotaExceededError' do
+    Llm::GeminiBackgroundClient.any_instance
+                                .expects(:complete)
+                                .raises(Llm::BaseClient::QuotaExceededError, 'quota')
+
+    Llm::OpenrouterClient.any_instance
+                        .expects(:complete)
+                        .with('hello', system: nil, tools: [])
+                        .returns('fallback')
+
+    assert_equal 'fallback', AiRouter.complete('hello', context: :background)
+  end
+
+  test 'complete falls back to OpenrouterClient on RubyLLM::RateLimitError' do
+    Llm::GeminiInteractiveClient.any_instance
+                                .expects(:complete)
+                                .raises(RubyLLM::RateLimitError.new('rate limit'))
+
+    Llm::OpenrouterClient.any_instance
+                        .expects(:complete)
+                        .with('hello', system: nil, tools: [])
+                        .returns('fallback')
+
+    assert_equal 'fallback', AiRouter.complete('hello')
   end
 end

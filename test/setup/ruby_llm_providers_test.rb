@@ -80,6 +80,18 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     # 2026-08-07: com 'developer' ela responde genérico em inglês; com 'system'
     # obedece. Sem esta configuração o bot perde persona, timestamp e as regras
     # das 19 tools no elo primário, e nenhum teste que estuba RubyLLM.chat vê isso.
+    #
+    # O CI não tem POOLSIDE_API_KEY nem NOUS_API_KEY no .env: o initializer já
+    # rodou, deixou os campos nil, e o construtor do provider chama
+    # `ensure_configured!` que levanta ConfigurationError se a chave exigida for
+    # nil (ver ruby_llm-1.14.0/lib/ruby_llm/provider.rb:247-252). Os stubs abaixo
+    # satisfazem a presença exigida pela gem (o require do provider só checa
+    # presença, não validade) sem alterar a asserção sobre o papel da mensagem.
+    ENV["POOLSIDE_API_KEY"] ||= "chave-teste-invalida"
+    ENV["NOUS_API_KEY"]     ||= "chave-teste-invalida"
+    RubyLLM.config.poolside_api_key = ENV["POOLSIDE_API_KEY"]
+    RubyLLM.config.nous_api_key     = ENV["NOUS_API_KEY"]
+
     %i[poolside nous openrouter].each do |slug|
       provedor = RubyLLM::Provider.providers[slug].new(RubyLLM.config)
       mensagens = provedor.send(:format_messages, [RubyLLM::Message.new(role: :system, content: "x")])
