@@ -34,7 +34,9 @@ services:
       PYTHON_SCRAPER_URL: "http://python-scraper:8080"
     volumes:
       # Bind mount relativo ao docker-compose.yml → ../storage = raiz do projeto
-      - storage-data:/rails/storage
+      # NUNCA volume nomeado: o banco de producao vive em storage/ no host
+      # (CLAUDE.md: SQLite bind mount obrigatorio).
+      - ../storage:/rails/storage
     # Loopback apenas: /internal/extract é consumido pelo Hermes na mesma VM.
     # O firewall do host é uma camada só — não publicar em 0.0.0.0.
     ports:
@@ -72,7 +74,7 @@ services:
       XDG_CACHE_HOME: /tmp/.chromium
       PYTHON_SCRAPER_URL: "http://python-scraper:8080"
     volumes:
-      - storage-data:/rails/storage
+      - ../storage:/rails/storage
     depends_on:
       chrome:
         condition: service_healthy
@@ -118,7 +120,7 @@ services:
       # curtas demais em pergunta dificil.
       DISCORD_POOLSIDE_THINKING: ${DISCORD_POOLSIDE_THINKING:-}
     volumes:
-      - storage-data:/rails/storage
+      - ../storage:/rails/storage
     networks:
       - internal
       - browser
@@ -201,7 +203,7 @@ services:
       - scraping-data:/data
     environment:
       - PYTHONUNBUFFERED=1
-      - SCRAPER_PORT=8080
+
     # Sem `ports:` de propósito — só alcançável pela rede interna (app/jobs).
     networks:
       - internal
@@ -266,5 +268,5 @@ services:
 
 volumes:
   scraping-data:
-  storage-data:
+
   chrome-profile:
