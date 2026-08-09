@@ -66,7 +66,7 @@
 
 | Data | Padrão | Contexto |
 |------|--------|----------|
-| 2026-04-17 | Upgrade para Gemma 4 31B | Atualização do modelo interativo de curto contexto (google/gemma-4-31b) em substituição ao Gemma 3 27B. |
+| 2026-08-09 | Split Gemini background/interactive + cadeia nous → poolside → openrouter | Substitui o cliente único Gemma 4 31B (`gemma_client.rb`, removido) por dois clientes Gemini por tier — `gemini_background_client.rb` (gemini-3.1-flash-lite, background) e `gemini_interactive_client.rb` (gemini-3.5-flash-lite, interactive) — e pela `ModelChain` (nous → poolside → openrouter). A `ModelChain` ainda não é consumida pelo chat: o `ChatSessionManager` passará a usá-la após o merge do PR de sessões (dependência de ordem). |
 | 2026-03-30 | Swap via zRAM (ALGO=zstd, 50%) em vez de disco físico | Poupa limite agressivo de IOPS (3000) do boot volume da OCI. Melhoria pragmática nativa via `zram-tools`. |
 | 2026-03-26 | ruby_llm ~> 1.14 (não 1.12) | Suporte a Imagen via `RubyLLM.paint` — API mudou em 1.14 |
 | 2026-03-26 | OpenStruct removido da stdlib em Ruby 4.0 | Usar classes plain ou Mocha mocks em testes em vez de `require 'ostruct'` |
@@ -101,6 +101,7 @@
 | 2026-03-26 | `require_relative` errado em test de concern (`test/jobs/concerns/`) | Arquivo em subdiretório requer `../../../` em vez de `../../` para sair do concern | Verificar path relativo considerando profundidade do diretório |
 | 2026-03-28 | Deploy rollback com snapshot_images() era ineficaz | Snapshot tirado DEPOIS do `git pull` capturava imagens do novo código quebrado, não do código anterior funcional. Rollback marcava imagens atuais com `-rollback` em vez de restaurar as anteriores | Simplificar: `git reset --hard` + `docker compose build` para rebuild do código anterior |
 | 2026-03-28 | Migration falha não parava deploy | deploy.sh usava `WARNING` + `cat` sem `exit 1`, continuava deploy com banco incompatível | Adicionar `rollback` + `exit 1` no bloco de falha de migration |
+| 2026-08-09 | Limiar inerte no initializer de LLM: falha silenciosa que mascara bug nosso | `require 'ruby_llm'` e os `require` locais de `lib/llm/` dividiam o mesmo `rescue LoadError`; require errado ou registro incompleto subia a app "de pé", logando "Gem não disponível" enganoso, sem provedor nem modelo novo | `require 'ruby_llm'` é o único ponto coberto pelo rescue; `require` locais ficam FORA dele, então erro ali estoura o boot (regra 3/CLAUDE.md). Citações: `config/initializers/ruby_llm.rb` e `test/lib/llm/model_chain_test.rb` |
 
 <!-- Template para novas entradas:
 | YYYY-MM-DD | Descrição concisa do bug | O que causou | Como foi resolvido (`arquivo.rb`, classe, método) |
@@ -153,7 +154,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
-| 2026-04-17 | Upgraded default short-context interaction model from Gemma 3 27B to Gemma 4 31B (`gemma_client.rb` and docs). | Padrões Ratificados |
+| 2026-08-09 | Decisão de modelo único Gemma 4 31B (`gemma_client.rb`) substituída: split Gemini background/interactive + cadeia nous → poolside → openrouter. | Padrões Ratificados |
 | 2026-03-30 | Atualização de arquitetura OCI Free Tier: Substituído o `/swapfile` (disco físico) por gerador de memória comprimida `zRAM`, minimizando o esgotamento de IOPS no boot volume. Ajustado swappiness de 10 para 100. Adição de parâmetros de cifra (Ciphers/MACS) estritos ao hardening SSH. | Contexto Ativo, Padrões Ratificados |
 | 2026-03-28 | Correções deploy.sh: rollback com git reset --hard (em vez de git checkout), snapshot de Docker image IDs pré-deploy para possibility de rollback completo de containers. | Contexto Ativo |
 | 2026-03-28 | Correções review PR #10: oracle-cloud-setup.sh — propagar $DOCKER_USER para limits.d (Phase 8) e chown (Phase 9), sshd -t antes de restart SSH, iptables idempotente com -C check, fstab append com grep -qF. ERROS.md checklist atualizada. | Contexto Ativo, Lições Aprendidas |
