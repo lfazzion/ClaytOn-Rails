@@ -1,6 +1,18 @@
-# Rede interna fechada — nenhum serviço expõe porta desnecessária
+# Duas redes, de propósito.
+#
+# `internal` — o barramento comum: app, jobs, discord-bot, python-scraper, searxng.
+# `browser`  — SÓ o chrome e quem precisa dirigi-lo (app, jobs, discord-bot, test).
+#
+# A separação existe porque o CDP na 9222 não tem autenticação e o Chromium marcou
+# isso como WontFix: quem alcança a porta dirige o navegador e lê todos os cookies
+# da sessão (o ataque tem nome, "Cookie Crimes"). O `python-scraper` é o container
+# de maior exposição do stack — roda engines de evasão contra sites hostis, com
+# entrada vinda dos alvos — e não tem motivo nenhum para alcançar o chrome. Com o
+# perfil do Chrome persistente e logado, essa vizinhança passaria a valer uma conta.
 networks:
   internal:
+    driver: bridge
+  browser:
     driver: bridge
 
 services:
@@ -19,16 +31,20 @@ services:
       RAILS_LOG_TO_STDOUT: "true"
       XDG_CONFIG_HOME: /tmp/.chromium
       XDG_CACHE_HOME: /tmp/.chromium
+      PYTHON_SCRAPER_URL: "http://python-scraper:8080"
     volumes:
       # Bind mount relativo ao docker-compose.yml → ../storage = raiz do projeto
-      - ../storage:/rails/storage
+      - storage-data:/rails/storage
+    # Loopback apenas: /internal/extract é consumido pelo Hermes na mesma VM.
+    # O firewall do host é uma camada só — não publicar em 0.0.0.0.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       chrome:
         condition: service_healthy
     networks:
       - internal
+      - browser
     entrypoint: bin/entrypoint
     command: bin/rails server -b 0.0.0.0
     healthcheck:
@@ -54,13 +70,15 @@ services:
       RAILS_LOG_TO_STDOUT: "true"
       XDG_CONFIG_HOME: /tmp/.chromium
       XDG_CACHE_HOME: /tmp/.chromium
+      PYTHON_SCRAPER_URL: "http://python-scraper:8080"
     volumes:
-      - ../storage:/rails/storage
+      - storage-data:/rails/storage
     depends_on:
       chrome:
         condition: service_healthy
     networks:
       - internal
+      - browser
     entrypoint: bin/entrypoint-jobs
     command: bin/jobs start
     restart: unless-stopped
@@ -76,10 +94,34 @@ services:
     environment:
       RAILS_ENV: production
       RAILS_LOG_TO_STDOUT: "true"
+      PYTHON_SCRAPER_URL: "http://python-scraper:8080"
+      DISCORD_OPEN_CHANNEL_IDS: ${DISCORD_OPEN_CHANNEL_IDS:-}
+      DISCORD_MUTE_PREFIX: ${DISCORD_MUTE_PREFIX:-//}
+      DISCORD_COMPACTION_THRESHOLD: ${DISCORD_COMPACTION_THRESHOLD:-0.75}
+      DISCORD_REHYDRATE_MESSAGES: ${DISCORD_REHYDRATE_MESSAGES:-30}
+      DISCORD_PROTECTED_TAIL: ${DISCORD_PROTECTED_TAIL:-8}
+      # Quantas conversas o /sessions mostra por pagina.
+      DISCORD_SESSIONS_PAGE_SIZE: ${DISCORD_SESSIONS_PAGE_SIZE:-20}
+      # Teto de conversas que os comandos alcancam. Guarda de memoria da consulta,
+      # nao limite de uso.
+      DISCORD_SESSIONS_MAX: ${DISCORD_SESSIONS_MAX:-500}
+      DISCORD_COMMAND_GUILD_ID: ${DISCORD_COMMAND_GUILD_ID:-}
+      # Esforco de raciocinio do elo Nous. Aceitos: none, low, medium, high.
+      # Valor fora dessa lista da HTTP 400 em TODA chamada do elo, entao a
+      # ModelChain recusa o invalido e cai em `none`, com aviso no log.
+      DISCORD_EFFORT_NOUS: ${DISCORD_EFFORT_NOUS:-none}
+      # Vazio = raciocinio DESLIGADO na rota direta da Poolside (o padrao).
+      # `true` devolve o comportamento padrao da API. Medido em 07/08/2026:
+      # desligado, mediana de 254 ms e zero tokens de raciocinio; ligado, 9,7s e
+      # ~1.100 tokens. A rota nao aceita reasoning_effort, so
+      # chat_template_kwargs.enable_thinking. Religue se as respostas ficarem
+      # curtas demais em pergunta dificil.
+      DISCORD_POOLSIDE_THINKING: ${DISCORD_POOLSIDE_THINKING:-}
     volumes:
-      - ../storage:/rails/storage
+      - storage-data:/rails/storage
     networks:
       - internal
+      - browser
     entrypoint: bin/discord-bot
     restart: unless-stopped
 
@@ -90,10 +132,24 @@ services:
     shm_size: '2gb'
     security_opt:
       - seccomp:unconfined
-    ports:
-      - "9222:9222"
+    # SEM `ports:` de propósito. A 9222 é o CDP — controle remoto total do navegador,
+    # sem autenticação, WontFix no Chromium. O Rails nunca usou a porta do host: fala
+    # com `chrome:9222` pela rede. Publicá-la em 127.0.0.1 dava a qualquer processo
+    # local da VM o poder de dirigir o navegador e roubar os cookies da sessão.
+    # Para depurar com `chrome://inspect`, republique temporariamente e remova depois.
+    #
+    # `--user-data-dir` + volume dá perfil estável (Local Storage, cache, origin
+    # trials). ATENÇÃO — MEDIDO EM 04/08, COM CONTROLE: esta imagem NÃO persiste
+    # COOKIE em disco. Nem com navegação real nem com parada graciosa aparece um
+    # arquivo `Cookies` no perfil; o `Default/` fica só com Cache, Local Storage e
+    # companhia. O armazém durável de sessão continua sendo o jar no banco
+    # (`Fetcher::CookieJar`); o Chrome guarda a sessão apenas enquanto o processo
+    # vive. Trocar para um Chromium completo é o que mudaria isso.
+    command: ["--user-data-dir=/data"]
+    volumes:
+      - chrome-profile:/data
     networks:
-      - internal
+      - browser
     healthcheck:
       test: ["CMD-SHELL", "socat -u OPEN:/dev/null TCP:localhost:9222,connect-timeout=3 2>/dev/null"]
       interval: 5s
@@ -118,6 +174,7 @@ services:
       - ../:/rails
     networks:
       - internal
+      - browser
     profiles:
       - test
     entrypoint: bin/rails
@@ -128,14 +185,79 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.python
+    # env_file DEDICADO — nunca ../.env. Este é o container de maior exposição do
+    # stack: roda nodriver/camoufox/curl-impersonate CONTRA sites hostis, com
+    # entrada vinda dos próprios alvos de scraping. Dar a ele SECRET_KEY_BASE,
+    # DISCORD_BOT_TOKEN e as chaves de LLM é o pior lugar possível para guardá-las.
+    # `.env.sidecar` casa com o padrão `.env.*` do .gitignore; `sidecar.env` não
+    # casaria e seria commitado com o token dentro.
+    env_file:
+      - ./.env.sidecar
     volumes:
       - ../scripts/python:/app/scripts
       - scraping-data:/data
     environment:
       - PYTHONUNBUFFERED=1
+      - SCRAPER_PORT=8080
+    # Sem `ports:` de propósito — só alcançável pela rede interna (app/jobs).
     networks:
       - internal
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── SearXNG Web Search ───────────────────────────────────────────────────
+  searxng:
+    # PINADA POR DIGEST, de propósito. `:latest` é tag mutável e
+    # `docker compose up` NÃO a repuxa: esta VM ficou 3 meses na 2026.4.22, com o
+    # duckduckgo quebrado, achando que estava atualizada — metade do incidente de
+    # 05/08/2026 foi só isso. Com o digest, atualizar volta a ser decisão
+    # explícita, como o IMAGE_TAG já faz nas imagens próprias.
+    #
+    # Este digest é a 2026.8.4, a versão medida em 05/08/2026 (é ela que traz o
+    # duckduckgo reescrito e o `duckduckgo web`). Para atualizar de propósito:
+    #   docker pull searxng/searxng:latest
+    #   docker image inspect searxng/searxng:latest --format '{{index .RepoDigests 0}}'
+    # cole o digest aqui, suba e rode `scripts/proofs/web_search_proof.sh` —
+    # upgrade de SearXNG mexe no catálogo de engines, e o `keep_only` do
+    # settings.yml descarta nome inválido em SILÊNCIO.
+    image: searxng/searxng@sha256:f4c8e59de166ed71f6380c0847c312ca51f0d41996e31d0559163b6b09ecde52
+    # env_file DEDICADO — nunca ../.env. O searxng busca e parseia HTML de sites
+    # arbitrários da internet: mesma categoria de exposição do python-scraper.
+    # Precisa de UMA variável (SEARXNG_SECRET_KEY, lida por `!env` no
+    # settings.yml); `../.env` entregava 26, incluindo SECRET_KEY_BASE,
+    # DISCORD_BOT_TOKEN, as chaves de LLM e o INTERNAL_EXTRACT_TOKEN.
+    # `.env.searxng` casa com o padrão `.env.*` do .gitignore; `searxng.env` não
+    # casaria e seria commitado com o segredo dentro.
+    env_file:
+      - ./.env.searxng
+    environment:
+      SEARXNG_BASE_URL: "http://searxng:8080/"
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    # Publicada só no loopback: o Hermes (perfil reader) usa esta instância como
+    # backend de web_search via SEARXNG_URL. Não é acessível de fora da VM.
+    ports:
+      - "127.0.0.1:8888:8080"
+    networks:
+      - internal
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
   scraping-data:
+  storage-data:
+  chrome-profile:

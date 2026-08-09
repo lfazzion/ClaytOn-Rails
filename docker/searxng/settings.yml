@@ -1,0 +1,144 @@
+use_default_settings:
+  engines:
+    # CUIDADO: `keep_only` descarta EM SILENCIO todo nome que nao exista no
+    # catalogo de fabrica. Foi assim que esta instancia passou meses sem google e
+    # sem startpage sem emitir um unico aviso — a lista antiga pedia os dois, o
+    # upstream marcou `google` como `inactive` em 04/07/2026 ("completely broken"
+    # depois de meses de guerra de bot-detection) e nada disse. Nome errado aqui
+    # nao e erro de boot, e um engine que simplesmente nao existe em producao.
+    # `scripts/proofs/web_search_proof.sh` confere o catalogo REAL contra esta
+    # lista justamente porque este arquivo nao consegue reclamar sozinho.
+    keep_only:
+      - brave
+      - seznam
+      - google cse
+      - duckduckgo
+      - duckduckgo web
+      - wikipedia
+      - wikidata
+      - stackoverflow
+      - askubuntu
+      - superuser
+      - github
+      # Estes falam API JSON OFICIAL de cada servico, nao raspam HTML — e por isso
+      # nao entram na briga de anti-bot que derrubou google, bing e startpage deste
+      # IP. Ampliar por aqui e estrutural: a API existe para ser usada, entao nao
+      # ha corrida armamentista para perder. Medido em 05/08/2026 que todos existem
+      # no catalogo da 2026.8.4 antes de serem pedidos aqui.
+      - hackernews
+      - arxiv
+      - pubmed
+      - openlibrary
+      - crates.io
+      - npm
+      - mdn
+      - docker hub
+      - wikibooks
+
+# Medido deste IP (datacenter Oracle Cloud) em 05/08/2026, com controle de
+# relevancia e de alcance HTTP cru. Cada linha abaixo tem uma medicao atras:
+#
+#   brave      FUNCIONA — melhor resultado do conjunto. "reddit ruby performance"
+#              devolveu r/ruby "Optimizing Ruby performance", "Is ruby really
+#              slow?" e "Ruby 3.3.0 performance: ups and downs". HTTP cru:
+#              200 com 98 blocos de snippet reais.
+#   seznam     FUNCIONA — HTTP cru 200, 426 KB, query refletida no canonical.
+#   google cse ponte adicionada pelo upstream em 04/07/2026 no lugar do `google`
+#              quebrado. Usa um CSE ID PUBLICO compartilhado por todas as
+#              instancias SearXNG do mundo — o proprio autor do patch avisa que
+#              o Google o quebra em 2027. Entra como reforco, nunca como base.
+#   ddg / ddgw na versao ANTIGA (2026.4.22) o duckduckgo dava CAPTCHA nos dois
+#              idiomas e o HTTP cru de lite/html.duckduckgo.com devolvia o
+#              formulario de anomaly.js. Na 2026.8.4 ele voltou a funcionar: o
+#              upstream reescreveu o engine em 2026 (PR #5758, #5839, #5931) e
+#              adicionou `duckduckgo web` em 01/06/2026 como caminho alternativo.
+#              Os dois entregam 10 resultados relevantes cada. Boa parte deste
+#              conserto foi so nunca ter repuxado a imagem: a `latest` local
+#              estava com 3 meses.
+#
+# FORA, e o motivo importa mais que a ausencia:
+#
+#   bing       REMOVIDO. Era o unico engine respondendo, e devolvia LIXO. Medido
+#              com cinco controles: pt-BR -> paginas de Roblox; sem `language` ->
+#              sorveteria chinesa; `locale=pt-BR` -> economia informal russa;
+#              query 100% em portugues + pt-BR -> verbetes de dicionario da
+#              palavra "desempenho"; SO `en-US` acerta. E a issue #4964 do
+#              SearXNG, aberta desde 02/07/2025, sem causa raiz. Lixo indistinguivel
+#              de acerto e pior que engine nenhum: o bot responde com confianca
+#              sobre a coisa errada. Alem disso o HTTP cru de www.bing.com deste
+#              IP ja devolve desafio Cloudflare Turnstile.
+#   mojeek     REMOVIDO. HTTP cru devolve <title>Captcha</title> deste IP, e o
+#              engine "responde" 200 que o SearXNG parseia como zero resultados —
+#              falha silenciosa, sem uma linha de log. Ate "!mjk python" veio vazio.
+#   marginalia REMOVIDO em 05/08/2026 pela primeira rodada de `web_search_proof.sh`,
+#              que e exatamente o buraco que a prova existe para achar. O dominio
+#              de fato mudou (search.marginalia.nu -> marginalia-search.com) e as
+#              duas chaves (`disabled`/`inactive`) estavam viradas, mas o engine
+#              NUNCA chegou a existir nesta instancia: ele exige credencial
+#              (`require_api_key: True`, chave pedida a mao em
+#              about.marginalia-search.com/article/api/) e sem ela o registro
+#              morre no boot —
+#                ERROR:searx.engines: Missing engine config attribute: "marginalia.api_key"
+#                ERROR:searx.engines: marginalia: can't register engine (loading engine failed)
+#              Ele nao aparecia no /config e nao entrava em busca nenhuma. Pedir
+#              aqui um engine que nao registra e a mesma mentira de `google` e
+#              `startpage`: a lista prometia sete engines e entregava quatro.
+#              Para voltar: obter a chave, por `api_key:` no bloco abaixo, e so
+#              entao devolver o nome ao keep_only.
+#   startpage  REMOVIDO. Serve desafio Anubis (proof-of-work) para este IP no HTTP
+#              cru, e "Suspended: CAPTCHA" pelo SearXNG — inclusive isolado com
+#              `!sp`. Voltou ao catalogo com o upgrade e mesmo assim nao passa: o
+#              portao e reputacao de IP, nao versao do engine.
+engines:
+  # Vem `disabled: true` de fabrica no catalogo do SearXNG (o upstream nao liga
+  # engine de nicho por padrao), mas nao ha nada de frágil neles: sao API JSON
+  # publica e documentada. O Algolia que serve a busca do Hacker News permite
+  # 10 mil requisicoes por hora por IP — tres ordens de grandeza acima do que
+  # este bot faz num mes.
+  - name: hackernews
+    disabled: false
+  - name: openlibrary
+    disabled: false
+  - name: crates.io
+    disabled: false
+  - name: npm
+    disabled: false
+  # `!szn` isolado devolve 10 resultados relevantes; o que o derrubava era o teto
+  # global de 6s sob as quatro buscas concorrentes. Timeout proprio em vez de
+  # afrouxar o teto de todo mundo — os outros nao precisam de mais que 6s.
+  - name: seznam
+    disabled: false
+    timeout: 10.0
+  - name: duckduckgo web
+    disabled: false
+
+server:
+  secret_key: "!env SEARXNG_SECRET_KEY"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  base_url: "http://searxng:8080/"
+  method: "GET"
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 1
+  default_lang: "pt-BR"
+
+# O default de fabrica e `request_timeout: 2.0`, apertado demais para engine que
+# raspa HTML a partir de um IP de datacenter — o alvo demora mais justamente com
+# quem ele desconfia, e um timeout curto vira "zero resultados" indistinguivel de
+# "nao achei nada". Os tetos ficam abaixo do read_timeout de 20s da WebSearchTool.
+#
+# `retries: 1` e deliberadamente baixo: sem `proxies`/`source_ips` configurados,
+# cada retry sai do MESMO IP, entao repetir e pedir rate-limit — foi como o brave
+# entrou em "Suspended: too many requests (suspended_time=180)" durante a medicao.
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+  retries: 1
