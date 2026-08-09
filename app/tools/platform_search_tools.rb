@@ -80,7 +80,12 @@ class PlatformSearchTool < ToolBase
     n = limit ? clamp(limit, MIN_LIMIT, MAX_LIMIT) : DEFAULT_LIMIT
     resultados = Array(ler(nome, canal, alvo, n))
 
-    success({ platform: nome, query: alvo, count: resultados.size, results: resultados })
+    # Plataformas POR_PERFIL (X) têm contrato cronológico ("posts mais
+    # recentes") — reordenar por popularidade quebraria a promessa da tool.
+    # O scoring temático só se aplica a busca por ASSUNTO (youtube/reddit).
+    reordenados = por_perfil?(nome) ? resultados : sort_resultados(resultados, alvo)
+
+    success({ platform: nome, query: alvo, count: reordenados.size, results: reordenados })
   rescue Fetcher::CookieJar::Expired => e
     # NUNCA lista vazia aqui: o modelo leria "não existe nada sobre isso" e
     # responderia isso ao usuário. O erro precisa dizer qual domínio renovar.
@@ -123,5 +128,14 @@ class PlatformSearchTool < ToolBase
     return canal.timeline(user: alvo, limit: limite) if por_perfil?(nome)
 
     canal.search(query: alvo, limit: limite)
+  end
+
+  def sort_resultados(resultados, query)
+    Research::Scorer.sort(resultados, query: query)
+  rescue StandardError => e
+    Rails.logger.error "[PlatformSearchTool] erro ao ordenar resultados com Scorer: #{e.class}: #{e.message}"
+    # Fallback NUNCA sobrescreve chaves nativas (o "score" do Reddit são
+    # upvotes): devolve intactos — sem scoring, mas sem perda de informação.
+    resultados
   end
 end
