@@ -71,7 +71,7 @@ class AiRouterTest < ActiveSupport::TestCase
   test 'BaseClient should raise QuotaExceededError when daily quota is reached' do
     client = Llm::GeminiBackgroundClient.new
 
-    Rails.cache.stubs(:read).returns(480) # max_daily_requests
+    Rails.cache.stubs(:read).with(regexp_matches(/gemini_background_daily/)).returns(480) # max_daily_requests
 
     assert_raises Llm::BaseClient::QuotaExceededError do
       client.send(:check_quota!)

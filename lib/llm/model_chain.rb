@@ -30,7 +30,7 @@ module Llm
   # chama trata isso, em vez de receber uma cadeia que mente.
   #
   # Escolha dos modelos dos elos 1 e 2, medida em 2026-08-07 com o prompt real
-  # e as 20 tools reais do bot, 9 cenários x 3 amostras cada:
+  # e as 17 tools reais do bot, 9 cenários x 3 amostras cada:
   #
   #   * Escolha de ferramenta (acertos/total, mediana de latência):
   #     laguna-s 27/27, 2.921 ms; hy3 26/27, 3.286 ms; laguna-xs (o que saiu do

@@ -59,7 +59,7 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
   end
 
   test "os modelos da cadeia declaram function_calling" do
-    # O bot é inútil sem tool calling: 19 tools dependem disso.
+    # O bot é inútil sem tool calling: 17 tools dependem disso.
     %w[poolside/laguna-xs-2.1 poolside/laguna-xs-2.1:free openrouter/free].each do |id|
       assert_includes RubyLLM.models.find(id).capabilities, "function_calling", id
     end
@@ -79,7 +79,7 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     # A rota direta da Poolside IGNORA o papel 'developer' — medido 3/3 em
     # 2026-08-07: com 'developer' ela responde genérico em inglês; com 'system'
     # obedece. Sem esta configuração o bot perde persona, timestamp e as regras
-    # das 19 tools no elo primário, e nenhum teste que estuba RubyLLM.chat vê isso.
+    # das 17 tools no elo primário, e nenhum teste que estuba RubyLLM.chat vê isso.
     #
     # O CI não tem POOLSIDE_API_KEY nem NOUS_API_KEY no .env: o initializer já
     # rodou, deixou os campos nil, e o construtor do provider chama
@@ -87,16 +87,29 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     # nil (ver ruby_llm-1.14.0/lib/ruby_llm/provider.rb:247-252). Os stubs abaixo
     # satisfazem a presença exigida pela gem (o require do provider só checa
     # presença, não validade) sem alterar a asserção sobre o papel da mensagem.
+    tinha_poolside_key = ENV.key?("POOLSIDE_API_KEY")
+    tinha_nous_key     = ENV.key?("NOUS_API_KEY")
+    poolside_key_antigo = RubyLLM.config.poolside_api_key
+    nous_key_antigo     = RubyLLM.config.nous_api_key
     ENV["POOLSIDE_API_KEY"] ||= "chave-teste-invalida"
     ENV["NOUS_API_KEY"]     ||= "chave-teste-invalida"
     RubyLLM.config.poolside_api_key = ENV["POOLSIDE_API_KEY"]
     RubyLLM.config.nous_api_key     = ENV["NOUS_API_KEY"]
 
-    %i[poolside nous openrouter].each do |slug|
-      provedor = RubyLLM::Provider.providers[slug].new(RubyLLM.config)
-      mensagens = provedor.send(:format_messages, [RubyLLM::Message.new(role: :system, content: "x")])
+    begin
+      %i[poolside nous openrouter].each do |slug|
+        provedor = RubyLLM::Provider.providers[slug].new(RubyLLM.config)
+        mensagens = provedor.send(:format_messages, [RubyLLM::Message.new(role: :system, content: "x")])
 
-      assert_equal "system", mensagens.first[:role], slug.to_s
+        assert_equal "system", mensagens.first[:role], slug.to_s
+      end
+    ensure
+      # Restaura o estado global (ENV + config): o ||= só seta quando a chave
+      # faltava, e sem o ensure a chave fake vaza para os testes seguintes.
+      ENV.delete("POOLSIDE_API_KEY") unless tinha_poolside_key
+      ENV.delete("NOUS_API_KEY")     unless tinha_nous_key
+      RubyLLM.config.poolside_api_key = poolside_key_antigo
+      RubyLLM.config.nous_api_key     = nous_key_antigo
     end
   end
 end

@@ -9,8 +9,8 @@ Integração pura com LLMs via RubyLLM (gem 1.14.0): OpenRouter, Gemini, Poolsid
 | `base_client.rb` | Classe base com error handling e retry |
 | `gemini_background_client.rb` | Cliente Gemini para tarefas assincronas (tier: background) |
 | `gemini_interactive_client.rb` | Cliente Gemini para conversa (tier: interactive short) |
-| `model_chain.rb` | A cadeia de rotas: Poolside → Nous → OpenRouter, com ajustes de raciocínio por rota |
-| `openrouter_client.rb` | Cliente OpenRouter do pipeline `AiRouter` (fallback das rotas Gemini). **Não** é o elo 3 da `ModelChain` — aquele é montado direto pelo `ChatSessionManager`, sem cota própria. |
+| `model_chain.rb` | A cadeia de rotas: Nous → Poolside → OpenRouter, com ajustes de raciocínio por rota |
+| `openrouter_client.rb` | Cliente OpenRouter do pipeline `AiRouter` (fallback das rotas Gemini). **Não** é o elo 3 da `ModelChain` — o elo OpenRouter da cadeia é montado dentro da própria `ModelChain` (`openrouter_link`), e o `ChatSessionManager` nem referencia a `ModelChain`. |
 | `prompt_loader.rb` | Carrega templates YAML de `config/prompts/` |
 | `model_registry.rb` | Consulta de modelos gratuitos vivos na OpenRouter |
 
@@ -36,8 +36,10 @@ usa `reasoning_effort` (via `Chat#with_thinking`). Trocar um pelo outro não
 degrada — dá HTTP 400 ou é ignorado em silêncio.
 
 `ModelChain.aggregator` expõe o modelo `tencent/hy3:free` no provedor `:nous`,
-reservado para a spec 3 (MoA — multiplicação de agentes). **Não** entra na cadeia
-do chat — é fiel na agregação mas 3× mais lento que o `laguna-xs` no chat.
+reservado para a spec 3 (MoA — multiplicação de agentes). O método em si não é
+chamado pela cadeia (quem a consome usa `links`), mas o MESMO modelo é o elo 1
+do chat (`nous_link`) desde a troca de 2026-08-07 — não é duplicação por engano:
+o hy3 ganhou nos dois critérios medidos para cada papel.
 
 ### `model_registry.rb` — consulta de modelos gratuitos vivos
 
