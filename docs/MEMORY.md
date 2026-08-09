@@ -108,6 +108,7 @@
 
 ---
 
+- Sidecar Python autenticado: o `PYTHON_SCRAPER_TOKEN` chega via `docker/.env.sidecar` (env_file do compose — PR #20 deps/infra; exemplo em `docker/.env.sidecar.example`). Sem o arquivo o `server.py` recusa subir (fail-closed, intencional).
 ## Decisões de Arquitetura Pendentes
 
 > Questões abertas aguardando validação do usuário ou mais investigação.
