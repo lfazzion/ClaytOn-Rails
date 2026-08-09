@@ -42,11 +42,16 @@ class Fetcher::Channels::RegistryTest < ActiveSupport::TestCase
   end
 
   test "EXTRACT_CHANNELS=0 desliga o roteador inteiro" do
+    anterior = ENV["EXTRACT_CHANNELS"]
     ENV["EXTRACT_CHANNELS"] = "0"
     assert_nil Fetcher::Channels::Registry.for_host("exemplo.test")
     assert_nil Fetcher::Channels::Registry.for_content_type("application/rss+xml")
   ensure
-    ENV.delete("EXTRACT_CHANNELS")
+    if anterior.nil?
+      ENV.delete("EXTRACT_CHANNELS")
+    else
+      ENV["EXTRACT_CHANNELS"] = anterior
+    end
   end
 
   test "fingerprint muda quando a configuracao muda" do

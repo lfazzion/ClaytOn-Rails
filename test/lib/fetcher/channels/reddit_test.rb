@@ -65,9 +65,28 @@ class Fetcher::Channels::RedditTest < ActiveSupport::TestCase
     assert_nil Fetcher::Channels::Reddit.call(url: "https://www.reddit.com/user/alguem")
   end
 
-  test "JSON invalido vindo da pagina vira nil, nao excecao" do
-    assert_nil Fetcher::Channels::Reddit.from_page(page: FakePage.new("{nao json"),
-                                                   url: "https://old.reddit.com/r/x/comments/a/b/")
+  # O caminho de LEITURA degradava em silêncio: `from_page` devolvia nil quando
+  # o EXTRACT_JS devolvia null, e o `||` do ExtractService caía no caminho
+  # comum SEM erro — a casca da página virava a thread, com engine "static".
+  # Agora nil vira PageFailed, erro nomeado que o serviço converte em campo.
+  test "JSON invalido vindo da pagina vira erro nomeado, nao excecao crua" do
+    erro = assert_raises(Fetcher::Channels::Reddit::PageFailed) do
+      Fetcher::Channels::Reddit.from_page(page: FakePage.new("{nao json"),
+                                          url: "https://old.reddit.com/r/x/comments/a/b/")
+    end
+
+    assert_kind_of Fetcher::Channels::Error, erro
+    assert_includes erro.message, "thread"
+  end
+
+  test "JS que devolveu null na leitura vira erro nomeado, nunca nil" do
+    erro = assert_raises(Fetcher::Channels::Reddit::PageFailed) do
+      Fetcher::Channels::Reddit.from_page(page: FakePage.new(nil),
+                                          url: "https://old.reddit.com/r/x/comments/a/b/")
+    end
+
+    assert_kind_of Fetcher::Channels::Error, erro
+    assert_includes erro.message, "ilegível"
   end
 
   # O seletor CSS iniciado por ">" é inválido em querySelector e levanta

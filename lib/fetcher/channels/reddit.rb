@@ -45,11 +45,24 @@ module Fetcher
       # devolver `[]` nesse caso faz o modelo responder "não existe nada sobre
       # isso" — o mesmo defeito que a casa já pagou uma vez, quando o `rescue` da
       # escalada de Chrome transformava erro em degradação silenciosa
-      # (MEMORY.md, 2026-08-01). O caminho de LEITURA já separa os dois casos:
-      # `from_page` devolve nil e o `ExtractService` nomeia o erro.
+      # (MEMORY.md, 2026-08-01). O caminho de LEITURA tem o mesmo problema e o
+      # mesmo conserto: `from_page` levantava `PageFailed` (erro nomeado, que o
+      # ExtractService converte em campo `error`) em vez de devolver nil — o nil
+      # caía no `||` do caminho comum e o serviço devolvia a casca da página
+      # como se fosse a thread, com `engine: "static"`.
       class SearchFailed < Error
         def initialize
           super("página de busca do Reddit veio ilegível — o seletor mudou ou a página não é a da busca")
+        end
+      end
+
+      # O par de `SearchFailed`, para o caminho de LEITURA: `from_page` devolvia
+      # nil quando o `EXTRACT_JS` devolvia null (seletor mudou, JSON inválido) e
+      # o `ExtractService` caía no caminho comum SEM erro — a mesma falha
+      # silenciosa que a busca foi construída para evitar.
+      class PageFailed < Error
+        def initialize
+          super("página de thread do Reddit veio ilegível — o seletor mudou ou a página não é a da thread")
         end
       end
 
@@ -165,9 +178,11 @@ module Fetcher
 
         # Público de propósito, igual ao canal de YouTube: toda a lógica está
         # aqui, e é por aqui que o teste entra sem precisar de um Chrome.
+        # `nil` do JS (seletor que mudou, JSON inválido) vira `PageFailed` —
+        # erro nomeado, nunca degradação silenciosa para o caminho estático.
         def from_page(page:, url:)
           payload = parse(page.evaluate(EXTRACT_JS))
-          return nil if payload.blank?
+          raise PageFailed if payload.nil?
 
           build(url, payload)
         end

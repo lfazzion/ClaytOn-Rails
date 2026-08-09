@@ -202,4 +202,55 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
       Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
     end
   end
+
+  # ── Busca (Youtube.search) — mesmos portões do caminho de leitura ──────────
+  # O `search` usava o jar PURO (CookieJar.require! + with_netscape_file sem
+  # injeção), ignorando a sessão viva do Chrome — a divergência que o
+  # SessionCookies existe para eliminar — e não passava por HostRateLimiter.
+
+  def stubbed_search(cookies:, origem:)
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([cookies, origem])
+    Fetcher::Channels::Youtube.stubs(:resultados).returns([])
+  end
+
+  test "search usa a sessao do SessionCookies (Chrome vivo antes do jar)" do
+    # Sem o stub, o jar está VAZIO neste teste e o `SessionCookies` levantaria
+    # Expired — o teste só passa se a sessão vier da fonte certa. O
+    # `with_netscape_file` real roda (escreve tempfile efêmero, sem rede).
+    stubbed_search(cookies: [{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], origem: :browser)
+
+    assert_equal [], Fetcher::Channels::Youtube.search(query: "ruby")
+  end
+
+  test "search barra rajada com rate limit antes de gastar processo" do
+    Fetcher::HostRateLimiter.stubs(:exceeded?)
+                            .with("youtube.com", max: Fetcher::Channels::Youtube::MAX_PER_WINDOW)
+                            .returns(true)
+    Fetcher::CookieJar.expects(:with_netscape_file).never
+
+    erro = assert_raises(Fetcher::Channels::Youtube::RateLimited) do
+      Fetcher::Channels::Youtube.search(query: "ruby")
+    end
+
+    assert_includes erro.message, "youtube.com"
+    assert Fetcher::Channels::Youtube::RateLimited < Fetcher::Channels::Error
+  end
+
+  test "search sem sessao em fonte nenhuma levanta Expired nomeando o dominio" do
+    Fetcher::BrowserCookies.stubs(:for).returns([])
+    Fetcher::CookieJar.stubs(:for).returns([])
+
+    erro = assert_raises(Fetcher::CookieJar::Expired) do
+      Fetcher::Channels::Youtube.search(query: "ruby")
+    end
+
+    assert_equal "youtube.com", erro.domain
+  end
+
+  test "search com query vazia devolve lista vazia sem gastar nada" do
+    Fetcher::HostRateLimiter.expects(:exceeded?).never
+    Fetcher::CookieJar.expects(:with_netscape_file).never
+
+    assert_equal [], Fetcher::Channels::Youtube.search(query: "   ")
+  end
 end

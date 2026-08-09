@@ -23,12 +23,34 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   class FakePage
     attr_reader :cookies, :visitado, :fechada
 
-    def initialize
+    def initialize(document_remote_ip: nil)
       @cookies = FakeCookies.new
       @fechada = false
+      @document_remote_ip = document_remote_ip
+      @listeners = {}
     end
 
-    def go_to(url) = @visitado = url
+    def go_to(url)
+      @visitado = url
+      return unless @document_remote_ip
+
+      Array(@listeners["Network.responseReceived"]).each do |blk|
+        blk.call("type" => "Document",
+                 "response" => { "url" => url, "remoteIPAddress" => @document_remote_ip })
+      end
+    end
+
+    def on(event, &block)
+      (@listeners[event] ||= []) << block
+      @listeners[event].size - 1
+    end
+
+    def off(event, id)
+      @listeners[event]&.delete_at(id)
+      true
+    end
+
+    def current_url = @visitado
     def close = @fechada = true
   end
 
@@ -59,6 +81,9 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     @page = FakePage.new
     @context = FakeContext.new(@page)
     Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
+    # O `with_page` valida a URL com o SsrfGuard antes de gastar browser —
+    # sem o stub, isto resolveria DNS de verdade no ambiente de teste.
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["93.184.216.34"])
     Fetcher::CookieJar.store!(
       domain: "youtube.com",
       cookies: [{ "name" => "SID", "value" => "abc", "domain" => ".youtube.com", "path" => "/" }],
@@ -105,5 +130,36 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
 
     assert @page.fechada
     assert @context.descartado
+  end
+
+  test "URL privada é recusada antes de gastar browser (invariante enforced)" do
+    Fetcher::SsrfGuard.stubs(:resolve_all).with("192.168.1.10").returns(["192.168.1.10"])
+
+    erro = assert_raises(Fetcher::SsrfGuard::Blocked) do
+      Fetcher::BrowserSession.with_page("http://192.168.1.10/admin") { |_p| :nunca }
+    end
+
+    assert_match(/privado|interno/i, erro.message)
+    assert_nil @page.visitado
+  end
+
+  test "documento que veio de IP diferente do validado levanta Blocked (DNS rebinding)" do
+    @page = FakePage.new(document_remote_ip: "10.0.0.1")
+    @context = FakeContext.new(@page)
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
+
+    erro = assert_raises(Fetcher::SsrfGuard::Blocked) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+
+    assert_match(/rebinding/i, erro.message)
+  end
+
+  test "documento que veio do IP validado passa" do
+    @page = FakePage.new(document_remote_ip: "93.184.216.34")
+    @context = FakeContext.new(@page)
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
+
+    assert_equal :ok, Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
   end
 end

@@ -163,6 +163,43 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
     assert_equal "rotacionado", Fetcher::CookieJar.for("youtube.com").first["value"]
   end
 
+  # O conserto do auto-sabotagem do RefreshSessionCookiesJob: renovar o payload
+  # sem estender o prazo deixava o portão de leitura (`expires_at > Time.current`)
+  # matar a sessão em T0+7d mesmo com ela viva e recém-rotacionada no banco.
+  test "refresh_from_netscape! estende expires_at junto da rotacao quando recebido" do
+    Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES, expires_at: 1.hour.from_now)
+
+    Tempfile.create(["jar", ".txt"]) do |f|
+      f.puts "# Netscape HTTP Cookie File"
+      f.puts [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "SID", "rotacionado"].join("\t")
+      f.flush
+      assert Fetcher::CookieJar.refresh_from_netscape!(
+        domain: "youtube.com", path: f.path, auth_cookies: %w[SID], expires_at: 7.days.from_now
+      )
+    end
+
+    registro = BrowserSessionCookie.find_by(domain: "youtube.com")
+    assert_operator registro.expires_at, :>, 2.days.from_now, "o prazo foi estendido junto da rotação"
+    assert_equal "rotacionado", Fetcher::CookieJar.for("youtube.com").first["value"]
+  end
+
+  test "refresh_from_netscape! sem expires_at nao mexe no prazo existente" do
+    Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES, expires_at: 3.days.from_now)
+
+    Tempfile.create(["jar", ".txt"]) do |f|
+      f.puts "# Netscape HTTP Cookie File"
+      f.puts [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "SID", "rotacionado"].join("\t")
+      f.flush
+      assert Fetcher::CookieJar.refresh_from_netscape!(
+        domain: "youtube.com", path: f.path, auth_cookies: %w[SID]
+      )
+    end
+
+    registro = BrowserSessionCookie.find_by(domain: "youtube.com")
+    assert_in_delta 3.days.from_now.to_f, registro.expires_at.to_f, 60,
+                    "chamada antiga (sem o argumento) continua só rotacionando o payload"
+  end
+
   # A armadilha: gravar por `old.reddit.com` criaria um SEGUNDO registro ao lado
   # de `reddit.com`, e as duas copias divergiriam a partir da proxima chamada.
   test "refresh_for! atualiza o registro do dominio raiz, nao cria um por subdominio" do

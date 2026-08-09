@@ -20,8 +20,12 @@ module Internal
   #
   # Falha de uma URL vira `error` dentro do array — nunca 500 no lote inteiro.
   class ExtractController < ActionController::API
-    MAX_URLS    = 10
     CONCURRENCY = (ENV["EXTRACT_CONCURRENCY"] || 4).to_i.clamp(1, 8)
+    # Lote limitado ao número de workers: o orçamento por URL
+    # (ExtractService::CHANNEL_TIMEOUT, 40s) só fecha abaixo dos 90s do reader
+    # se TODAS as URLs do lote rodarem em paralelo — 10 URLs com 4 workers
+    # seriam 3 ondas (~120s no pior caso) e o reader cortaria sem receber nada.
+    MAX_URLS    = CONCURRENCY
 
     before_action :authenticate!
 

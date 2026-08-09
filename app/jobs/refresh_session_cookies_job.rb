@@ -24,8 +24,8 @@ require Rails.root.join("lib/fetcher/channels/youtube")
 class RefreshSessionCookiesJob < ApplicationJob
   queue_as :default
 
-  # Folga grande sobre os ~20 min. Renovar cedo é barato; renovar tarde é perder
-  # a sessão, e perder a sessão custa uma exportação manual do dono.
+  # A sonda roda com `--simulate` (não baixa mídia nem grava arquivo), então
+  # qualquer vídeo público serve; TIMEOUT cobre o round-trip do yt-dlp.
   VIDEO_SONDA = "https://www.youtube.com/watch?v=aircAruvnKk"
   TIMEOUT     = 30
 
@@ -106,10 +106,17 @@ class RefreshSessionCookiesJob < ApplicationJob
       rescue Fetcher::CookieJar::Expired
         raise SessaoRejeitada
       end
-      Fetcher::CookieJar.refresh_from_netscape!(
+      # `expires_at:` é o conserto do auto-sabotagem: o `verify_session!` acima
+      # acabou de provar a sessão viva, e o portão de leitura é
+      # `expires_at > Time.current` — sem estender o prazo junto da rotação, o
+      # job renovava o payload por 7 dias e então parava para sempre com uma
+      # sessão recém-rotacionada no banco.
+      persistiu = Fetcher::CookieJar.refresh_from_netscape!(
         domain: "youtube.com", path: caminho,
-        auth_cookies: Fetcher::Channels::Youtube::AUTH_COOKIES
+        auth_cookies: Fetcher::Channels::Youtube::AUTH_COOKIES,
+        expires_at: 7.days.from_now
       )
+      log("ERRO: rotação não foi persistida — arquivo veio vazio ou o registro sumiu") unless persistiu
     end
   end
 

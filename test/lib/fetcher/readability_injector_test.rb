@@ -70,8 +70,12 @@ class Fetcher::ReadabilityInjectorTest < ActiveSupport::TestCase
       max_chars: 5000,
       live: false
     )
-    assert_operator result[:char_count], :<=, 5000
+    assert_operator result[:content].length, :<=, 5000
     assert_equal true, result[:truncated]
+    # `char_count` é o total ANTES do corte: sem ele o consumidor não sabe se
+    # perdeu 2% ou 80% e concluiria "li tudo" para um texto cortado em 4/5.
+    assert_operator result[:char_count], :>, 5000, "char_count reporta o total ANTES do corte"
+    assert_equal 20_000, result[:char_count]
   end
 
   test "trunca preferencialmente em boundary de parágrafo" do

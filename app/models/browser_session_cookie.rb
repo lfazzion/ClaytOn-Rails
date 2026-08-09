@@ -9,10 +9,6 @@ class BrowserSessionCookie < ApplicationRecord
   validates :payload, presence: true
   validates :expires_at, presence: true
 
-  def self.filtered_attributes
-    %w[payload]
-  end
-
   def inspect
     "#<BrowserSessionCookie domain=#{domain.inspect} expires_at=#{expires_at.inspect} payload=[FILTRADO]>"
   end

@@ -65,6 +65,10 @@ module Fetcher
             .strip
       end
 
+      # `char_count` é o total ANTES do corte, não o que voltou em `content`:
+      # quem decide se vale repetir com limite maior precisa saber quanto foi
+      # perdido, e comparar `content.length` com `char_count` é o que distingue
+      # "leu tudo" de "perdeu 70%".
       def truncate_to(text, max_chars)
         char_count = text.length
         if char_count <= max_chars
@@ -78,7 +82,7 @@ module Fetcher
                   else
                     window
                   end
-        { content: clipped, truncated: true, char_count: clipped.length }
+        { content: clipped, truncated: true, char_count: char_count }
       end
     end
   end

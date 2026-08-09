@@ -16,7 +16,9 @@ class WebSearchTool < ToolBase
 
   param :query, type: :string,  desc: "Consulta de busca (1-200 chars, não pode ser vazia)", required: true
   param :limit, type: :integer, desc: "Número máximo de resultados (1-10, padrão 5)", required: false
-  param :time_range, type: :string, desc: "Filtro de recência: day|week|month|year. Use para último/agora/hoje/esta-semana.", required: false
+  param :time_range, type: :string,
+        desc: "Filtro de recência: day|week|month|year. Use para último/agora/hoje/esta-semana.",
+        required: false
 
   BASE_URL          = ENV.fetch("SEARXNG_URL", "http://searxng:8080/search")
   CONTENT_MAX_CHARS = 400
@@ -251,10 +253,15 @@ class WebSearchTool < ToolBase
           .reject(&:empty?)
     end
 
+    # Operador de domínio só conta como operador COM os dois-pontos — o mesmo
+    # critério de `categories_for` (linhas 42-45 prometem uso simétrico da
+    # lista). Palavra solta "site"/"inurl" numa query é termo de busca; derrubá-la
+    # aqui sem estreitar a categoria faria a guarda julgar com um termo a menos.
     def self.significant_terms(query)
+      operadores = query.to_s.match?(OPERATOR_PATTERN) ? DOMAIN_OPERATORS : []
       tokenize(query).uniq.reject do |term|
         STOPWORDS.include?(term) ||
-          DOMAIN_OPERATORS.include?(term) ||
+          operadores.include?(term) ||
           (term.length < TERM_MIN_CHARS && !term.match?(/\d/))
       end
     end

@@ -63,7 +63,7 @@ class Fetcher::ExtractServiceTest < ActiveSupport::TestCase
     stub_page("http://spa.test/", body: "<html><body><div id='root'></div></body></html>")
 
     Fetcher::PageFetcher.any_instance.expects(:call)
-      .with("http://spa.test/", include_html: true)
+      .with("http://spa.test/", include_html: true, max_chars: Fetcher::ExtractService::MAX_MAX_CHARS)
       .returns(
         title: "App", url: "http://spa.test/", content: "texto renderizado",
         article_html: "<h1>Renderizado</h1><p>#{'conteudo ' * 60}</p>",
@@ -297,5 +297,39 @@ class Fetcher::ExtractServiceTest < ActiveSupport::TestCase
     Fetcher::PageFetcher.any_instance.expects(:call).never
 
     assert_equal "static", Fetcher::ExtractService.call("http://docs.test/guia")[:engine]
+  end
+
+  # Achado 1 da revisão: `content_chars_total` era medido DEPOIS do corte de
+  # 50k — uma transcrição de 120k virava 50000 e o consumidor concluía que leu
+  # tudo. O total tem de ser o que existia ANTES do `cap`.
+  test "content_chars_total mede o que existia ANTES do corte de 50k" do
+    stub_page("http://docs.test/grande",
+              body: "<html><body><article><p>#{'a' * 80_000}</p></article></body></html>")
+
+    result = Fetcher::ExtractService.call("http://docs.test/grande", max_chars: 50_000)
+
+    assert_operator result[:content].length, :<=, Fetcher::ExtractService::MAX_MAX_CHARS
+    assert_operator result[:metadata]["content_chars_total"], :>, 50_000,
+                    "o total é o pré-corte; 50k aqui seria a perda de dados silenciosa"
+  end
+
+  # O caminho browser NÃO pode cortar em 8k escondido: o default do
+  # ReadabilityInjector é 8k, e o serviço tem de pedir o teto da casa. O
+  # fallback sem article_html propaga o `char_count` (total pré-corte) no
+  # metadata, senão o corte do injector viraria "li tudo".
+  test "via_browser pede o teto e propaga char_count no fallback sem article_html" do
+    stub_page("http://spa.test/", body: "<html><body><div id='root'></div></body></html>")
+    Fetcher::PageFetcher.any_instance.expects(:call)
+      .with("http://spa.test/", include_html: true, max_chars: Fetcher::ExtractService::MAX_MAX_CHARS)
+      .returns(
+        title: "App", url: "http://spa.test/", content: "texto renderizado " * 400,
+        article_html: "", char_count: 30_000, truncated: true, cache_age_seconds: 0
+      )
+
+    result = Fetcher::ExtractService.call("http://spa.test/")
+
+    assert_equal "browser", result[:metadata]["source"]
+    assert_equal 30_000, result[:metadata]["content_chars_total"],
+                 "sem o pré-corte do injector, o corte de 50k viraria leitura completa"
   end
 end

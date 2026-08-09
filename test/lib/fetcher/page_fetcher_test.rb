@@ -85,7 +85,6 @@ class Fetcher::PageFetcherTest < ActiveSupport::TestCase
     Fetcher::SsrfGuard.stubs(:resolve_all).returns(["8.8.8.8"])
     Fetcher::PageFetcher.any_instance.stubs(:fetch_via_ferrum).returns(raw_result)
     Fetcher::PageFetcher.call("https://www.coingecko.com/pt/moedas/bitcoin")
-    key = Rails.cache.instance_variable_get(:@data) # memory store in test
     # validação indireta: não podemos ver TTL direto, mas após 70s o cache deve expirar
     travel 70.seconds do
       Fetcher::PageFetcher.any_instance.expects(:fetch_via_ferrum).returns(raw_result).once
@@ -95,9 +94,10 @@ class Fetcher::PageFetcherTest < ActiveSupport::TestCase
 
   test "URL normalizada na cache key: utm_* e fragment são removidos" do
     Fetcher::PageFetcher.any_instance.stubs(:fetch_via_ferrum).returns(raw_result).once
-    Fetcher::PageFetcher.call("https://example.com/artigo?utm_source=x&id=5#frag")
+    primeira = Fetcher::PageFetcher.call("https://example.com/artigo?utm_source=x&id=5#frag")
     # 2a URL com utm diferente deve bater cache
-    result = Fetcher::PageFetcher.call("https://example.com/artigo?id=5&utm_campaign=y")
-    assert_operator result[:cache_age_seconds], :>=, 0
+    segunda = Fetcher::PageFetcher.call("https://example.com/artigo?id=5&utm_campaign=y")
+    assert_equal primeira[:fetched_at], segunda[:fetched_at],
+                 "acerto de cache devolve a MESMA entrada — o fetch não pode ter rodado de novo"
   end
 end

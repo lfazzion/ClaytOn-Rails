@@ -44,9 +44,15 @@ module Fetcher
       end
     end
 
-    # Resultado de uma validação: a URI aprovada e o IP EXATO que foi validado.
-    # Quem for conectar deve usar `ip` — re-resolver o hostname na hora de conectar
-    # reabre a janela de DNS rebinding que esta validação fecha.
+    # Resultado de uma validação: a URI aprovada, o IP EXATO que foi validado e
+    # o hostname validado. Quem for conectar deve usar `ip` — re-resolver o
+    # hostname na hora de conectar reabre a janela de DNS rebinding que esta
+    # validação fecha.
+    #
+    # O caminho estático honra isto (o SafeHttpClient pinou o IP no socket). O
+    # caminho Chrome NÃO consegue pinar o socket: quem navega (PageFetcher,
+    # BrowserSession) tem de conferir depois o `remoteIPAddress` que o navegador
+    # usou de fato contra `ip` — ver `Fetcher::RebindingGuard`.
     Resolution = Struct.new(:uri, :ip, :host, keyword_init: true)
 
     class << self

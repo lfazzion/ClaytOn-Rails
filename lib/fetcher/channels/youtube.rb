@@ -8,6 +8,7 @@ require "uri"
 require_relative "registry"
 require_relative "../cookie_jar"
 require_relative "../session_cookies"
+require_relative "../host_rate_limiter"
 
 module Fetcher
   module Channels
@@ -30,6 +31,15 @@ module Fetcher
     # Só URL de vídeo. Canal e playlist devolvem nil e caem no caminho comum.
     module Youtube
       class NoTranscript < Error; end
+
+      # Busca em plataforma logada é onde rajada vira ban — a conta responde,
+      # não só o IP. Estourar o teto é erro nomeado; devolver lista vazia faria
+      # o modelo concluir "não existe nada sobre isso".
+      class RateLimited < Error
+        def initialize(host)
+          super("rate limit local: #{host} atingiu #{MAX_PER_WINDOW} buscas/min — repita daqui a pouco")
+        end
+      end
 
       PREFERRED_LANGS = %w[pt-BR pt en en-US en-orig].freeze
       # Abaixo do CHANNEL_TIMEOUT (40s) do ExtractService, que por sua vez fica
@@ -107,13 +117,20 @@ module Fetcher
         # video, thread ou post, em qualquer consulta.
         #
         # `--flat-playlist` nao abre video nenhum, so lista o que a busca achou.
+        #
+        # Mesmos dois portoes do caminho de leitura: a sessao vem do
+        # `SessionCookies` (o jar puro ignorava a sessao viva do Chrome — a
+        # divergencia que `session_cookies.rb` existe para eliminar) e o rate
+        # limit roda ANTES de gastar processo, com o teto do canal.
         def search(query:, limit: 10)
           termo = query.to_s.strip
           return [] if termo.empty?
 
           n = [[limit.to_i, 1].max, MAX_RESULTADOS].min
-          CookieJar.require!(COOKIE_DOMAIN)
-          CookieJar.with_netscape_file(COOKIE_DOMAIN) { |caminho| resultados(termo, n, caminho) }
+          raise RateLimited, COOKIE_DOMAIN if HostRateLimiter.exceeded?(COOKIE_DOMAIN, max: MAX_PER_WINDOW)
+
+          cookies, = SessionCookies.for(COOKIE_DOMAIN)
+          CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) { |caminho| resultados(termo, n, caminho) }
         end
 
         def video_id_from(url)

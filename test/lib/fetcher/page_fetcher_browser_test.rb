@@ -31,14 +31,37 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     attr_reader :visited, :closed
 
     def initialize(body_text: "conteúdo renderizado por javascript", status: 200,
-                   content_type: "text/html")
+                   content_type: "text/html", document_remote_ip: nil)
       @body_text = body_text
       @network = FakeNetwork.new(FakeResponse.new(status: status, content_type: content_type))
       @visited = []
       @closed = false
+      @document_remote_ip = document_remote_ip
+      @listeners = {}
     end
 
-    def go_to(url) = @visited << url
+    def go_to(url)
+      @visited << url
+      # O Ferrum emite Network.responseReceived do documento durante o go_to;
+      # o dublê emite na mesma hora para o assinante do RebindingGuard pegar.
+      return unless @document_remote_ip
+
+      Array(@listeners["Network.responseReceived"]).each do |blk|
+        blk.call("type" => "Document",
+                 "response" => { "url" => url, "remoteIPAddress" => @document_remote_ip })
+      end
+    end
+
+    def on(event, &block)
+      (@listeners[event] ||= []) << block
+      @listeners[event].size - 1
+    end
+
+    def off(event, id)
+      @listeners[event]&.delete_at(id)
+      true
+    end
+
     def body = "<html><body>#{@body_text}</body></html>"
     def title = "Título Renderizado"
     def current_url = @visited.last
@@ -236,5 +259,48 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     Fetcher::PageFetcher.expects(:reset_browser!).at_least_once
 
     assert_raises(Fetcher::PageFetcher::RenderTimeout) { fetcher.call("https://lento.test/") }
+  end
+
+  # ── DEFEITO 3: DNS rebinding no caminho Chrome ──────────────────────────
+  # O SsrfGuard valida e FIXA o IP, mas o Chrome re-resolve o hostname sozinho
+  # no go_to. O remoteIPAddress do documento tem de ser o IP validado — senão o
+  # DNS alternou entre a validação e o connect.
+
+  test "documento que veio de IP diferente do validado levanta SsrfGuard::Blocked" do
+    page = FakePage.new(body_text: "dados", document_remote_ip: "10.0.0.1")
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    erro = assert_raises(Fetcher::SsrfGuard::Blocked) do
+      fetcher.call("https://spa.test/")
+    end
+
+    assert_match(/rebinding/i, erro.message)
+    assert_match(/10\.0\.0\.1/, erro.message)
+    assert_match(/8\.8\.8\.8/, erro.message, "a mensagem cita o IP que a validação fixou")
+  end
+
+  test "documento que veio do IP validado passa" do
+    page = FakePage.new(body_text: "dados renderizados " * 40, document_remote_ip: "8.8.8.8")
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    payload = fetcher.call("https://spa.test/")
+
+    assert_equal "Título Renderizado", payload[:title]
+    assert_includes payload[:content], "dados renderizados"
+  end
+
+  test "sem remoteIPAddress no CDP o caminho segue (fail-open com log), não derruba" do
+    page = FakePage.new(body_text: "conteúdo renderizado " * 40) # document_remote_ip nil
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    payload = fetcher.call("https://spa.test/")
+
+    assert_equal "Título Renderizado", payload[:title]
   end
 end

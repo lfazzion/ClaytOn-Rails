@@ -8,7 +8,7 @@ class ToolBase < RubyLLM::Tool
   # ANTES do corpo do método — então nem o `rescue` de dentro da tool pega, a
   # exceção sobe e o usuário fica sem resposta útil.
   #
-  # O filtro mora aqui, e não em cada tool, porque a falha vale para as 19.
+  # O filtro mora aqui, e não em cada tool, porque a falha vale para as 20.
   def execute(**kwargs)
     Rails.logger.info "[#{self.class.name}] chamado com #{kwargs.inspect}"
 

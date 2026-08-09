@@ -35,7 +35,9 @@ module Fetcher
     THIN_CONTENT_CHARS = 400
     CACHE_PREFIX       = "page_extract:v2"
     CACHE_CONTENT_CAP  = MAX_MAX_CHARS
-    # Abaixo do teto do plugin do reader (90s) com folga para 4 URLs em paralelo.
+    # Abaixo do teto do plugin do reader (90s) com folga: o controller limita o
+    # lote ao número de workers (MAX_URLS = CONCURRENCY), então o pior caso é
+    # uma onda só — CHANNEL_TIMEOUT, não N × CHANNEL_TIMEOUT.
     CHANNEL_TIMEOUT    = 40
     # Fatia mínima do container principal que o Readability precisa cobrir para
     # ser considerado a extração boa.
@@ -137,7 +139,8 @@ module Fetcher
       result = Timeout.timeout(CHANNEL_TIMEOUT) { channel.call(url: url) }
       return nil if result.nil?
 
-      result.merge(content: cap(result[:content]))
+      capped, total = cap(result[:content])
+      result.merge(content: capped, metadata: (result[:metadata] || {}).merge("content_chars_total" => total))
     rescue Timeout::Error
       raise Unsupported, "canal #{channel} não respondeu em #{CHANNEL_TIMEOUT}s"
     end
@@ -152,7 +155,8 @@ module Fetcher
       result = Timeout.timeout(CHANNEL_TIMEOUT) { channel.call(url: url, response: response) }
       return nil if result.nil?
 
-      result.merge(content: cap(result[:content]))
+      capped, total = cap(result[:content])
+      result.merge(content: capped, metadata: (result[:metadata] || {}).merge("content_chars_total" => total))
     rescue Timeout::Error
       nil
     end
@@ -205,13 +209,15 @@ module Fetcher
       return nil if html.strip.empty?
 
       markdown = markdown_from(html)
+      capped, total = cap(markdown)
 
       {
         url:      response.final_url,
         title:    page_title(html),
-        content:  cap(markdown),
+        content:  capped,
         metadata: metadata_from(html).merge(
-          "source" => "static", "status" => response.status, "content_type" => response.content_type
+          "source" => "static", "status" => response.status, "content_type" => response.content_type,
+          "content_chars_total" => total
         )
       }
     rescue SafeHttpClient::Error, SsrfGuard::Blocked, Unsupported
@@ -221,17 +227,35 @@ module Fetcher
       nil
     end
 
+    # `max_chars: MAX_MAX_CHARS` e `rate_limit: false` são o par que fecha o
+    # contrato deste serviço com o PageFetcher:
+    # - o default do ReadabilityInjector (8k) cortaria o caminho browser sem
+    #   dizer nada — o teto da casa já é o que o cache aceita, então pedir o
+    #   teto não custa mais e não corta escondido;
+    # - o rate limit JÁ foi cobrado aqui em `extract` (com o teto do canal);
+    #   o PageFetcher cobrar de novo contaria em dobro na escalada.
     def via_browser(url)
-      payload = PageFetcher.new.call(url, include_html: true)
+      payload = PageFetcher.new(rate_limit: false).call(url, include_html: true, max_chars: MAX_MAX_CHARS)
       markdown = MarkdownConverter.call(payload[:article_html].to_s)
+      from_payload = markdown.strip.empty?
       # Sem HTML de artigo (fallback nodriver, live host), o texto já é o conteúdo.
-      markdown = payload[:content].to_s if markdown.strip.empty?
+      markdown = payload[:content].to_s if from_payload
+
+      capped, total = cap(markdown)
+      metadata = {
+        "source" => "browser",
+        "cache_age_seconds" => payload[:cache_age_seconds],
+        # No fallback, `payload[:char_count]` é o total ANTES do corte do
+        # ReadabilityInjector; sem ele o corte de 50k do injector viraria
+        # "li tudo" para quem compara content_chars_total com o que recebeu.
+        "content_chars_total" => from_payload ? (payload[:char_count] || total) : total
+      }
 
       {
         url:      payload[:url].to_s,
         title:    payload[:title].to_s,
-        content:  cap(markdown),
-        metadata: { "source" => "browser", "cache_age_seconds" => payload[:cache_age_seconds] }
+        content:  capped,
+        metadata: metadata
       }
     end
 
@@ -322,11 +346,16 @@ module Fetcher
       PageFetcher.hard_domains.any? { |d| host == d || host.end_with?(".#{d}") }
     end
 
+    # Devolve [texto, tamanho_original]: o teto de 50k existe para o cache não
+    # inchar, mas quem consome precisa saber quanto existia ANTES do corte para
+    # decidir se vale repetir com limite maior. Medir depois (como era) fazia
+    # uma transcrição de 120k virar `content_chars_total: 50000` e a tool
+    # concluir que leu tudo — perda de 70k indistinguível de sucesso.
     def cap(text)
       body = text.to_s
-      return body if body.length <= CACHE_CONTENT_CAP
+      return [body, body.length] if body.length <= CACHE_CONTENT_CAP
 
-      body[0, CACHE_CONTENT_CAP]
+      [body[0, CACHE_CONTENT_CAP], body.length]
     end
 
     def truncate(text)
@@ -342,8 +371,11 @@ module Fetcher
       # Quanto existia ANTES do corte. Sem isto quem consome sabe que truncou mas
       # nao sabe se perdeu 2% ou 80% — e nao tem como decidir se vale repedir com
       # limite maior. Transcricao de video passa facil de 30 mil caracteres.
-      metadata = (extracted[:metadata] || {}).merge(
-        "content_chars_total" => extracted[:content].to_s.length
+      # Os caminhos gravam o total ANTES do cap de 50k no metadata (ver `cap`);
+      # o fallback cobre cache antigo ou canal que nao declarou o campo.
+      base_metadata = extracted[:metadata] || {}
+      metadata = base_metadata.merge(
+        "content_chars_total" => base_metadata["content_chars_total"] || extracted[:content].to_s.length
       )
       engine = engine_for(metadata)
 

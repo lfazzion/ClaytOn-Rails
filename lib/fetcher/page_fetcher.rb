@@ -4,6 +4,7 @@ require "digest"
 require "yaml"
 require "timeout"
 require_relative "ssrf_guard"
+require_relative "rebinding_guard"
 require_relative "ttl_policy"
 require_relative "bot_detection"
 require_relative "readability_injector"
@@ -12,9 +13,12 @@ require_relative "host_rate_limiter"
 module Fetcher
   class PageFetcher
     RATE_LIMIT_MAX    = 5
-    RATE_LIMIT_WINDOW = 60
     CACHE_KEY_PREFIX  = "page_fetch:v1"
-    RATE_KEY_PREFIX   = "page_fetch:rl"
+    # Mutex de CLASSE, avaliado no load: `@browser_mutex ||= Mutex.new` era
+    # corrida real — dois threads podiam criar mutex diferentes e ambos entrar
+    # em `synchronize`, cada um com o próprio lock, e construir dois browsers
+    # (um perdido, sem `quit`, vazando CDP) ou dar `quit` no browser alheio.
+    BROWSER_MUTEX     = Mutex.new
     BROWSER_MAX_AGE   = 24 * 3600
     BROWSER_PROBE_TIMEOUT = 2
     GOTO_TIMEOUT      = 20
@@ -77,13 +81,12 @@ module Fetcher
     end
 
     class << self
-      def call(url_string, include_html: false)
-        new.call(url_string, include_html: include_html)
+      def call(url_string, include_html: false, max_chars: ReadabilityInjector::DEFAULT_MAX_CHARS)
+        new.call(url_string, include_html: include_html, max_chars: max_chars)
       end
 
       def browser
-        @browser_mutex ||= Mutex.new
-        @browser_mutex.synchronize do
+        BROWSER_MUTEX.synchronize do
           discard_locked! if @browser && (expired? || !alive?(@browser))
 
           @browser ||= begin
@@ -94,8 +97,7 @@ module Fetcher
       end
 
       def reset_browser!
-        @browser_mutex ||= Mutex.new
-        @browser_mutex.synchronize { discard_locked! }
+        BROWSER_MUTEX.synchronize { discard_locked! }
       end
 
       # Sonda barata de sessão viva. Sem ela, um restart do container do chrome
@@ -122,7 +124,7 @@ module Fetcher
 
       private
 
-      # Só chamar com @browser_mutex já retido — Mutex do Ruby não é reentrante.
+      # Só chamar com BROWSER_MUTEX já retido — Mutex do Ruby não é reentrante.
       def discard_locked!
         safe_quit(@browser) if @browser
         @browser = nil
@@ -160,24 +162,34 @@ module Fetcher
       end
     end
 
-    def initialize(browser_factory: nil, clock: Time)
+    # `rate_limit: false` é para quem JÁ cobrou o balde antes (o ExtractService
+    # cobra com o teto do canal em `extract`); cobrar de novo contaria em dobro.
+    def initialize(browser_factory: nil, clock: Time, rate_limit: true)
       @browser_factory = browser_factory
       @clock = clock
+      @rate_limit = rate_limit
     end
 
     # `include_html: true` acrescenta `article_html` ao payload — o HTML que o
     # Readability.js isolou, insumo do conversor de markdown do /internal/extract.
-    def call(url_string, include_html: false)
-      uri  = SsrfGuard.validate!(url_string)
+    # `max_chars:` vai ao ReadabilityInjector: sem ele o default de 8k cortava o
+    # caminho browser calado (o ExtractService passa o teto da casa).
+    def call(url_string, include_html: false, max_chars: ReadabilityInjector::DEFAULT_MAX_CHARS)
+      resolution = SsrfGuard.resolve!(url_string)
+      uri = resolution.uri
       host = uri.host.to_s.downcase
 
-      check_rate_limit!(host)
       check_cooldown!(host)
 
       cache_key = build_cache_key(uri, include_html: include_html)
       if (cached = Rails.cache.read(cache_key))
         return cached.merge(cache_age_seconds: (@clock.current - cached[:fetched_at]).to_i)
       end
+
+      # Depois do cache de propósito: acerto de cache não toca o site, e cobrar
+      # o balde por ele derrubava a 6a pergunta do minuto com 1 fetch real + 5
+      # hits (o ExtractService já acertou essa ordem; o PageFetcher divergia).
+      check_rate_limit!(host) if @rate_limit
 
       raw = if hard_domain?(host)
               fetch_via_python(uri)
@@ -188,7 +200,11 @@ module Fetcher
       # O Chrome (e o nodriver) seguem redirects por conta própria — a validação
       # pré-fetch só cobriu a URL inicial. Revalidar o destino final é o que
       # impede um `302 -> http://127.0.0.1/` de virar payload de resposta.
-      revalidate_final_url!(raw[:final_url], uri)
+      final_resolution = revalidate_final_url!(raw[:final_url], uri)
+      # O Chrome re-resolve o hostname sozinho; o `remoteIPAddress` do documento
+      # tem de ser o IP que a validação fixou — senão o DNS alternou entre a
+      # validação e o connect (rebinding, TTL curto).
+      assert_document_ip!(raw[:document_ip], resolution, final_resolution, raw[:final_url])
 
       if bot_blocked?(raw, host)
         reason = raw[:title].to_s[0, 80]
@@ -200,7 +216,8 @@ module Fetcher
         readability_text: raw[:readability_text],
         body_text: raw[:body_text],
         fallback_html: raw[:html].to_s,
-        live: TtlPolicy.live_host?(host)
+        live: TtlPolicy.live_host?(host),
+        max_chars: max_chars
       )
 
       payload = {
@@ -225,11 +242,31 @@ module Fetcher
       raise RateLimited.new(host) if HostRateLimiter.exceeded?(host, max: RATE_LIMIT_MAX)
     end
 
+    # Devolve a Resolution do destino (nil quando não houve redirect) para o
+    # cheque de DNS rebinding comparar o IP que o Chrome usou de fato.
     def revalidate_final_url!(final_url, original_uri)
       final = final_url.to_s
-      return if final.empty? || final == original_uri.to_s
+      return nil if final.empty? || final == original_uri.to_s
 
-      SsrfGuard.validate!(final)
+      SsrfGuard.resolve!(final)
+    end
+
+    # `remote_ip` é o IP que o Chrome usou no documento principal; `expected` é
+    # o IP que a validação fixou (o do destino final quando houve redirect).
+    # Divergência = DNS alternou entre a validação e o connect — conteúdo
+    # privado renderizado com cara de URL pública. Sem o campo (CDP antigo,
+    # caminho Python) o cheque desliga com log, melhor que derrubar o caminho.
+    def assert_document_ip!(remote_ip, resolution, final_resolution, final_url)
+      return if remote_ip.to_s.empty?
+
+      expected = final_resolution ? final_resolution.ip : resolution.ip
+      return if remote_ip == expected
+
+      Rails.logger.warn "[Fetcher::PageFetcher] rebinding em #{final_url}: " \
+                        "Chrome conectou em #{remote_ip}, validação fixou #{expected}"
+      raise SsrfGuard::Blocked.new(
+        "DNS rebinding detectado em #{final_url}: Chrome conectou em #{remote_ip}, validação fixou #{expected}"
+      )
     end
 
     def check_cooldown!(host)
@@ -280,6 +317,9 @@ module Fetcher
       {
         title: result[:title].to_s,
         final_url: result[:url].to_s.presence || uri.to_s,
+        # O nodriver não expõe o IP do documento — o cheque de rebinding
+        # desliga neste caminho (assert_document_ip! sai cedo com nil).
+        document_ip: nil,
         readability_text: nil,
         readability_html: nil,
         body_text: result[:content].to_s,
@@ -311,9 +351,14 @@ module Fetcher
           # Browser, e a injeção acontece em `build_browser`, uma vez por
           # instância. Chamá-lo na Page levantava NoMethodError e matava TODA
           # escalada antes de renderizar.
-          page.go_to(uri.to_s)
-          wait_for_idle_soft(page)
-          wait_for_body_stabilize(page)
+          # O assinante de `Network.responseReceived` entra ANTES do go_to: é a
+          # única forma de pegar o remoteIPAddress do documento principal, e é
+          # ele que fecha a janela de DNS rebinding deste caminho.
+          document_ip = RebindingGuard.capture_document_remote_ip(page) do
+            page.go_to(uri.to_s)
+            wait_for_idle_soft(page)
+            wait_for_body_stabilize(page)
+          end
 
           pre_check_pdf!(page)
 
@@ -325,6 +370,7 @@ module Fetcher
           {
             title: title,
             final_url: safe_current_url(page) || uri.to_s,
+            document_ip: document_ip,
             readability_text: article[:text],
             readability_html: article[:html],
             body_text: body_text,

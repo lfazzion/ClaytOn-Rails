@@ -59,7 +59,10 @@ class ProfileSearchTool < ToolBase
   def run(query:, limit: 10)
     limit = clamp(limit, 1, 30)
     sanitized = SocialProfile.sanitize_sql_like(query)
-    profiles = SocialProfile.where('bio LIKE :q OR display_name LIKE :q OR platform_username LIKE :q', q: "%#{sanitized}%").limit(limit)
+    profiles = SocialProfile.where(
+      'bio LIKE :q OR display_name LIKE :q OR platform_username LIKE :q',
+      q: "%#{sanitized}%"
+    ).limit(limit)
 
     success(profiles.map { |p| format_profile(p) })
   end

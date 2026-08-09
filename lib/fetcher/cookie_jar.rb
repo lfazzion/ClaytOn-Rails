@@ -155,7 +155,12 @@ module Fetcher
       # a chave obrigatória não há como escrever a chamada destrutiva sem declarar
       # o que se espera preservar. `[]` desliga o portão, mas aí é escolha
       # declarada no ponto da chamada, não descuido.
-      def refresh_from_netscape!(domain:, path:, auth_cookies:)
+      #
+      # `expires_at:` estende a validade do registro JUNTO da rotação. Sem isto o
+      # job renovava o payload a cada 10 min mas o portão de leitura
+      # (`expires_at > Time.current`) matava a sessão no prazo antigo — o job se
+      # sabota em T0+7d com uma sessão viva e recém-rotacionada no banco.
+      def refresh_from_netscape!(domain:, path:, auth_cookies:, expires_at: nil)
         cookies = parse_netscape(path)
         return false if cookies.empty?
         return false if auth_cookies.present? && !auth_cookies.intersect?(cookies.map { |c| c["name"] })
@@ -163,7 +168,9 @@ module Fetcher
         record = BrowserSessionCookie.find_by(domain: normalize(domain))
         return false if record.nil?
 
-        record.update!(payload: JSON.generate(cookies))
+        attrs = { payload: JSON.generate(cookies) }
+        attrs[:expires_at] = expires_at if expires_at
+        record.update!(**attrs)
         true
       end
 

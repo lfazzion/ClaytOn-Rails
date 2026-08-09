@@ -37,6 +37,16 @@ class WebSearchToolOperatorsTest < ActiveSupport::TestCase
     assert_includes termos, "exm7777"
   end
 
+  # CONTROLE do critério simétrico: `categories_for` só estreita com `site:`
+  # (operador COM dois-pontos); a palavra solta "site" numa query é termo de
+  # busca e a guarda tem de julgar com ela inteira — derrubá-la sem estreitar a
+  # categoria era o uso assimétrico que a revisão apontou.
+  test "operador sem dois-pontos nao e derrubado dos termos significativos" do
+    assert_includes WebSearchTool::RelevanceGuard.significant_terms("site de noticias"), "site"
+    refute_includes WebSearchTool::RelevanceGuard.significant_terms("site:x.com EXM7777"), "site",
+                   "com os dois-pontos continua sendo operador"
+  end
+
   # CONTROLE: uma palavra comum de tamanho parecido continua contando, senao o
   # filtro estaria derrubando termo bom junto.
   test "CONTROLE: palavra comum continua sendo termo significativo" do

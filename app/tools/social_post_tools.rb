@@ -51,7 +51,9 @@ class TopPostsTool < ToolBase
     return error("Perfil não encontrado: #{username} em #{platform}") unless profile
 
     sort_by = sort_by.to_s.downcase
-    return error("sort_by inválido: #{sort_by}. Use: #{SORT_COLUMNS.keys.join(', ')}") unless SORT_COLUMNS.key?(sort_by)
+    unless SORT_COLUMNS.key?(sort_by)
+      return error("sort_by inválido: #{sort_by}. Use: #{SORT_COLUMNS.keys.join(', ')}")
+    end
 
     limit = clamp(limit, 1, 20)
     posts = top_posts_for(profile, sort_by, limit)

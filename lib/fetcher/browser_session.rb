@@ -5,6 +5,8 @@ require "uri"
 require_relative "cookie_jar"
 require_relative "session_cookies"
 require_relative "page_fetcher"
+require_relative "ssrf_guard"
+require_relative "rebinding_guard"
 
 module Fetcher
   # Página do Chrome num contexto isolado, com os cookies do domínio já postos.
@@ -28,6 +30,13 @@ module Fetcher
       def with_page(url)
         uri = URI.parse(url.to_s)
         host = uri.host.to_s.downcase
+        # Invariante enforced, não presumida: os chamadores de hoje reescrevem o
+        # host para constantes públicas (old.reddit.com, x.com), mas nada no
+        # código garantia isso — uma URL privada passada aqui iria direto ao
+        # `go_to`, que re-resolve o hostname sozinho. Validar ANTES (inclusive
+        # do lookup de cookie) fecha a porta, e `resolution.ip` é o alvo do
+        # cheque de rebinding pós-navegação.
+        resolution = SsrfGuard.resolve!(url.to_s)
         # Levanta `CookieJar::Expired` nomeando o domínio quando não há sessão em
         # fonte nenhuma — antes de gastar browser.
         cookies, origem = SessionCookies.for(host)
@@ -39,7 +48,10 @@ module Fetcher
           begin
             page = context.create_page
             inject_cookies(page, cookies)
-            page.go_to(uri.to_s)
+            # Assinante ANTES do go_to: é o que captura o remoteIPAddress do
+            # documento principal, para o cheque de rebinding abaixo.
+            remote_ip = RebindingGuard.capture_document_remote_ip(page) { page.go_to(uri.to_s) }
+            assert_document_ip!(remote_ip, resolution, uri.to_s)
             resultado = yield page
             # O contexto isolado é descartado no `ensure`, e com ele o que o
             # servidor rotacionou durante a visita. Sem gravar de volta, a sessão
@@ -56,6 +68,16 @@ module Fetcher
       end
 
       private
+
+      # O `go_to` re-resolve o hostname; se o documento principal veio de um IP
+      # diferente do que a validação fixou, o DNS alternou no meio (rebinding).
+      def assert_document_ip!(remote_ip, resolution, url)
+        return if remote_ip.to_s.empty? || remote_ip == resolution.ip
+
+        raise SsrfGuard::Blocked.new(
+          "DNS rebinding detectado em #{url}: Chrome conectou em #{remote_ip}, validação fixou #{resolution.ip}"
+        )
+      end
 
       # `Ferrum::Cookies#set` é `def set(options)` — hash POSICIONAL, não keywords
       # (cookies.rb:118). A chamada abaixo continua válida porque o método não

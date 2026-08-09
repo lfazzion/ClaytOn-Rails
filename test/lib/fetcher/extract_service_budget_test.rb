@@ -120,4 +120,29 @@ class Fetcher::ExtractServiceBudgetTest < ActiveSupport::TestCase
     assert_nil result[:error]
     assert_equal "static", result[:engine]
   end
+
+  # Achado 6: na escalada, o PageFetcher cobrava o MESMO balde de novo (5/min),
+  # em cima do que o ExtractService já tinha cobrado com o teto do canal — a 3a
+  # requisição do minuto levantava "atingiu 5 fetches/min" com 2,5 reais de teto.
+  # O caminho do browser tem de rodar com rate_limit: false.
+  test "a escalada para o Chrome nao cobra rate limit em dobro" do
+    Rails.cache.clear
+    stub_request(:get, %r{http://escalada\.test/\d+})
+      .to_return(status: 200, body: "<html><body><div id='root'></div></body></html>",
+                 headers: { "Content-Type" => "text/html" })
+    Fetcher::PageFetcher.stubs(:hard_domains).returns([])
+    Fetcher::PageFetcher.any_instance.stubs(:call).returns(
+      title: "T", url: "http://escalada.test/1", content: "texto renderizado",
+      article_html: "<h1>t</h1>", cache_age_seconds: 0
+    )
+    Fetcher::Channels::Registry.stubs(:for_host).returns(nil)
+
+    # Host único: o balde de "escalada.test" não é tocado por mais ninguém, e o
+    # teto da casa (5/min) comporta as 5 chamadas. Sem o rate_limit:false no
+    # caminho do browser, a 3a chamada já estouraria (5 fetches contados em dobro).
+    5.times do |i|
+      result = Fetcher::ExtractService.call("http://escalada.test/#{i}")
+      assert_nil result[:error], "chamada #{i}: #{result[:error].inspect}"
+    end
+  end
 end

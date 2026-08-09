@@ -95,14 +95,20 @@ class PageFetchToolTest < ActiveSupport::TestCase
 
   # Conteudo de canal e linear e feito para ser lido inteiro: 15k cortava uma
   # transcricao de 25k pela metade e o modelo pedia desculpa ao usuario.
-  test "transcricao e thread ganham limite maior que pagina comum" do
-    longo = "y" * 40_000
+  # 60k de conteudo discrimina: um limite errado por engano (ex.: 40k no lugar
+  # de 45k) deixaria o char_count em 40000 e o teste reprovaria.
+  test "transcricao, thread e feed ganham limite maior que pagina comum" do
+    longo = "y" * 60_000
 
-    { "youtube" => 40_000, "reddit" => 40_000, "static" => PageFetchTool::DEFAULT_LIMIT }.each do |engine, esperado|
+    {
+      "youtube" => 45_000, "reddit" => 45_000, "rss" => 30_000,
+      "static" => PageFetchTool::DEFAULT_LIMIT
+    }.each do |engine, esperado|
       stub_extract(content: longo, engine: engine)
       data = PageFetchTool.new.execute(url: "https://example.com/")[:data]
 
       assert_equal esperado, data[:char_count], "engine #{engine}"
+      assert_equal true, data[:truncated], "engine #{engine}: 60k não cabe no limite por tipo"
     end
   end
 

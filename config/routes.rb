@@ -2,8 +2,8 @@ Rails.application.routes.draw do
   get "up" => "rails/health#show", as: :rails_health_check
   get "health" => "health#show"
 
-  # Endpoint interno de extração (reader do Hermes). Autenticado por bearer token
-  # e publicado só no loopback — ver docker/docker-compose.yml.
+  # Endpoint interno de extração (reader do Hermes). Autenticado por bearer
+  # token; o binding de rede é o declarado no docker-compose.
   namespace :internal do
     post "extract" => "extract#create"
   end
