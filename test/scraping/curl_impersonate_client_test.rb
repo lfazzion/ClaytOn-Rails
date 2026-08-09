@@ -61,7 +61,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
     client = ScrapingServices::CurlImpersonateClient.new
     json_output = '{"success": true, "status_code": 200, "body": "<html>OK</html>"}'
 
-    Open3.expects(:capture3).returns([json_output, '', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns([json_output, '', stub(success?: true, exitstatus: 0)])
 
     result = client.get('https://example.com')
 
@@ -73,7 +73,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
   test 'get returns nil when process fails' do
     client = ScrapingServices::CurlImpersonateClient.new
 
-    Open3.expects(:capture3).returns(['', 'python error', stub(success?: false, exitstatus: 1)])
+    ScrapingServices::SidecarClient.expects(:capture).returns(['', 'python error', stub(success?: false, exitstatus: 1)])
 
     result = client.get('https://example.com')
     assert_nil result
@@ -83,7 +83,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
     client = ScrapingServices::CurlImpersonateClient.new
     json_output = '{"success": false, "status_code": 403, "error": "blocked"}'
 
-    Open3.expects(:capture3).returns([json_output, '', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns([json_output, '', stub(success?: true, exitstatus: 0)])
 
     result = client.get('https://example.com')
     assert_nil result
@@ -93,7 +93,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
     client = ScrapingServices::CurlImpersonateClient.new
     json_output = '{"success": false, "error": "rate_limit_429", "status_code": 429}'
 
-    Open3.expects(:capture3).returns([json_output, '', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns([json_output, '', stub(success?: true, exitstatus: 0)])
 
     assert_raises(ScrapingServices::RateLimitError) do
       client.get('https://example.com')
@@ -103,7 +103,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
   test 'raises RateLimitError on 429 in stderr' do
     client = ScrapingServices::CurlImpersonateClient.new
 
-    Open3.expects(:capture3).returns(['', 'HTTP 429 Too Many Requests', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns(['', 'HTTP 429 Too Many Requests', stub(success?: true, exitstatus: 0)])
 
     assert_raises(ScrapingServices::RateLimitError) do
       client.get('https://example.com')
@@ -113,7 +113,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
   test 'raises RateLimitError on Captcha in stderr' do
     client = ScrapingServices::CurlImpersonateClient.new
 
-    Open3.expects(:capture3).returns(['', 'Captcha detected', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns(['', 'Captcha detected', stub(success?: true, exitstatus: 0)])
 
     assert_raises(ScrapingServices::RateLimitError) do
       client.get('https://example.com')
@@ -123,7 +123,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
   test 'returns nil on empty stdout' do
     client = ScrapingServices::CurlImpersonateClient.new
 
-    Open3.expects(:capture3).returns(['', '', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns(['', '', stub(success?: true, exitstatus: 0)])
 
     result = client.get('https://example.com')
     assert_nil result
@@ -132,7 +132,7 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
   test 'returns nil on invalid JSON' do
     client = ScrapingServices::CurlImpersonateClient.new
 
-    Open3.expects(:capture3).returns(['not json', '', stub(success?: true)])
+    ScrapingServices::SidecarClient.expects(:capture).returns(['not json', '', stub(success?: true, exitstatus: 0)])
 
     result = client.get('https://example.com')
     assert_nil result
