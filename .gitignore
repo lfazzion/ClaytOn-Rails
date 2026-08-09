@@ -29,4 +29,9 @@ db/*.sqlite3-shm
 .env
 .env.*
 !.env.example
+!.env.*.example
 .worktrees/
+
+# Python bytecode dos scripts do sidecar
+__pycache__/
+*.pyc
