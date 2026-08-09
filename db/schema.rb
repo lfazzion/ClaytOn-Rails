@@ -11,6 +11,15 @@
 # It's strongly recommended that you check this file into your version control system.
 
 ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
+
+  create_table "browser_session_cookies", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "domain", null: false
+    t.datetime "expires_at", null: false
+    t.text "payload", null: false
+    t.datetime "updated_at", null: false
+    t.index ["domain"], name: "index_browser_session_cookies_on_domain", unique: true
+  end
   create_table "chat_messages", force: :cascade do |t|
     t.text "content", null: false
     t.integer "conversation_id", null: false
