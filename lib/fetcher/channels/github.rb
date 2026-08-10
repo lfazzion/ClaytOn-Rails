@@ -13,9 +13,15 @@ module Fetcher
       class Error < Fetcher::Channels::Error; end
       class ApiError < Error; end
       class IssueNotFound < Error; end
+      class RateLimited < Error
+        def initialize(host)
+          super("rate limit local: #{host} atingiu #{MAX_PER_WINDOW} requisições/min — repita daqui a pouco")
+        end
+      end
 
       MAX_PER_WINDOW = 5
       MAX_COMMENTS   = 20
+      MAX_RESULTADOS = 25
       HOST           = "github.com"
       API_HOST       = "api.github.com"
 
@@ -27,11 +33,39 @@ module Fetcher
       PATH_PATTERN = %r{\A/(?<owner>#{OWNER_REPO})/(?<repo>#{OWNER_REPO})/(?<kind>issues|pull)/(?<number>\d+)\z}
 
       class << self
+        def search(query:, limit: 10)
+          termo = query.to_s.strip
+          return [] if termo.empty?
+
+          n = clamp_limit(limit)
+          raise RateLimited, API_HOST if HostRateLimiter.exceeded?(API_HOST, max: MAX_PER_WINDOW)
+
+          since_date = (Time.now.utc - 30.days).strftime("%Y-%m-%d")
+          q = "#{termo} created:>=#{since_date}"
+          params = { q: q, sort: "reactions", order: "desc", per_page: n }
+          search_url = "https://#{API_HOST}/search/issues?#{URI.encode_www_form(params)}"
+
+          headers = build_headers
+          http_resp = SafeHttpClient.get(search_url, headers: headers)
+
+          if http_resp.status.in?([403, 429]) || http_resp.status >= 500
+            Rails.logger.warn "[Fetcher::Channels::Github] search falhou com HTTP #{http_resp.status}"
+            return []
+          end
+
+          raise ApiError, "API de busca do GitHub respondeu HTTP #{http_resp.status}" unless http_resp.success?
+
+          payload = parse_json(http_resp.body)
+          raise ApiError, "resposta inválida da API de busca do GitHub" unless payload.is_a?(Hash) && payload["items"].is_a?(Array)
+
+          payload["items"].filter_map { |item| item_de_busca(item) }.first(n)
+        end
+
         def call(url:, response: nil)
           info = issue_or_pr_info(url)
           return nil if info.nil?
 
-          owner, repo, kind, number = info
+          owner, repo, _kind, number = info
           headers = build_headers
 
           issue_url = "https://#{API_HOST}/repos/#{owner}/#{repo}/issues/#{number}"
@@ -72,6 +106,36 @@ module Fetcher
         end
 
         private
+
+        def clamp_limit(limit)
+          [[limit.to_i, 1].max, MAX_RESULTADOS].min
+        end
+
+        def item_de_busca(item)
+          return nil unless item.is_a?(Hash)
+
+          url = item["html_url"].to_s
+          return nil if url.blank?
+
+          reactions = item["reactions"]
+          total_reactions = if reactions.is_a?(Hash) && reactions["total_count"].is_a?(Numeric)
+                              reactions["total_count"].to_i
+                            elsif reactions.is_a?(Numeric)
+                              reactions.to_i
+                            else
+                              0
+                            end
+
+          {
+            "url"        => url,
+            "title"      => item["title"].to_s,
+            "source"     => "github",
+            "reactions"  => total_reactions,
+            "comments"   => (item["comments"].to_i if item["comments"].is_a?(Numeric)),
+            "author"     => item.dig("user", "login").to_s,
+            "created_at" => item["created_at"].to_s
+          }
+        end
 
         def build_headers
           headers = { "Accept" => "application/vnd.github+json" }

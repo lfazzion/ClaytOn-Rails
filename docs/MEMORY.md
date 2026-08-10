@@ -10,6 +10,19 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-10]** Tarefa F6-A — busca por assunto nos canais Hackernews, Github e Polymarket (`lib/fetcher/channels/`) + ajustes no `Research::Signals` e `Research::Scorer`.
+  - `Hackernews.search(query:, limit: 10)`: busca em Algolia API com filtro `created_at_i>30d_epoch`, devendo `comments` (num_comments), `points`, `author`, `created_at` ISO e `external_url` separado.
+  - `Github.search(query:, limit: 10)`: busca REST API `/search/issues` com `created:>=30d`, `sort=reactions`, achatamento de `reactions` (total_count Numeric) e fallback gracioso `[]` para 403/429/5xx.
+  - `Polymarket.search(query:, limit: 10)`: busca em Gamma API `/events?search=<query>` devolvendo `volume`, `liquidity`, `created_at` e fallback `[]` em 4xx/mudança de schema.
+  - `Research::Signals`: pesos de `github` (reactions 0.55 / comments 0.45), `VOTE_LOG_REFERENCE` para `github` (5.5) e `polymarket` (13.5) especulativos, e alias `comments` -> `num_comments`.
+  - `Research::Scorer.sort`: desempate determinístico por `url` e `title` para scores brutos empatados.
+  - 47 testes passando no Docker (`hackernews_test.rb`, `github_test.rb`, `polymarket_test.rb`, `signals_test.rb`, `scorer_test.rb`).
+- **[2026-08-10]** Tarefa F3 — Análise automática de desempenho de vídeos implementada (`Analytics::PostScorer`, `ScorePostsJob`, `WeeklyDigestJob` reescrito, `post_snapshots` na coleta do YouTube com fuso SP e poda de 180d, shorts detectados em `YoutubeScraperService` como `post_type: "short"`).
+  - `PostScorer`: z-score robusto log1p + MAD com fallback para IQR/1.349 e tabela de correção para n pequeno; baseline 7..45d e n>=10. Vídeos <7d marcados como `maturing` sem `views_at_scoring`. Re-score idempotente se views inalteradas.
+  - `WeeklyDigestJob`: digest semanal reescrito com delta de seguidores por perfil, top 3 / bottom 3 desempenhos apurados por `scored_at >= 7.days.ago`, alertas >48h e chunking em mensagens <= 1900 chars via `DiscordApiClient.send_message`.
+  - Agendamentos atualizados em `config/recurring.yml`: `score_posts_job` e `weekly_digest_job` às 12pm (UTC).
+
+
 - **[2026-08-10]** Tarefa F4 — Tools de escrita de monitoramento de perfis (`app/tools/profile_management_tools.rb`) implementadas com autorização fail-closed por allowlist (`DISCORD_OWNER_IDS`).
   - Novas classes de tool: `AddProfileTool`, `SetProfileMonitoringTool`, `RemoveProfileTool`, `PromoteProspectTool`, herdando da base comum `ManagementToolBase < ToolBase`.
   - `ManagementToolBase` prove validação `owner?` contra `Thread.current[:cleitin_actor][:user_id]` e `ENV["DISCORD_OWNER_IDS"]`, sanitização/normalização de handles (`normalize_handle`) extraindo de URLs por host e aplicando `HANDLE_RULES` por plataforma, desambiguação (`find_profile`) e `format_profile` enriquecido com status.
@@ -203,6 +216,9 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
+| 2026-08-10 | Implementação da Tarefa F6-A (`Hackernews.search`, `Github.search`, `Polymarket.search`, pesos/aliases em `Signals`, desempate em `Scorer`). | Contexto Ativo |
+| 2026-08-10 | Implementação do pipeline F6-C (`Last30DaysTopicJob`, `Last30DaysDigestJob`, `Last30Days::MessageBuilder`, dedupe `TopicDelivery`). | Contexto Ativo |
+| 2026-08-10 | Implementação da Tarefa F3 (PostScorer, ScorePostsJob, WeeklyDigestJob reescrito com chunking, shorts em YoutubeScraperService, post_snapshots na coleta com fuso SP e poda 180d). | Contexto Ativo |
 | 2026-08-10 | Implementação das 4 tools de escrita de monitoramento (`AddProfileTool`, `SetProfileMonitoringTool`, `RemoveProfileTool`, `PromoteProspectTool`) com autorização fail-closed por allowlist e `RemoveProfileTool` em 2 etapas. | Contexto Ativo |
 | 2026-08-09 | Decisão de modelo único Gemma 4 31B (`gemma_client.rb`) substituída: split Gemini background/interactive + cadeia nous → poolside → openrouter. | Padrões Ratificados |
 | 2026-08-09 | Correção de documentação: o TTL 30min do `ChatSessionManager` só despeja o objeto quente — conversas vivem no SQLite e a fronteira entre conversas é o `/new` (entrada de 2026-03-23 corrigida). | Contexto Ativo |

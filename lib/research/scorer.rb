@@ -79,7 +79,7 @@ module Research
           bruto = score(item, query: pq)
           scored["relevance_score"] = bruto.round(2)
           [scored, bruto]
-        end.sort_by { |_scored, bruto| -bruto }.map(&:first)
+        end.sort_by { |scored, bruto| [-bruto, scored["url"].to_s, scored["title"].to_s] }.map(&:first)
       end
 
       private

@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
 class SocialPost < ApplicationRecord
-  POST_TYPES = %w[image video text reel story].freeze
+  POST_TYPES = %w[image video text reel story short].freeze
+
   PERFORMANCE_BANDS = %w[excelente bom medio ruim insufficient_data maturing].freeze
 
   belongs_to :social_profile

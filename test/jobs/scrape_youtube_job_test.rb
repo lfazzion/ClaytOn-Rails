@@ -190,4 +190,56 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_equal 'rate_limited', @profile.collection_status
     assert_not_nil @profile.blocked_until
   end
+
+  # Achado 13 — fallback de post_type morto e perigoso
+  test 'post existente short nao e rebaixado para video quando deteccao e positiva para video (sem /shorts/ na URL)' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+
+    existing_short = create(:social_post, social_profile: @profile, platform_post_id: 'short_vid', post_type: 'short')
+
+    # parse_video_list sem /shorts/ na URL retorna post_type: 'video' (deteccao flaky)
+    misdetected_video = {
+      platform_post_id: 'short_vid',
+      title: 'Short que perdeu deteccao',
+      post_type: 'video',
+      posted_at: 1.day.ago,
+      views_count: 500,
+      thumbnail_url: 'https://example.com/t.jpg',
+      video_url: 'https://youtube.com/watch?v=short_vid'
+    }
+
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt').returns([[misdetected_video], false])
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([[misdetected_video], false])
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    existing_short.reload
+    assert_equal 'short', existing_short.post_type,
+      'post_type do short existente NAO deve ser sobrescrito por deteccao incorreta de video'
+  end
+
+  test 'should create post_snapshots with fixed TZ and prune snapshots older than 180 days' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt').returns([@videos, false])
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, false])
+
+    old_post = create(:social_post, social_profile: @profile)
+    old_snapshot = create(:post_snapshot, social_post: old_post, recorded_at: 181.days.ago)
+
+    assert_difference 'PostSnapshot.count', 1 do # 2 new post snapshots minus 1 deleted old snapshot = +1 net
+      ScrapeYoutubeJob.perform_now(@profile.id)
+    end
+
+    refute PostSnapshot.exists?(old_snapshot.id)
+
+    today = Time.current.in_time_zone("America/Sao_Paulo").beginning_of_day
+    snapshot = PostSnapshot.where(recorded_at: today).first
+    assert_not_nil snapshot
+    assert_equal 1000, snapshot.views_count
+  end
 end
+

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_10_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_10_000002) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -335,6 +335,24 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_000001) do
     t.index ["key"], name: "index_solid_queue_semaphores_on_key", unique: true
   end
 
+  create_table "topic_deliveries", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "sent_at", null: false
+    t.bigint "topic_id", null: false
+    t.datetime "updated_at", null: false
+    t.string "url_key", null: false
+    t.index ["topic_id", "url_key"], name: "index_topic_deliveries_on_topic_id_and_url_key", unique: true
+    t.index ["topic_id"], name: "index_topic_deliveries_on_topic_id"
+  end
+
+  create_table "topics", force: :cascade do |t|
+    t.boolean "active", default: true, null: false
+    t.datetime "created_at", null: false
+    t.string "name", null: false
+    t.datetime "updated_at", null: false
+    t.index ["name"], name: "index_topics_on_name", unique: true
+  end
+
   add_foreign_key "chat_messages", "conversations"
   add_foreign_key "discovered_profiles", "social_profiles", column: "source_profile_id"
   add_foreign_key "post_snapshots", "social_posts"
@@ -346,4 +364,5 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_000001) do
   add_foreign_key "solid_queue_ready_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_recurring_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_scheduled_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
+  add_foreign_key "topic_deliveries", "topics"
 end

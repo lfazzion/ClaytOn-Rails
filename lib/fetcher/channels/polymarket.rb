@@ -15,8 +15,14 @@ module Fetcher
       class ApiError < Error; end
       class InvalidResponse < Error; end
       class EventNotFound < Error; end
+      class RateLimited < Error
+        def initialize(host)
+          super("rate limit local: #{host} atingiu #{MAX_PER_WINDOW} requisições/min — repita daqui a pouco")
+        end
+      end
 
       MAX_PER_WINDOW = 5
+      MAX_RESULTADOS = 25
       HOST           = "polymarket.com"
       GAMMA_HOST     = "gamma-api.polymarket.com"
       # Só /event/: a Gamma API de eventos é consultada por slug de EVENTO;
@@ -25,6 +31,30 @@ module Fetcher
       PATH_PATTERN   = %r{\A/event/([^/?#]+)\z}
 
       class << self
+        def search(query:, limit: 10)
+          termo = query.to_s.strip
+          return [] if termo.empty?
+
+          n = clamp_limit(limit)
+          raise RateLimited, GAMMA_HOST if HostRateLimiter.exceeded?(GAMMA_HOST, max: MAX_PER_WINDOW)
+
+          search_url = "https://#{GAMMA_HOST}/events?#{URI.encode_www_form(search: termo, limit: n)}"
+          http_resp = SafeHttpClient.get(search_url)
+
+          unless http_resp.success?
+            Rails.logger.warn "[Fetcher::Channels::Polymarket] search falhou com HTTP #{http_resp.status}"
+            return []
+          end
+
+          events = parse_json(http_resp.body)
+          unless events.is_a?(Array)
+            Rails.logger.warn "[Fetcher::Channels::Polymarket] resposta de busca inválida da Gamma API"
+            return []
+          end
+
+          events.filter_map { |event| item_de_busca(event) }.first(n)
+        end
+
         def call(url:, response: nil)
           slug = event_slug_from(url)
           return nil if slug.nil?
@@ -54,6 +84,28 @@ module Fetcher
         end
 
         private
+
+        def clamp_limit(limit)
+          [[limit.to_i, 1].max, MAX_RESULTADOS].min
+        end
+
+        def item_de_busca(event)
+          return nil unless event.is_a?(Hash)
+
+          slug = event["slug"].to_s
+          return nil if slug.blank?
+
+          created_at = event["createdAt"].presence || event["created_at"].presence || event["creationDate"].presence
+
+          {
+            "url"        => "https://polymarket.com/event/#{slug}",
+            "title"      => event["title"].to_s,
+            "source"     => "polymarket",
+            "volume"     => (event["volume"].to_f if event["volume"].is_a?(Numeric)),
+            "liquidity"  => (event["liquidity"].to_f if event["liquidity"].is_a?(Numeric)),
+            "created_at" => created_at
+          }
+        end
 
         def parse_json(raw)
           JSON.parse(raw.to_s)

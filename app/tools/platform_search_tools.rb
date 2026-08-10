@@ -3,6 +3,9 @@
 require_relative "../../lib/fetcher/channels/youtube"
 require_relative "../../lib/fetcher/channels/reddit"
 require_relative "../../lib/fetcher/channels/x"
+require_relative "../../lib/fetcher/channels/hackernews"
+require_relative "../../lib/fetcher/channels/github"
+require_relative "../../lib/fetcher/channels/polymarket"
 
 # Leitura DENTRO da plataforma, pelo caminho nativo dela.
 #
@@ -19,31 +22,38 @@ require_relative "../../lib/fetcher/channels/x"
 # Nitter testadas dão 403/400). O que dá para ler com a sessão do dono é a
 # timeline de UM PERFIL.
 class PlatformSearchTool < ToolBase
-  description "Lê conteúdo DENTRO do YouTube, do Reddit e do X (Twitter) pelo caminho nativo da " \
-              "própria plataforma, e devolve os permalinks. No youtube e no reddit, `query` é o " \
-              "ASSUNTO procurado — 'acha um vídeo sobre X', 'o que o pessoal do Reddit diz sobre " \
-              "X'. No X é DIFERENTE e não há ambiguidade: NÃO existe busca por assunto no X, " \
+  description "Lê conteúdo DENTRO do YouTube, do Reddit, do Hacker News, do GitHub, do Polymarket " \
+              "e do X (Twitter) pelo caminho nativo da própria plataforma, e devolve os permalinks. " \
+              "No youtube, no reddit, no hackernews, no github e no polymarket, `query` é o " \
+              "ASSUNTO procurado — 'acha um vídeo sobre X', 'o que o pessoal do Reddit diz sobre X', " \
+              "'discussões do Hacker News sobre X', 'issues do GitHub sobre X', 'mercados do Polymarket " \
+              "sobre X'. No X é DIFERENTE e não há ambiguidade: NÃO existe busca por assunto no X, " \
               "então `query` é o PERFIL (o @handle, com ou sem arroba) e o retorno são os posts " \
               "MAIS RECENTES desse perfil — use para 'o que fulano postou no X', 'últimos tuítes " \
               "do fulano'. Se o usuário pedir um ASSUNTO no X, não chute um perfil: diga que aqui " \
               "só dá para listar os posts de um perfil informado. Para o resto da internet " \
               "(notícia, preço, documentação, site), use web_search: ela NÃO acha permalink de " \
-              "YouTube, Reddit nem X, os buscadores web não indexam isso. Depois de escolher um " \
-              "resultado, passe a `url` para page_fetch para ler a transcrição do vídeo, a thread " \
-              "inteira ou o post."
+              "YouTube, Reddit, Hacker News, GitHub, Polymarket nem X, os buscadores web não indexam isso. " \
+              "Depois de escolher um resultado, passe a `url` para page_fetch para ler a transcrição " \
+              "do vídeo, a thread inteira ou o post."
 
   param :query,    type: :string,
-                   desc: "No youtube e no reddit: o assunto procurado (1-200 chars). No x: o " \
-                         "perfil/handle a listar, com ou sem @ (1-15 chars [A-Za-z0-9_])",
+                   desc: "No youtube, reddit, hackernews, github e polymarket: o assunto procurado " \
+                         "(1-200 chars). No x: o perfil/handle a listar, com ou sem @ (1-15 chars [A-Za-z0-9_])",
                    required: true
-  param :platform, type: :string,  desc: "Onde ler: youtube | reddit | x", required: true
+  param :platform, type: :string,
+                   desc: "Onde ler: youtube | reddit | hackernews | github | polymarket | x",
+                   required: true
   param :limit,    type: :integer, desc: "Número máximo de resultados (1-25, padrão 10)", required: false
 
   # O modelo não escolhe classe: o nome vem dele, o canal vem daqui.
   PLATFORMS = {
-    "youtube" => Fetcher::Channels::Youtube,
-    "reddit"  => Fetcher::Channels::Reddit,
-    "x"       => Fetcher::Channels::X
+    "youtube"     => Fetcher::Channels::Youtube,
+    "reddit"      => Fetcher::Channels::Reddit,
+    "x"           => Fetcher::Channels::X,
+    "hackernews"  => Fetcher::Channels::Hackernews,
+    "github"      => Fetcher::Channels::Github,
+    "polymarket"  => Fetcher::Channels::Polymarket
   }.freeze
 
   # Plataformas em que `query` é perfil, não assunto. Uma lista em vez de um `if

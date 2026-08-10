@@ -30,6 +30,11 @@ class SocialPostTest < ActiveSupport::TestCase
     assert_includes @post.errors[:post_type], "is not included in the list"
   end
 
+  test "post_type should accept short" do
+    @post.post_type = "short"
+    assert @post.valid?
+  end
+
   test "performance_band should allow valid bands and nil" do
     @post.performance_band = "excelente"
     assert @post.valid?

@@ -7,6 +7,7 @@ class Fetcher::Channels::PolymarketTest < ActiveSupport::TestCase
   PUBLIC_IP = "93.184.216.34"
 
   setup do
+    Rails.cache.clear
     Fetcher::SsrfGuard.stubs(:resolve_all).returns([PUBLIC_IP])
   end
 
@@ -90,5 +91,67 @@ class Fetcher::Channels::PolymarketTest < ActiveSupport::TestCase
 
   test "7. path /market/ devolve nil (Gamma events só responde slug de evento)" do
     assert_nil Fetcher::Channels::Polymarket.call(url: "https://polymarket.com/market/us-2028-biden")
+  end
+
+  test "8. search com query vazia devolve []" do
+    assert_equal [], Fetcher::Channels::Polymarket.search(query: "   ")
+  end
+
+  test "9. search fake retorna eventos com volume, liquidez e permalink url" do
+    payload = [
+      {
+        "id" => "evt99",
+        "slug" => "fed-interest-rates-2026",
+        "title" => "Fed Interest Rate Cut in 2026?",
+        "volume" => 1250000.5,
+        "liquidity" => 350000.0,
+        "createdAt" => "2026-01-15T00:00:00Z"
+      }
+    ]
+
+    stub_request(:get, "https://gamma-api.polymarket.com/events?limit=10&search=fed")
+      .to_return(status: 200, body: JSON.generate(payload), headers: { "Content-Type" => "application/json" })
+
+    results = Fetcher::Channels::Polymarket.search(query: "fed")
+
+    assert_equal 1, results.size
+    item = results.first
+
+    assert_equal "https://polymarket.com/event/fed-interest-rates-2026", item["url"]
+    assert_equal "Fed Interest Rate Cut in 2026?", item["title"]
+    assert_equal "polymarket", item["source"]
+    assert_equal 1250000.5, item["volume"]
+    assert_equal 350000.0, item["liquidity"]
+    assert_equal "2026-01-15T00:00:00Z", item["created_at"]
+  end
+
+  test "10. search quando API responde 4xx/5xx ou erro devolve [] com log de warn" do
+    stub_request(:get, "https://gamma-api.polymarket.com/events?limit=10&search=erro")
+      .to_return(status: 404, body: "Not Found")
+
+    results = nil
+    log_output = capture_log { results = Fetcher::Channels::Polymarket.search(query: "erro") }
+    assert_equal [], results
+  end
+
+  test "11. search quando rate limit local e excedido levanta RateLimited" do
+    Fetcher::HostRateLimiter.stubs(:exceeded?).with("gamma-api.polymarket.com", max: Fetcher::Channels::Polymarket::MAX_PER_WINDOW).returns(true)
+
+    err = assert_raises(Fetcher::Channels::Polymarket::RateLimited) do
+      Fetcher::Channels::Polymarket.search(query: "fed")
+    end
+    assert_kind_of Fetcher::Channels::Error, err
+  end
+
+  private
+
+  def capture_log
+    old_logger = Rails.logger
+    strio = StringIO.new
+    Rails.logger = Logger.new(strio)
+    yield
+    strio.string
+  ensure
+    Rails.logger = old_logger
   end
 end

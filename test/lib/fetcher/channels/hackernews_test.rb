@@ -67,4 +67,64 @@ class Fetcher::Channels::HackernewsTest < ActiveSupport::TestCase
     assert_nil Fetcher::Channels::Hackernews.call(url: "https://news.ycombinator.com/front")
     assert_nil Fetcher::Channels::Hackernews.call(url: "https://news.ycombinator.com/item?id=abc")
   end
+
+  test "6. search com query vazia devolve []" do
+    assert_equal [], Fetcher::Channels::Hackernews.search(query: "   ")
+  end
+
+  test "7. search retorna itens formatados com contrato congelado e external_url separado" do
+    created_epoch = 1700000000
+    iso_date = Time.at(created_epoch).utc.iso8601
+
+    payload = {
+      "hits" => [
+        {
+          "objectID" => "7890",
+          "title" => "Rails 8.1 Released",
+          "url" => "https://rubyonrails.org/news/8-1",
+          "points" => 350,
+          "num_comments" => 42,
+          "author" => "dhh",
+          "created_at_i" => created_epoch
+        }
+      ]
+    }
+
+    stub_request(:get, %r{\Ahttps://hn\.algolia\.com/api/v1/search\?})
+      .to_return(status: 200, body: JSON.generate(payload), headers: { "Content-Type" => "application/json" })
+
+    results = Fetcher::Channels::Hackernews.search(query: "rails")
+
+    assert_equal 1, results.size
+    item = results.first
+
+    assert_equal "https://news.ycombinator.com/item?id=7890", item["url"]
+    assert_equal "https://rubyonrails.org/news/8-1", item["external_url"]
+    assert_equal "Rails 8.1 Released", item["title"]
+    assert_equal "hackernews", item["source"]
+    assert_equal 350, item["points"]
+    assert_equal 42, item["comments"]
+    refute item.key?("num_comments"), "Nao deve emitir num_comments; a chave deve ser comments"
+    assert_equal "dhh", item["author"]
+    assert_equal iso_date, item["created_at"]
+  end
+
+  test "8. search quando API responde 4xx levanta ApiError" do
+    stub_request(:get, %r{\Ahttps://hn\.algolia\.com/api/v1/search\?})
+      .to_return(status: 400, body: "Bad Request")
+
+    err = assert_raises(Fetcher::Channels::Hackernews::ApiError) do
+      Fetcher::Channels::Hackernews.search(query: "ruby")
+    end
+    assert_kind_of Fetcher::Channels::Error, err
+  end
+
+  test "9. search quando rate limit local e excedido levanta RateLimited" do
+    Fetcher::HostRateLimiter.stubs(:exceeded?).with("hn.algolia.com", max: Fetcher::Channels::Hackernews::MAX_PER_WINDOW).returns(true)
+
+    err = assert_raises(Fetcher::Channels::Hackernews::RateLimited) do
+      Fetcher::Channels::Hackernews.search(query: "ruby")
+    end
+    assert_kind_of Fetcher::Channels::Error, err
+  end
 end

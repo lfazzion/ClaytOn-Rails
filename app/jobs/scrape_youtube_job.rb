@@ -124,7 +124,11 @@ class ScrapeYoutubeJob < ApplicationJob
       # Não sobrescrever um valor já coletado com nil — preserva o melhor dado
       # que já temos. CLAUDE.md regra 3: nil = falha, não dado.
       post.assign_attributes(
-        post_type: video[:post_type] || post.post_type || 'video',
+        # fix 13: só sobrescreve post_type quando a detecção é POSITIVA de
+        # short (webpage_url com /shorts/). Um short que perde a detecção num
+        # run (parse devolve 'video') mantém 'short' do run anterior; vídeo
+        # comum nunca vira short.
+        post_type: video[:post_type] == 'short' ? 'short' : (post.post_type || 'video'),
         content: video[:title] || post.content,
         posted_at: video[:posted_at] || post.posted_at,
         views_count: video[:views_count] || post.views_count,
@@ -135,10 +139,30 @@ class ScrapeYoutubeJob < ApplicationJob
       )
 
       post.save! if post.changed?
+
+      create_post_snapshot(post)
     end
+
+    prune_post_snapshots
+  end
+
+  def create_post_snapshot(post)
+    today = Time.current.in_time_zone("America/Sao_Paulo").beginning_of_day
+    snapshot = PostSnapshot.find_or_initialize_by(social_post: post, recorded_at: today)
+
+    snapshot.views_count = post.views_count if post.views_count.present?
+    snapshot.likes_count = post.likes_count if post.likes_count.present?
+    snapshot.comments_count = post.comments_count if post.comments_count.present?
+
+    snapshot.save! if snapshot.changed?
+  end
+
+  def prune_post_snapshots
+    PostSnapshot.where("recorded_at < ?", 180.days.ago).delete_all
   end
 
   def create_snapshot(profile, metadata)
+
     ProfileSnapshot.find_or_create_by(
       social_profile: profile,
       recorded_at: Time.current.beginning_of_hour

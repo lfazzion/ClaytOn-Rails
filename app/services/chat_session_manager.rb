@@ -449,7 +449,8 @@ class ChatSessionManager
         ProspectsTool, UnclassifiedProfilesTool,
         UpcomingCatalogTool, PopularCatalogTool,
         UpcomingEventsTool, RecentArticlesTool,
-        WebSearchTool, PlatformSearchTool
+        WebSearchTool, PlatformSearchTool,
+        TopicAddTool, TopicListTool, TopicRemoveTool
       ]
       tools << PageFetchTool if ENV["ENABLE_PAGE_FETCH"].to_s.downcase == "true"
       tools

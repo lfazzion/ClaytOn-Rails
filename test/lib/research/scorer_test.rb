@@ -66,4 +66,18 @@ class ResearchScorerTest < ActiveSupport::TestCase
     assert_equal 0.5, sorted.first["relevance_score"]
     assert_equal 0.5, sorted.last["relevance_score"]
   end
+
+  test "desempate no sort de itens com mesmo score e deterministico" do
+    item_a = { "title" => "B item", "url" => "https://example.com/b" }
+    item_b = { "title" => "A item", "url" => "https://example.com/a" }
+
+    Research::Scorer.stubs(:score).returns(0.0)
+
+    # 2 rodadas com ordem de entrada diferente devem produzir a MESMA ordem de saida
+    run1 = Research::Scorer.sort([item_a, item_b], query: "xyz")
+    run2 = Research::Scorer.sort([item_b, item_a], query: "xyz")
+
+    assert_equal run1.map { |i| i["url"] }, run2.map { |i| i["url"] }
+    assert_equal ["https://example.com/a", "https://example.com/b"], run1.map { |i| i["url"] }
+  end
 end

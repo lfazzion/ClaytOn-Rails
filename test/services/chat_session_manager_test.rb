@@ -263,6 +263,15 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     ENV["ENABLE_PAGE_FETCH"] = original
   end
 
+  test "all_tool_classes registra as tools de watchlist (TopicAddTool, TopicListTool, TopicRemoveTool)" do
+    ChatSessionManager.unstub(:all_tool_classes)
+    tools = ChatSessionManager.send(:all_tool_classes)
+    assert_includes tools, TopicAddTool
+    assert_includes tools, TopicListTool
+    assert_includes tools, TopicRemoveTool
+  end
+
+
   test "ask define Thread.current[:cleitin_actor] durante a chamada e limpa no ensure" do
     actor_durante_execucao = nil
 

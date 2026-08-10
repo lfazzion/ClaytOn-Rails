@@ -97,6 +97,9 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
   test "plataforma desconhecida vira erro nomeado, sem chamar canal nenhum" do
     Fetcher::Channels::Youtube.expects(:search).never
     Fetcher::Channels::Reddit.expects(:search).never
+    Fetcher::Channels::Hackernews.expects(:search).never
+    Fetcher::Channels::Github.expects(:search).never
+    Fetcher::Channels::Polymarket.expects(:search).never
 
     result = PlatformSearchTool.new.execute(query: "x", platform: "tiktok")
 
@@ -104,6 +107,9 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     assert_includes result[:reason], "tiktok"
     assert_includes result[:reason], "youtube"
     assert_includes result[:reason], "reddit"
+    assert_includes result[:reason], "hackernews"
+    assert_includes result[:reason], "github"
+    assert_includes result[:reason], "polymarket"
   end
 
   test "query vazia vira erro antes de tocar no canal" do
@@ -179,6 +185,10 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     assert_includes desc, "web_search"
     assert_includes desc, "YouTube"
     assert_includes desc, "Reddit"
+    # Os 3 canais novos também precisam aparecer para o modelo poder escolhê-los
+    assert_includes desc, "Hacker News"
+    assert_includes desc, "GitHub"
+    assert_includes desc, "Polymarket"
   end
 
   # ---------------------------------------------------------------------------
@@ -285,5 +295,176 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     result = PlatformSearchTool.new.execute(query: "x", platform: "youtube", engine: "youtube")
 
     assert_equal :success, result[:status]
+  end
+
+  # ---------------------------------------------------------------------------
+  # Hackernews, Github, Polymarket — busca por ASSUNTO (query = tema, não perfil)
+  # Estes canais passam pelo Scorer exatamente como YouTube e Reddit.
+  # ---------------------------------------------------------------------------
+
+  HN_ITEMS = [
+    { "url" => "https://news.ycombinator.com/item?id=111", "title" => "Ruby 4 anunciado",
+      "source" => "hackernews", "points" => 500, "comments" => 200,
+      "author" => "pg", "created_at" => "2026-08-01T10:00:00Z", "external_url" => nil },
+    { "url" => "https://news.ycombinator.com/item?id=222", "title" => "Muffin de beterraba",
+      "source" => "hackernews", "points" => 1, "comments" => 0,
+      "author" => "anon", "created_at" => "2026-08-01T09:00:00Z", "external_url" => nil }
+  ].freeze
+
+  test "busca no hackernews roteado para search do canal, nao para timeline" do
+    Fetcher::Channels::Hackernews.expects(:search).with(query: "ruby 4", limit: 10).returns(HN_ITEMS)
+    Fetcher::Channels::Hackernews.expects(:timeline).never if Fetcher::Channels::Hackernews.respond_to?(:timeline)
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "hackernews")
+
+    assert_equal :success, result[:status]
+    assert_equal "hackernews", result[:data][:platform]
+    assert_equal 2, result[:data][:count]
+    assert_equal "https://news.ycombinator.com/item?id=111", result[:data][:results].first["url"]
+  end
+
+  test "resultados do hackernews sao reordenados pelo scorer" do
+    item_baixo = { "url" => "https://news.ycombinator.com/item?id=333", "title" => "Muffin de beterraba",
+                   "source" => "hackernews", "points" => 1, "comments" => 0 }
+    item_alto  = { "url" => "https://news.ycombinator.com/item?id=444", "title" => "Ruby 4 novidades e tutorial",
+                   "source" => "hackernews", "points" => 500, "comments" => 200 }
+
+    Fetcher::Channels::Hackernews.expects(:search).with(query: "ruby 4", limit: 10).returns([item_baixo, item_alto])
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "hackernews")
+
+    assert_equal :success, result[:status]
+    results = result[:data][:results]
+    assert_equal 2, results.size
+    assert_equal "https://news.ycombinator.com/item?id=444", results.first["url"],
+                 "Item mais relevante para 'ruby 4' deve vir primeiro"
+    assert results.first["relevance_score"] > results.last["relevance_score"]
+  end
+
+  test "hackernews nao esta na lista POR_PERFIL" do
+    refute PlatformSearchTool::POR_PERFIL.include?("hackernews")
+  end
+
+  test "erro de api do hackernews vira erro nomeado via Fetcher::Channels::Error" do
+    Fetcher::Channels::Hackernews.stubs(:search)
+                                  .raises(Fetcher::Channels::Hackernews::ApiError, "API do HN respondeu HTTP 503")
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "hackernews")
+
+    assert_equal :error, result[:status]
+    assert_includes result[:reason], "hackernews"
+  end
+
+  GH_ITEMS = [
+    { "url" => "https://github.com/ruby/ruby/issues/1", "title" => "Ruby 4 planning",
+      "source" => "github", "reactions" => 300, "comments" => 50,
+      "author" => "matz", "created_at" => "2026-08-01T08:00:00Z" },
+    { "url" => "https://github.com/ruby/ruby/issues/2", "title" => "Fix typo in README",
+      "source" => "github", "reactions" => 1, "comments" => 0,
+      "author" => "bot", "created_at" => "2026-08-02T08:00:00Z" }
+  ].freeze
+
+  test "busca no github roteado para search do canal" do
+    Fetcher::Channels::Github.expects(:search).with(query: "ruby 4", limit: 10).returns(GH_ITEMS)
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "github")
+
+    assert_equal :success, result[:status]
+    assert_equal "github", result[:data][:platform]
+    assert_equal 2, result[:data][:count]
+  end
+
+  test "resultados do github sao reordenados pelo scorer" do
+    item_baixo = { "url" => "https://github.com/ruby/ruby/issues/9", "title" => "Fix typo",
+                   "source" => "github", "reactions" => 0, "comments" => 0 }
+    item_alto  = { "url" => "https://github.com/ruby/ruby/issues/8", "title" => "Ruby 4 planning discussion",
+                   "source" => "github", "reactions" => 300, "comments" => 50 }
+
+    Fetcher::Channels::Github.expects(:search).with(query: "ruby 4", limit: 10).returns([item_baixo, item_alto])
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "github")
+
+    assert_equal :success, result[:status]
+    results = result[:data][:results]
+    assert_equal 2, results.size
+    assert_equal "https://github.com/ruby/ruby/issues/8", results.first["url"],
+                 "Item mais relevante para 'ruby 4' deve vir primeiro"
+    assert results.first["relevance_score"] > results.last["relevance_score"]
+  end
+
+  test "github nao esta na lista POR_PERFIL" do
+    refute PlatformSearchTool::POR_PERFIL.include?("github")
+  end
+
+  test "github devolve lista vazia em 403 sem virar erro" do
+    # Github.search faz fallback gracioso [] em 403/429/5xx — tool reporta sucesso
+    Fetcher::Channels::Github.expects(:search).with(query: "ruby 4", limit: 10).returns([])
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "github")
+
+    assert_equal :success, result[:status]
+    assert_equal 0, result[:data][:count]
+  end
+
+  PM_ITEMS = [
+    { "url" => "https://polymarket.com/event/ruby-4-release", "title" => "Ruby 4 released in 2026?",
+      "source" => "polymarket", "volume" => 50_000.0, "liquidity" => 10_000.0,
+      "created_at" => "2026-07-01" },
+    { "url" => "https://polymarket.com/event/muffin", "title" => "Muffin sales up?",
+      "source" => "polymarket", "volume" => 100.0, "liquidity" => 50.0,
+      "created_at" => "2026-07-02" }
+  ].freeze
+
+  test "busca no polymarket roteado para search do canal" do
+    Fetcher::Channels::Polymarket.expects(:search).with(query: "ruby 4", limit: 10).returns(PM_ITEMS)
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "polymarket")
+
+    assert_equal :success, result[:status]
+    assert_equal "polymarket", result[:data][:platform]
+    assert_equal 2, result[:data][:count]
+  end
+
+  test "resultados do polymarket sao reordenados pelo scorer" do
+    item_baixo = { "url" => "https://polymarket.com/event/muffin", "title" => "Muffin sales up?",
+                   "source" => "polymarket", "volume" => 100.0, "liquidity" => 50.0 }
+    item_alto  = { "url" => "https://polymarket.com/event/ruby-4", "title" => "Ruby 4 released in 2026?",
+                   "source" => "polymarket", "volume" => 50_000.0, "liquidity" => 10_000.0 }
+
+    Fetcher::Channels::Polymarket.expects(:search).with(query: "ruby 4", limit: 10).returns([item_baixo, item_alto])
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "polymarket")
+
+    assert_equal :success, result[:status]
+    results = result[:data][:results]
+    assert_equal 2, results.size
+    assert_equal "https://polymarket.com/event/ruby-4", results.first["url"],
+                 "Item mais relevante para 'ruby 4' deve vir primeiro"
+    assert results.first["relevance_score"] > results.last["relevance_score"]
+  end
+
+  test "polymarket nao esta na lista POR_PERFIL" do
+    refute PlatformSearchTool::POR_PERFIL.include?("polymarket")
+  end
+
+  test "erro de api do polymarket vira erro nomeado via Fetcher::Channels::Error" do
+    Fetcher::Channels::Polymarket.stubs(:search)
+                                  .raises(Fetcher::Channels::Polymarket::RateLimited.new("gamma-api.polymarket.com"))
+
+    result = PlatformSearchTool.new.execute(query: "ruby 4", platform: "polymarket")
+
+    assert_equal :error, result[:status]
+    assert_includes result[:reason], "polymarket"
+  end
+
+  test "a description do parametro platform lista os 6 valores validos" do
+    desc = PlatformSearchTool.parameters[:platform].description.to_s
+
+    assert_includes desc, "hackernews"
+    assert_includes desc, "github"
+    assert_includes desc, "polymarket"
+    assert_includes desc, "youtube"
+    assert_includes desc, "reddit"
+    assert_includes desc, "x"
   end
 end

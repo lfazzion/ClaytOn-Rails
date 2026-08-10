@@ -47,7 +47,11 @@ production:
   weekly_digest_job:
     class: WeeklyDigestJob
     queue: default
-    schedule: at 9am every monday
+    schedule: at 1pm every monday
+  score_posts_job:
+    class: ScorePostsJob
+    queue: default
+    schedule: at 12pm every day
   friday_ideation_job:
     class: FridayIdeationJob
     queue: default
@@ -60,4 +64,7 @@ production:
     class: CollectProfilesJob
     queue: scraping
     schedule: at 9am every day # UTC; 9am UTC = 6h BRT (horario local de SP)
-
+  last30days_digest_job:
+    class: Last30DaysDigestJob
+    queue: default
+    schedule: at 8am every tuesday and friday

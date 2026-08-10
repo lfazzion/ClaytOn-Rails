@@ -7,6 +7,7 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
   PUBLIC_IP = "93.184.216.34"
 
   setup do
+    Rails.cache.clear
     Fetcher::SsrfGuard.stubs(:resolve_all).returns([PUBLIC_IP])
   end
 
@@ -109,5 +110,78 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
       Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
     end
     assert_kind_of Fetcher::Channels::Error, err
+  end
+
+  test "7. search com query vazia devolve []" do
+    assert_equal [], Fetcher::Channels::Github.search(query: "   ")
+  end
+
+  test "8. search fake achata reactions, envia token nos headers e filtra por created:>=" do
+    old_gh_token = ENV.delete("GH_TOKEN")
+    ENV["GITHUB_TOKEN"] = "token123fake"
+
+    payload = {
+      "items" => [
+        {
+          "html_url" => "https://github.com/rails/rails/issues/500",
+          "title" => "Solid Queue performance",
+          "reactions" => { "total_count" => 15, "+1" => 12 },
+          "comments" => 7,
+          "user" => { "login" => "tenderlove" },
+          "created_at" => "2026-08-05T10:00:00Z"
+        }
+      ]
+    }
+
+    req_stub = stub_request(:get, %r{\Ahttps://api\.github\.com/search/issues\?})
+      .with(headers: { "Authorization" => "Bearer token123fake", "Accept" => "application/vnd.github+json" })
+      .to_return(status: 200, body: JSON.generate(payload), headers: { "Content-Type" => "application/json" })
+
+    results = Fetcher::Channels::Github.search(query: "solid queue")
+
+    assert_requested req_stub
+    assert_equal 1, results.size
+    item = results.first
+
+    assert_equal "https://github.com/rails/rails/issues/500", item["url"]
+    assert_equal "Solid Queue performance", item["title"]
+    assert_equal "github", item["source"]
+    assert_equal 15, item["reactions"], "reactions deve vir achatado como Numeric (total_count)"
+    refute_kind_of Hash, item["reactions"], "reactions NAO pode ser um Hash"
+    assert_equal 7, item["comments"]
+    assert_equal "tenderlove", item["author"]
+    assert_equal "2026-08-05T10:00:00Z", item["created_at"]
+  ensure
+    ENV.delete("GITHUB_TOKEN")
+    ENV["GH_TOKEN"] = old_gh_token if old_gh_token
+  end
+
+  test "9. search quando API responde 403, 429 ou 5xx devolve [] com warn log" do
+    stub_request(:get, %r{\Ahttps://api\.github\.com/search/issues\?})
+      .to_return(status: 403, body: JSON.generate({ "message" => "API rate limit exceeded" }))
+
+    log_output = capture_log { Fetcher::Channels::Github.search(query: "rails") }
+    assert_equal [], Fetcher::Channels::Github.search(query: "rails")
+  end
+
+  test "10. search quando rate limit local e excedido levanta RateLimited" do
+    Fetcher::HostRateLimiter.stubs(:exceeded?).with("api.github.com", max: Fetcher::Channels::Github::MAX_PER_WINDOW).returns(true)
+
+    err = assert_raises(Fetcher::Channels::Github::RateLimited) do
+      Fetcher::Channels::Github.search(query: "rails")
+    end
+    assert_kind_of Fetcher::Channels::Error, err
+  end
+
+  private
+
+  def capture_log
+    old_logger = Rails.logger
+    strio = StringIO.new
+    Rails.logger = Logger.new(strio)
+    yield
+    strio.string
+  ensure
+    Rails.logger = old_logger
   end
 end

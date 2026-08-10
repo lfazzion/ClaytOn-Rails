@@ -22,10 +22,36 @@ module Fetcher
 
       MAX_PER_WINDOW = 5
       MAX_COMMENTS   = 20
+      MAX_RESULTADOS = 25
       HOST           = "news.ycombinator.com"
       ALGOLIA_HOST   = "hn.algolia.com"
 
       class << self
+        def search(query:, limit: 10)
+          termo = query.to_s.strip
+          return [] if termo.empty?
+
+          n = clamp_limit(limit)
+          raise RateLimited, ALGOLIA_HOST if HostRateLimiter.exceeded?(ALGOLIA_HOST, max: MAX_PER_WINDOW)
+
+          epoch = (Time.now.utc - 30.days).to_i
+          params = {
+            query: termo,
+            tags: "story",
+            hitsPerPage: n,
+            numericFilters: "created_at_i>#{epoch}"
+          }
+          search_url = "https://#{ALGOLIA_HOST}/api/v1/search?#{URI.encode_www_form(params)}"
+          http_resp = SafeHttpClient.get(search_url)
+
+          raise ApiError, "API do HN respondeu HTTP #{http_resp.status}" unless http_resp.success?
+
+          payload = parse_json(http_resp.body)
+          raise ApiError, "resposta inválida da API do HN" unless payload.is_a?(Hash) && payload["hits"].is_a?(Array)
+
+          payload["hits"].filter_map { |hit| item_de_busca(hit) }.first(n)
+        end
+
         def call(url:, response: nil)
           id = item_id_from(url)
           return nil if id.nil?
@@ -61,6 +87,35 @@ module Fetcher
         end
 
         private
+
+        def clamp_limit(limit)
+          [[limit.to_i, 1].max, MAX_RESULTADOS].min
+        end
+
+        def item_de_busca(hit)
+          return nil unless hit.is_a?(Hash)
+
+          object_id = hit["objectID"].to_s
+          return nil if object_id.blank?
+
+          created_at_i = hit["created_at_i"]
+          created_at = if created_at_i.is_a?(Numeric)
+                         Time.at(created_at_i.to_i).utc.iso8601
+                       else
+                         hit["created_at"].to_s.presence
+                       end
+
+          {
+            "url"          => "https://news.ycombinator.com/item?id=#{object_id}",
+            "title"        => hit["title"].to_s.presence || hit["story_title"].to_s.presence || "(sem título)",
+            "source"       => "hackernews",
+            "points"       => (hit["points"].to_i if hit["points"].is_a?(Numeric)),
+            "comments"     => (hit["num_comments"].to_i if hit["num_comments"].is_a?(Numeric)),
+            "author"       => hit["author"].to_s,
+            "created_at"   => created_at,
+            "external_url" => hit["url"].to_s.presence
+          }
+        end
 
         def parse_json(raw)
           JSON.parse(raw.to_s)

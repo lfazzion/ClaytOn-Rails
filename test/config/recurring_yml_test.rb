@@ -114,4 +114,11 @@ class RecurringYmlTest < ActiveSupport::TestCase
     assert_not_nil job_cfg, "collect_profiles_job missing from production recurring.yml"
     assert_equal "at 9am every day", job_cfg["schedule"]
   end
+
+  test "weekly_digest_job schedule is 1pm monday in recurring.yml (evita colisão com score_posts_job)" do
+    config = YAML.load_file(RECURRING_YML_PATH, aliases: true)
+    job_cfg = config.dig("production", "weekly_digest_job")
+    assert_not_nil job_cfg, "weekly_digest_job missing from production recurring.yml"
+    assert_equal "at 1pm every monday", job_cfg["schedule"]
+  end
 end
