@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_10_000002) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_11_000002) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -146,6 +146,81 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_000002) do
     t.index ["recorded_at"], name: "index_profile_snapshots_on_recorded_at"
     t.index ["social_profile_id", "recorded_at"], name: "index_profile_snapshots_on_social_profile_id_and_recorded_at"
     t.index ["social_profile_id"], name: "index_profile_snapshots_on_social_profile_id"
+  end
+
+  create_table "sentiment_daily_quotas", force: :cascade do |t|
+    t.integer "count", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.date "day", null: false
+    t.datetime "updated_at", null: false
+    t.index ["day"], name: "index_sentiment_daily_quotas_on_day", unique: true
+  end
+
+  create_table "sentiment_labels", force: :cascade do |t|
+    t.integer "attempt", default: 1, null: false
+    t.integer "batch_index"
+    t.float "confidence"
+    t.datetime "created_at", null: false
+    t.string "label", null: false
+    t.string "model_id"
+    t.integer "pass", default: 1, null: false
+    t.integer "phrase_id", null: false
+    t.string "prompt_version"
+    t.integer "run_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["phrase_id", "pass", "attempt"], name: "index_sentiment_labels_on_phrase_id_and_pass_and_attempt", unique: true
+    t.index ["phrase_id"], name: "index_sentiment_labels_on_phrase_id"
+    t.index ["run_id"], name: "index_sentiment_labels_on_run_id"
+  end
+
+  create_table "sentiment_phrases", force: :cascade do |t|
+    t.string "author"
+    t.datetime "collected_at", null: false
+    t.datetime "created_at", null: false
+    t.string "external_id", null: false
+    t.string "permalink"
+    t.datetime "posted_at"
+    t.integer "run_id", null: false
+    t.string "source", null: false
+    t.text "text", null: false
+    t.datetime "updated_at", null: false
+    t.index ["run_id", "external_id"], name: "index_sentiment_phrases_on_run_id_and_external_id", unique: true
+    t.index ["run_id"], name: "index_sentiment_phrases_on_run_id"
+  end
+
+  create_table "sentiment_runs", force: :cascade do |t|
+    t.integer "classified_count", default: 0, null: false
+    t.integer "collected_count", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.text "error"
+    t.datetime "finished_at"
+    t.json "frozen_spec", null: false
+    t.string "model_id"
+    t.string "prompt_version"
+    t.integer "rejected_count", default: 0, null: false
+    t.boolean "snapshot_pinned", default: true, null: false
+    t.datetime "started_at"
+    t.string "status", default: "pending", null: false
+    t.float "tara"
+    t.integer "target_id", null: false
+    t.integer "unparsed_count", default: 0, null: false
+    t.datetime "updated_at", null: false
+    t.datetime "window_end"
+    t.datetime "window_start"
+    t.index ["target_id"], name: "index_sentiment_runs_on_target_id"
+  end
+
+  create_table "sentiment_targets", force: :cascade do |t|
+    t.boolean "active", default: true, null: false
+    t.string "bucket", default: "week", null: false
+    t.datetime "created_at", null: false
+    t.integer "max_phrases", default: 600, null: false
+    t.string "name", null: false
+    t.string "query", null: false
+    t.string "sources", default: "reddit,x", null: false
+    t.datetime "updated_at", null: false
+    t.integer "window_days", default: 30, null: false
+    t.index ["name"], name: "index_sentiment_targets_on_name", unique: true
   end
 
   create_table "social_posts", force: :cascade do |t|
@@ -357,6 +432,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_000002) do
   add_foreign_key "discovered_profiles", "social_profiles", column: "source_profile_id"
   add_foreign_key "post_snapshots", "social_posts"
   add_foreign_key "profile_snapshots", "social_profiles"
+  add_foreign_key "sentiment_labels", "sentiment_phrases", column: "phrase_id"
+  add_foreign_key "sentiment_labels", "sentiment_runs", column: "run_id"
+  add_foreign_key "sentiment_phrases", "sentiment_runs", column: "run_id"
+  add_foreign_key "sentiment_runs", "sentiment_targets", column: "target_id"
   add_foreign_key "social_posts", "social_profiles"
   add_foreign_key "solid_queue_blocked_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_claimed_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade

@@ -223,4 +223,28 @@ class Fetcher::Channels::RedditTest < ActiveSupport::TestCase
   test "busca sem resultado nenhum continua sendo lista vazia" do
     assert_equal [], from_search([])
   end
+
+  test "thread_comments extrai comentários estruturados com posted_at da tagline" do
+    payload = {
+      "title" => "Thread com timestamps",
+      "subreddit" => "brasil",
+      "author" => "autor1",
+      "score" => 100,
+      "comments" => [
+        { "author" => "user1", "score" => 50, "depth" => 0, "created_at" => "2026-08-10T12:00:00+00:00", "body" => "Comentário com data." }
+      ]
+    }
+
+    res = Fetcher::Channels::Reddit.from_thread_comments_page(
+      page: FakePage.new(JSON.generate(payload)),
+      url: "https://old.reddit.com/r/brasil/comments/xyz/t/"
+    )
+
+    assert_equal "Thread com timestamps", res["title"]
+    assert_equal 1, res["comments"].size
+    c = res["comments"].first
+    assert_equal "user1", c["author"]
+    assert_equal "2026-08-10T12:00:00+00:00", c["posted_at"]
+    assert_equal "Comentário com data.", c["body"]
+  end
 end
