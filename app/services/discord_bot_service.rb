@@ -2,6 +2,7 @@
 
 require "discordrb"
 require "concurrent"
+require "tempfile"
 
 class DiscordBotService
   MAX_DISCORD_MESSAGE = 2000
@@ -256,13 +257,48 @@ class DiscordBotService
         texto = ChatSessionManager.ask(scope: scope, content: content, user_id: user_id,
                                        username: username)
         texto = truncation_notice(texto, truncated_reason) if truncated
-        respond_in_chunks(event, texto)
+        attachment = ResponseAttachmentBuilder.build(texto)
+
+        if attachment
+          # M3 (revisão Opus): no caminho de prosa o aviso de truncamento
+          # ficaria enterrado dentro do .md — vai para o caption, visível.
+          if truncated && attachment.kind == :prose
+            attachment.caption = "#{truncation_notice('', truncated_reason).strip} — #{attachment.caption}"
+          end
+          send_attachment_with_fallback(event, texto, attachment)
+        else
+          respond_in_chunks(event, texto)
+        end
       rescue StandardError => e
         Rails.logger.error "[DiscordBotService] Erro: #{e.class.name} - #{e.message}"
         event.respond("⚠️ Erro ao processar. Tente novamente.")
       ensure
         typing_running.make_false
         typing_thread&.join(1)
+      end
+    end
+
+    def send_attachment_with_fallback(event, texto, attachment)
+      tempfile = Tempfile.new(["discord_att", File.extname(attachment.filename)])
+      tempfile.binmode
+      tempfile.write(attachment.content)
+      tempfile.rewind
+
+      begin
+        event.channel.send_file(tempfile, caption: attachment.caption, filename: attachment.filename)
+      rescue StandardError => e
+        Rails.logger.error "[DiscordBotService] Erro ao enviar anexo (#{e.class.name}: #{e.message}), caindo para chunks"
+        respond_in_chunks(event, texto)
+        return
+      end
+
+      # B2 (revisão Opus): o excedente do caption (>2000) nunca se perde — é
+      # entregue como mensagens após o arquivo, como o split_message faria.
+      respond_in_chunks(event, attachment.caption_resto) if attachment.caption_resto.present?
+    ensure
+      if tempfile
+        tempfile.close
+        tempfile.unlink rescue nil
       end
     end
 

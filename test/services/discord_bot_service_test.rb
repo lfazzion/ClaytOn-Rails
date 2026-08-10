@@ -10,6 +10,7 @@ require_relative "../../app/tools/catalog_tools"
 require_relative "../../app/tools/event_tools"
 require_relative "../../app/tools/news_tools"
 require_relative "../../app/services/chat_session_manager"
+require_relative "../../app/services/response_attachment_builder"
 require_relative "../../app/services/discord_bot_service"
 
 class DiscordBotServiceTest < ActiveSupport::TestCase
@@ -511,5 +512,140 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     event.expects(:respond).with("A conclusão está na parte que não li\n\n⚠️ *(O arquivo é longo demais e foi lido parcialmente.)*")
 
     DiscordBotService.handle_message(event)
+  end
+
+  # --- resposta LLM como anexo ---
+
+  test "handle_message quando builder devolve nil envia resposta em chunks inline" do
+    event = mock_event(content: "pergunta")
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+    texto = "resposta curta"
+
+    ChatSessionManager.expects(:ask).returns(texto)
+    ResponseAttachmentBuilder.expects(:build).with(texto).returns(nil)
+    event.expects(:respond).with("resposta curta")
+    event.channel.expects(:send_file).never
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "handle_message quando builder devolve Result envia por send_file com Tempfile e nao chama respond_in_chunks" do
+    event = mock_event(content: "pergunta")
+    texto = "```python\n" + ("  print('hello')\n" * 30) + "```"
+    result = ResponseAttachmentBuilder::Result.new(
+      caption: "Aqui esta o arquivo.",
+      filename: "codigo.py",
+      content: "  print('hello')\n" * 30
+    )
+
+    ChatSessionManager.expects(:ask).returns(texto)
+    ResponseAttachmentBuilder.expects(:build).with(texto).returns(result)
+
+    event.expects(:respond).never
+    event.channel.expects(:send_file).with do |file, kwargs|
+      file.is_a?(Tempfile) && kwargs[:caption] == "Aqui esta o arquivo." && kwargs[:filename] == "codigo.py"
+    end.returns(true)
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "handle_message quando send_file levanta erro faz fallback para respond_in_chunks" do
+    event = mock_event(content: "pergunta")
+    texto = "```python\n" + ("  print('hello')\n" * 30) + "```"
+    result = ResponseAttachmentBuilder::Result.new(
+      caption: "Aqui esta o arquivo.",
+      filename: "codigo.py",
+      content: "  print('hello')\n" * 30
+    )
+
+    ChatSessionManager.expects(:ask).returns(texto)
+    ResponseAttachmentBuilder.expects(:build).with(texto).returns(result)
+
+    # raise como COMPORTAMENTO da expectativa (.raises), nunca dentro do bloco
+    # do .with: o bloco é o matcher do Mocha — um raise ali propaga o erro mas
+    # não registra a invocação ("invoked never") e a expectativa fica
+    # insatisfeita mesmo com o fallback funcionando.
+    event.channel.expects(:send_file).raises(StandardError, "Discord API error")
+    event.expects(:respond).with(texto)
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "handle_message com caption_resto envia o excedente como mensagens apos o arquivo (B2)" do
+    event = mock_event(content: "pergunta")
+    texto = "texto da resposta"
+    result = ResponseAttachmentBuilder::Result.new(
+      caption: "explicacao…", caption_resto: "continuacao da explicacao",
+      filename: "codigo.py", content: "code", kind: :code
+    )
+
+    ChatSessionManager.expects(:ask).returns(texto)
+    ResponseAttachmentBuilder.expects(:build).with(texto).returns(result)
+
+    event.channel.expects(:send_file).returns(true)
+    # o excedente do caption vai como mensagem (respond_in_chunks) — nada se perde
+    event.expects(:respond).with("continuacao da explicacao")
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "answer com prosa truncada e arquivo prefixa o aviso no caption (M3)" do
+    att = stub(filename: "grande.txt")
+    event = mock_event(content: "analise", attachments: [att])
+    frame = "analise\n\n[ARQUIVO nome=\"grande.txt\"]\nConteudo\n[/ARQUIVO]"
+    AttachmentProcessor.expects(:process).with(att, "analise").returns(
+      AttachmentProcessor::Result.new(success: true, content: frame, truncated: true,
+                                      truncated_reason: :chars, filename: "grande.txt")
+    )
+
+    texto = "prosa longa"
+    texto_com_aviso = "#{texto}\n\n⚠️ *(O arquivo foi truncado em 30000 caracteres.)*"
+    result = ResponseAttachmentBuilder::Result.new(
+      caption: "📄 preview…", filename: "resposta.md", content: texto_com_aviso, kind: :prose
+    )
+
+    ChatSessionManager.expects(:ask).returns(texto)
+    ResponseAttachmentBuilder.expects(:build).with(texto_com_aviso).returns(result)
+
+    # M3: o aviso aparece PREFIXADO no caption (e nao enterrado dentro do .md)
+    event.channel.expects(:send_file).with do |_file, kwargs|
+      kwargs[:caption].start_with?("⚠️")
+    end.returns(true)
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "send_attachment_with_fallback remove o Tempfile apos sucesso e apos erro" do
+    event = mock_event(content: "pergunta")
+    texto = "conteudo longo"
+    result = ResponseAttachmentBuilder::Result.new(
+      caption: "caption",
+      filename: "codigo.py",
+      content: "code"
+    )
+
+    tempfile_path_sucesso = nil
+    event.channel.expects(:send_file).with do |file, _kwargs|
+      tempfile_path_sucesso = file.path
+      true
+    end.returns(true)
+
+    DiscordBotService.send(:send_attachment_with_fallback, event, texto, result)
+    refute_nil tempfile_path_sucesso
+    refute File.exist?(tempfile_path_sucesso)
+
+    tempfile_path_erro = nil
+    # Mesma regra do teste acima: o bloco do .with só CAPTURA (matcher); o
+    # erro vem de .raises como comportamento, senão a invocação não é
+    # registrada e a expectativa falha mesmo com o fallback correto.
+    event.channel.expects(:send_file).with do |file, _kwargs|
+      tempfile_path_erro = file.path
+      true
+    end.raises(StandardError, "fail")
+    event.expects(:respond).with(texto)
+
+    DiscordBotService.send(:send_attachment_with_fallback, event, texto, result)
+    refute_nil tempfile_path_erro
+    refute File.exist?(tempfile_path_erro)
   end
 end
