@@ -15,6 +15,17 @@ class DockerfilePythonTest < ActiveSupport::TestCase
   def content
     @content ||= File.read(DOCKERFILE_PATH)
   end
+  test "usa base Python 3.13 (3.14 quebra o nodriver)" do
+    # O Python 3.14 rejeita nodriver >= 0.48.0: byte nao-UTF-8 em
+    # cdp/network.py:1345 causa SyntaxError no import (medido 12/08/2026).
+    # O nodriver nao e pinado na imagem (piso >= 0.0.35) — uma versao futura
+    # que quebre no 3.14 falharia em runtime; a base 3.13 mantem qualquer
+    # versao importavel. A proxima troca de base deve ser decisao consciente,
+    # nao efeito colateral do dependabot.
+    assert_match(/^FROM python:3\.13-slim\b/, content,
+                 "3.14 quebra o nodriver (>= 0.48 SyntaxError em cdp/network.py:1345)")
+  end
+
 
   test "instala o runtime GTK que o Firefox do camoufox linka" do
     # `libmozgtk.so` linka libgtk-3.so.0 e libgdk-3.so.0. `playwright install

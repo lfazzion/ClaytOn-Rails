@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # libgtk-3-0: o camoufox é um Firefox de verdade e o seu libmozgtk.so linka
 # libgtk-3.so.0 + libgdk-3.so.0. Sem elas todo launch morre em "XPCOMGlueLoad
