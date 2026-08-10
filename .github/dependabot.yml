@@ -1,0 +1,51 @@
+version: 2
+updates:
+  - package-ecosystem: "bundler"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      rails-core:
+        patterns: ["rails", "activerecord", "activesupport", "actionpack", "actionview", "activejob", "actionmailer", "actioncable", "activestorage", "railties"]
+        update-types: ["minor", "patch"]
+      solid-stack:
+        patterns: ["solid_queue", "solid_cache"]
+        update-types: ["minor", "patch"]
+      all-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+        exclude-patterns: ["rails", "activerecord", "activesupport", "actionpack", "actionview", "activejob", "actionmailer", "actioncable", "activestorage", "railties", "solid_queue", "solid_cache"]
+    labels: ["dependencies", "bundler"]
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    labels: ["dependencies", "python"]
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "docker"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "ci"]
