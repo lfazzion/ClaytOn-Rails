@@ -143,6 +143,8 @@ module ScrapingServices
           "--dump-json",
           "--no-download",
           "--playlist-end", limit.to_s,
+          "--sleep-interval", "8",
+          "--max-sleep-interval", "20",
           "--js-runtimes", "deno:/usr/local/bin/deno"
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
@@ -158,7 +160,9 @@ module ScrapingServices
           "--flat-playlist",
           "--dump-json",
           "--no-download",
-          "--playlist-end", limit.to_s
+          "--playlist-end", limit.to_s,
+          "--sleep-interval", "8",
+          "--max-sleep-interval", "20"
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
@@ -176,6 +180,8 @@ module ScrapingServices
           "--dump-json",
           "--no-download",
           "--playlist-end", limit.to_s,
+          "--sleep-interval", "8",
+          "--max-sleep-interval", "20",
           "--js-runtimes", "deno:/usr/local/bin/deno"
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
@@ -191,7 +197,9 @@ module ScrapingServices
           "--flat-playlist",
           "--dump-json",
           "--no-download",
-          "--playlist-end", limit.to_s
+          "--playlist-end", limit.to_s,
+          "--sleep-interval", "8",
+          "--max-sleep-interval", "20"
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
@@ -210,7 +218,7 @@ module ScrapingServices
         [videos_limit, limit - videos_limit]
       end
 
-      def execute_yt_dlp(command, timeout: 240)
+      def execute_yt_dlp(command, timeout: 600)
         Timeout.timeout(timeout) { Open3.capture3(*command) }
       end
 

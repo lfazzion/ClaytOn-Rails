@@ -291,122 +291,113 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
   # ── 4. RemoveProfileTool ──────────────────────────────────────────────────────
 
-  # R3 — token-boundary matching: confirming "ana" with a phrase that only
-  # contains "ana_clara" must FAIL. The old include?('ana') wrongly matched
-  # the substring inside "ana_clara".
-  test 'remove_profile: confirmar ana com frase que menciona apenas ana_clara retorna error' do
-    profile_ana = create(:social_profile, :twitter, platform_username: 'ana')
-    create_list(:social_post, 1, social_profile: profile_ana)
-    profile_ana_clara = create(:social_profile, :twitter, platform_username: 'ana_clara')
+  test 'remove_profile por handle remove perfil de verdade (destroy!) em um unico turno' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_handle')
 
     tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'to_remove_handle')
 
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: 'ana')
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: 'ana',
-                       confirmation_phrase: 'confirmo a remoção de ana_clara')
-    assert_equal :error, res[:status]
-    assert_nil profile_ana.reload.archived_at
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+    refute SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile: username vazio nao remove mesmo com confirmo' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_empty')
+  test 'remove_profile por ID numerico remove perfil de verdade' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_id')
+
     tool = RemoveProfileTool.new
+    res = tool.execute(identifier: profile.id.to_s)
 
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: 'to_remove_empty')
-
-    profile.update_columns(platform_username: '')
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: 'to_remove_empty',
-                       confirmation_phrase: 'confirmo a remoção')
-    assert_equal :error, res[:status]
-    assert_nil profile.reload.archived_at
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+    refute SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile em dois turnos: primeiro pede confirmação e segundo arquiva' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove')
-    create_list(:social_post, 3, social_profile: profile)
-    create_list(:profile_snapshot, 2, social_profile: profile)
+  test 'remove_profile recusa execucao para nao-dono' do
+    profile = create(:social_profile, :twitter, platform_username: 'protected_user')
+    Thread.current[:cleitin_actor] = { user_id: '99999', username: 'intruso' }
 
     tool = RemoveProfileTool.new
-
-    # Turno 1
-    Thread.current[:cleitin_turn] = 'turn_1111'
-    res1 = tool.execute(identifier: profile.platform_username)
-    assert_equal :success, res1[:status]
-    assert_equal :confirmation_required, res1[:data][:status]
-    assert_nil res1[:data][:confirm_token], 'confirm_token não deve ser retornado na data'
-    assert_includes res1[:data][:resumo], '3 posts'
-    assert_includes res1[:data][:resumo], '2 snapshots'
-    assert_nil profile.reload.archived_at
-
-    # Repetição no MESMO turno (turn 1): não deve executar
-    res_same = tool.execute(identifier: profile.platform_username)
-    assert_equal :success, res_same[:status]
-    assert_equal :confirmation_required, res_same[:data][:status]
-    assert_nil profile.reload.archived_at
-
-    # Turno 2 (novo turn ID): executa SÓ com a frase literal de confirmação
-    Thread.current[:cleitin_turn] = 'turn_2222'
-    res2 = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'confirmo a remoção de to_remove')
-    assert_equal :success, res2[:status]
-    assert_equal 'removed', res2[:data][:status]
-    assert_not_nil profile.reload.archived_at
-    assert_equal 'paused', profile.monitoring_status
-    assert_equal 3, profile.social_posts.count
-  end
-
-  test 'remove_profile em turno diferente SEM confirmation_phrase NÃO remove' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_sem_frase')
-
-    tool = RemoveProfileTool.new
-
-    Thread.current[:cleitin_turn] = 'turn_a'
-    res1 = tool.execute(identifier: profile.platform_username)
-    assert_equal :confirmation_required, res1[:data][:status]
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res2 = tool.execute(identifier: profile.platform_username)
-
-    assert_equal :error, res2[:status]
-    assert_includes res2[:reason], 'Confirmação inválida'
-    assert_nil profile.reload.archived_at
-  end
-
-  test 'remove_profile em turno diferente com frase sem a palavra confirmo NÃO remove' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_sem_conf')
-
-    tool = RemoveProfileTool.new
-
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: profile.platform_username)
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'quero apagar o to_remove_sem_conf')
+    res = tool.execute(identifier: 'protected_user')
 
     assert_equal :error, res[:status]
-    assert_nil profile.reload.archived_at
+    assert_includes res[:reason], 'Ação restrita ao dono do bot'
+    assert SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile em turno diferente com frase citando OUTRO perfil NÃO remove' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_alvo')
-    outro = create(:social_profile, :twitter, platform_username: 'outro_canal')
-
+  test 'remove_profile retorna erro para perfil inexistente' do
     tool = RemoveProfileTool.new
-
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: profile.platform_username)
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'confirmo a remoção de outro_canal')
+    res = tool.execute(identifier: 'fantasma')
 
     assert_equal :error, res[:status]
-    assert_nil profile.reload.archived_at
-    assert_not_nil outro
+    assert_includes res[:reason], 'Perfil não encontrado'
+  end
+
+  test 'remove_profile retorna erro para perfil ambiguo sem plataforma' do
+    create(:social_profile, :twitter, platform_username: 'same_handle')
+    create(:social_profile, :instagram, platform_username: 'same_handle')
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'same_handle')
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'Perfil ambíguo'
+  end
+
+  test 'remove_profile remove em cascata posts, profile_snapshots e post_snapshots' do
+    profile = create(:social_profile, :twitter, platform_username: 'cascade_user')
+    posts = create_list(:social_post, 2, social_profile: profile)
+    post_ids = posts.map(&:id)
+    create(:profile_snapshot, social_profile: profile)
+    posts.each { |post| create(:post_snapshot, social_post: post) }
+
+    profile_id = profile.id
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'cascade_user')
+
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+
+    refute SocialProfile.exists?(profile_id)
+    assert_equal 0, SocialPost.where(social_profile_id: profile_id).count
+    assert_equal 0, ProfileSnapshot.where(social_profile_id: profile_id).count
+    assert_equal 0, PostSnapshot.where(social_post_id: post_ids).count
+  end
+
+  test 'remove_profile desvincula (nullify) DiscoveredProfile associado preservando o registro' do
+    profile = create(:social_profile, :twitter, platform_username: 'source_user')
+    dp = create(:discovered_profile, source_profile: profile)
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'source_user')
+
+    assert_equal :success, res[:status]
+    refute SocialProfile.exists?(profile.id)
+    assert DiscoveredProfile.exists?(dp.id)
+    assert_nil dp.reload.source_profile_id
+  end
+
+  test 'remove_profile rescata RecordNotDestroyed e retorna erro amigavel' do
+    profile = create(:social_profile, :twitter, platform_username: 'not_destroyed_user')
+    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'not_destroyed_user')
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'Erro ao remover'
+  end
+
+  test 'remove_profile rescata InvalidForeignKey e retorna erro amigavel' do
+    profile = create(:social_profile, :twitter, platform_username: 'fk_error_user')
+    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::InvalidForeignKey.new('Foreign key violation'))
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'fk_error_user')
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'Erro ao remover'
   end
 
   # ── 5. PromoteProspectTool ──────────────────────────────────────────────────

@@ -11,6 +11,7 @@ class SocialProfile < ApplicationRecord
 
   has_many :social_posts, dependent: :destroy
   has_many :profile_snapshots, dependent: :destroy
+  has_many :discovered_profiles, foreign_key: :source_profile_id, dependent: :nullify
 
   validates :platform, presence: true, inclusion: { in: PLATFORMS }
   validates :platform_username, presence: true
