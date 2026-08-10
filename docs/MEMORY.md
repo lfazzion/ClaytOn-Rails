@@ -10,6 +10,11 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-10]** Tarefa F4 — Tools de escrita de monitoramento de perfis (`app/tools/profile_management_tools.rb`) implementadas com autorização fail-closed por allowlist (`DISCORD_OWNER_IDS`).
+  - Novas classes de tool: `AddProfileTool`, `SetProfileMonitoringTool`, `RemoveProfileTool`, `PromoteProspectTool`, herdando da base comum `ManagementToolBase < ToolBase`.
+  - `ManagementToolBase` prove validação `owner?` contra `Thread.current[:cleitin_actor][:user_id]` e `ENV["DISCORD_OWNER_IDS"]`, sanitização/normalização de handles (`normalize_handle`) extraindo de URLs por host e aplicando `HANDLE_RULES` por plataforma, desambiguação (`find_profile`) e `format_profile` enriquecido com status.
+  - `RemoveProfileTool` opera em duas etapas usando `Rails.cache` com TTL 2min e `confirm_token` (SecureRandom hex 16), realizando soft-delete (`archived_at`, `monitoring_status: paused`) e preservando posts.
+  - 19 novos testes em `test/tools/profile_management_tools_test.rb` (0 failures, 0 errors).
 - **[2026-08-10]** Fase 3 — fusão RRF + clustering implementada (`lib/research/fusion.rb`, `lib/research/cluster.rb`) e revisada.
   - Porta Ruby do pipeline de fusão (Weighted Reciprocal Rank Fusion) e do
     cluster greedy + MMR da referência Python. Tokens mantidos em pt-BR:
@@ -198,6 +203,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
+| 2026-08-10 | Implementação das 4 tools de escrita de monitoramento (`AddProfileTool`, `SetProfileMonitoringTool`, `RemoveProfileTool`, `PromoteProspectTool`) com autorização fail-closed por allowlist e `RemoveProfileTool` em 2 etapas. | Contexto Ativo |
 | 2026-08-09 | Decisão de modelo único Gemma 4 31B (`gemma_client.rb`) substituída: split Gemini background/interactive + cadeia nous → poolside → openrouter. | Padrões Ratificados |
 | 2026-08-09 | Correção de documentação: o TTL 30min do `ChatSessionManager` só despeja o objeto quente — conversas vivem no SQLite e a fronteira entre conversas é o `/new` (entrada de 2026-03-23 corrigida). | Contexto Ativo |
 | 2026-03-30 | Atualização de arquitetura OCI Free Tier: Substituído o `/swapfile` (disco físico) por gerador de memória comprimida `zRAM`, minimizando o esgotamento de IOPS no boot volume. Ajustado swappiness de 10 para 100. Adição de parâmetros de cifra (Ciphers/MACS) estritos ao hardening SSH. | Contexto Ativo, Padrões Ratificados |

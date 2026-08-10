@@ -10,8 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
-
+ActiveRecord::Schema[8.1].define(version: 2026_08_10_000001) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -20,6 +19,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
     t.datetime "updated_at", null: false
     t.index ["domain"], name: "index_browser_session_cookies_on_domain", unique: true
   end
+
   create_table "chat_messages", force: :cascade do |t|
     t.text "content", null: false
     t.integer "conversation_id", null: false
@@ -122,6 +122,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
     t.index ["source"], name: "index_news_articles_on_source"
   end
 
+  create_table "post_snapshots", force: :cascade do |t|
+    t.bigint "comments_count"
+    t.datetime "created_at", null: false
+    t.bigint "likes_count"
+    t.datetime "recorded_at", null: false
+    t.bigint "social_post_id", null: false
+    t.datetime "updated_at", null: false
+    t.bigint "views_count"
+    t.index ["social_post_id", "recorded_at"], name: "index_post_snapshots_on_social_post_id_and_recorded_at", unique: true
+    t.index ["social_post_id"], name: "index_post_snapshots_on_social_post_id"
+  end
+
   create_table "profile_snapshots", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.bigint "followers_count"
@@ -132,34 +144,43 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
     t.boolean "source_degraded", default: false, null: false
     t.datetime "updated_at", null: false
     t.index ["recorded_at"], name: "index_profile_snapshots_on_recorded_at"
+    t.index ["social_profile_id", "recorded_at"], name: "index_profile_snapshots_on_social_profile_id_and_recorded_at"
     t.index ["social_profile_id"], name: "index_profile_snapshots_on_social_profile_id"
   end
 
   create_table "social_posts", force: :cascade do |t|
+    t.integer "baseline_n"
     t.bigint "comments_count"
     t.text "content"
     t.datetime "created_at", null: false
     t.bigint "likes_count"
     t.json "media_urls", default: []
+    t.string "performance_band"
+    t.float "performance_score"
     t.string "platform_post_id", null: false
     t.string "post_type", null: false
     t.datetime "posted_at"
+    t.datetime "scored_at"
     t.bigint "shares_count"
     t.string "shortcode"
     t.integer "social_profile_id", null: false
     t.string "thumbnail_url"
     t.datetime "updated_at", null: false
     t.string "video_url"
+    t.bigint "views_at_scoring"
     t.bigint "views_count"
     t.index ["post_type"], name: "index_social_posts_on_post_type"
     t.index ["posted_at"], name: "index_social_posts_on_posted_at"
     t.index ["social_profile_id", "platform_post_id"], name: "index_social_posts_on_social_profile_id_and_platform_post_id", unique: true
+    t.index ["social_profile_id", "posted_at"], name: "index_social_posts_on_social_profile_id_and_posted_at"
     t.index ["social_profile_id"], name: "index_social_posts_on_social_profile_id"
   end
 
   create_table "social_profiles", force: :cascade do |t|
+    t.datetime "archived_at"
     t.string "avatar_url"
     t.text "bio"
+    t.datetime "blocked_until"
     t.string "collection_status", default: "pending"
     t.datetime "created_at", null: false
     t.string "display_name"
@@ -167,6 +188,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
     t.bigint "following_count"
     t.boolean "is_private", default: false
     t.datetime "last_collected_at"
+    t.string "monitoring_status", default: "active", null: false
     t.string "platform", null: false
     t.string "platform_url"
     t.string "platform_user_id", null: false
@@ -176,6 +198,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
     t.datetime "updated_at", null: false
     t.boolean "verified", default: false
     t.index ["platform", "platform_user_id"], name: "index_social_profiles_on_platform_and_platform_user_id", unique: true
+    t.index ["platform", "platform_username"], name: "index_social_profiles_on_platform_and_platform_username", unique: true
     t.index ["platform"], name: "index_social_profiles_on_platform"
     t.index ["verified"], name: "index_social_profiles_on_verified"
   end
@@ -314,6 +337,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_07_000001) do
 
   add_foreign_key "chat_messages", "conversations"
   add_foreign_key "discovered_profiles", "social_profiles", column: "source_profile_id"
+  add_foreign_key "post_snapshots", "social_posts"
   add_foreign_key "profile_snapshots", "social_profiles"
   add_foreign_key "social_posts", "social_profiles"
   add_foreign_key "solid_queue_blocked_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade

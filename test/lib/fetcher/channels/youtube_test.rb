@@ -217,6 +217,7 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
     # Sem o stub, o jar está VAZIO neste teste e o `SessionCookies` levantaria
     # Expired — o teste só passa se a sessão vier da fonte certa. O
     # `with_netscape_file` real roda (escreve tempfile efêmero, sem rede).
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
     stubbed_search(cookies: [{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], origem: :browser)
 
     assert_equal [], Fetcher::Channels::Youtube.search(query: "ruby")
@@ -237,6 +238,7 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
   end
 
   test "search sem sessao em fonte nenhuma levanta Expired nomeando o dominio" do
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
     Fetcher::BrowserCookies.stubs(:for).returns([])
     Fetcher::CookieJar.stubs(:for).returns([])
 

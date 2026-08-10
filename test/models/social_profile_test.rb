@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "test_helper"
 
 class SocialProfileTest < ActiveSupport::TestCase
@@ -33,6 +35,12 @@ class SocialProfileTest < ActiveSupport::TestCase
     assert_includes @profile.errors[:platform_user_id], "can't be blank"
   end
 
+  test "should normalize platform_username before validation" do
+    profile = build(:social_profile, platform_username: " @TeGeCe ")
+    profile.valid?
+    assert_equal "tegece", profile.platform_username
+  end
+
   test "should be unique per platform and platform_user_id" do
     create(:social_profile, platform: "twitter", platform_user_id: "12345")
     duplicate = build(:social_profile, platform: "twitter", platform_user_id: "12345")
@@ -59,6 +67,34 @@ class SocialProfileTest < ActiveSupport::TestCase
 
     assert_includes SocialProfile.by_platform("twitter"), twitter_profile
     assert_not_includes SocialProfile.by_platform("twitter"), instagram_profile
+  end
+
+  test "monitored scope should include active unarchived profiles and exclude archived or paused profiles" do
+    active_profile = create(:social_profile, monitoring_status: "active", archived_at: nil)
+    archived_profile = create(:social_profile, monitoring_status: "active", archived_at: Time.current)
+    paused_profile = create(:social_profile, monitoring_status: "paused", archived_at: nil)
+
+    assert_includes SocialProfile.monitored, active_profile
+    assert_not_includes SocialProfile.monitored, archived_profile
+    assert_not_includes SocialProfile.monitored, paused_profile
+  end
+
+  test "archived scope should return only archived profiles" do
+    active_profile = create(:social_profile, archived_at: nil)
+    archived_profile = create(:social_profile, archived_at: Time.current)
+
+    assert_includes SocialProfile.archived, archived_profile
+    assert_not_includes SocialProfile.archived, active_profile
+  end
+
+  test "needs_collection scope should respect blocked_until in the future" do
+    profile_due = create(:social_profile, last_collected_at: 3.hours.ago, blocked_until: nil, monitoring_status: "active", archived_at: nil)
+    profile_blocked = create(:social_profile, last_collected_at: 3.hours.ago, blocked_until: 1.hour.from_now, monitoring_status: "active", archived_at: nil)
+    profile_past_block = create(:social_profile, last_collected_at: 3.hours.ago, blocked_until: 1.hour.ago, monitoring_status: "active", archived_at: nil)
+
+    assert_includes SocialProfile.needs_collection, profile_due
+    assert_includes SocialProfile.needs_collection, profile_past_block
+    assert_not_includes SocialProfile.needs_collection, profile_blocked
   end
 
   test "engagement_rate should return nil for zero followers" do
@@ -110,3 +146,4 @@ class SocialProfileTest < ActiveSupport::TestCase
     assert_equal 3, profile.profile_snapshots.count
   end
 end
+

@@ -56,3 +56,8 @@ production:
     class: SqliteBackupJob
     queue: critical
     schedule: at 3am every day
+  collect_profiles_job:
+    class: CollectProfilesJob
+    queue: scraping
+    schedule: at 9am every day # UTC; 9am UTC = 6h BRT (horario local de SP)
+

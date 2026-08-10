@@ -7,9 +7,9 @@ require 'timeout'
 module ScrapingServices
   class YoutubeScraperService
     class << self
-      def extract_channel_metadata(channel_url, proxy: nil)
+      def extract_channel_metadata(channel_url, proxy: nil, timeout: 240)
         command = build_metadata_command(channel_url, proxy)
-        output, _, status = execute_yt_dlp(command)
+        output, _, status = execute_yt_dlp(command, timeout: timeout)
 
         return nil unless status.success? && output.strip.present?
 
@@ -17,6 +17,9 @@ module ScrapingServices
         # das 3 abas (--flat-playlist; medido 72,5s p/ 5259 vídeos) e ficou sob
         # demanda — quem precisar chama `total_video_count` explicitamente.
         parse_metadata(JSON.parse(output.strip))
+      rescue Timeout::Error => e
+        Rails.logger.error "[YoutubeScraperService] Timeout ao extrair metadata: #{e.message}"
+        raise
       rescue JSON::ParserError => e
         Rails.logger.error "[YoutubeScraperService] JSON inválido ao extrair metadata: #{e.message}"
         nil
@@ -25,16 +28,18 @@ module ScrapingServices
         nil
       end
 
-      def extract_videos_detailed(channel_url, limit: 10, proxy: nil)
-        command = build_videos_command(channel_url, limit, proxy)
+      def extract_videos_detailed(channel_url, limit: 10, proxy: nil, cookies_path: nil)
+        command = build_videos_command(channel_url, limit, proxy, cookies_path: cookies_path)
         output, _, status = execute_yt_dlp(command)
 
-        return extract_videos_flat(channel_url, limit: limit, proxy: proxy) unless status.success? && output.strip.present?
-
-        parse_video_list(output.strip)
+        if status.success? && output.strip.present?
+          [parse_video_list(output.strip), false]
+        else
+          [extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path), true]
+        end
       rescue StandardError => e
         Rails.logger.error "[YoutubeScraperService] Erro ao extrair videos detalhados: #{e.message}"
-        extract_videos_flat(channel_url, limit: limit, proxy: proxy)
+        [extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path), true]
       end
 
       # Soma o total de vídeos do canal pelas abas /videos, /shorts e /streams.
@@ -51,8 +56,8 @@ module ScrapingServices
 
       private
 
-      def extract_videos_flat(channel_url, limit: 10, proxy: nil)
-        command = build_videos_flat_command(channel_url, limit, proxy)
+      def extract_videos_flat(channel_url, limit: 10, proxy: nil, cookies_path: nil)
+        command = build_videos_flat_command(channel_url, limit, proxy, cookies_path: cookies_path)
         output, _, status = execute_yt_dlp(command)
 
         return [] unless status.success? && output.strip.present?
@@ -71,11 +76,11 @@ module ScrapingServices
       # (/videos, /shorts), MAS quebra a resposta da raiz do canal com
       # `--playlist-items 0` (channel_follower_count vem null). Por isso
       # `localize(url, persist: true)` só nas listagens.
-      LOCALE_BASE = 'hl=pt-BR&gl=BR'
+      LOCALE_BASE = "hl=pt-BR&gl=BR"
 
       def localize(url, persist: false)
         params = persist ? "#{LOCALE_BASE}&persist_hl=1" : LOCALE_BASE
-        separator = url.include?('?') ? '&' : '?'
+        separator = url.include?("?") ? "&" : "?"
         "#{url}#{separator}#{params}"
       end
 
@@ -85,45 +90,48 @@ module ScrapingServices
         # channel_id, description, etc. Mais confiável que --flat-playlist --playlist-items 1
         # que retornava campos do primeiro vídeo (com os campos do canal como null).
         cmd = [
-          'yt-dlp',
-          '--skip-download',
-          '--dump-single-json',
-          '--playlist-items', '0',
+          "yt-dlp",
+          "--skip-download",
+          "--dump-single-json",
+          "--playlist-items", "0",
           localize(channel_url)
         ]
-        cmd += ['--proxy', proxy] if proxy.present?
+        cmd += ["--proxy", proxy] if proxy.present?
         cmd
       end
 
-      def build_videos_command(channel_url, limit, proxy)
+      def build_videos_command(channel_url, limit, proxy, cookies_path: nil)
         videos_url = localize("#{channel_url}/videos", persist: true)
         cmd = [
-          'yt-dlp',
-          '--dump-json',
-          '--no-download',
-          '--playlist-end', limit.to_s,
-          videos_url
+          "yt-dlp",
+          "--dump-json",
+          "--no-download",
+          "--playlist-end", limit.to_s,
+          "--js-runtimes", "deno:/usr/local/bin/deno"
         ]
-        cmd += ['--proxy', proxy] if proxy.present?
+        cmd += ["--cookies", cookies_path] if cookies_path.present?
+        cmd += ["--proxy", proxy] if proxy.present?
+        cmd << videos_url
         cmd
       end
 
-      def build_videos_flat_command(channel_url, limit, proxy)
+      def build_videos_flat_command(channel_url, limit, proxy, cookies_path: nil)
         videos_url = localize("#{channel_url}/videos", persist: true)
         cmd = [
-          'yt-dlp',
-          '--flat-playlist',
-          '--dump-json',
-          '--no-download',
-          '--playlist-end', limit.to_s,
-          videos_url
+          "yt-dlp",
+          "--flat-playlist",
+          "--dump-json",
+          "--no-download",
+          "--playlist-end", limit.to_s
         ]
-        cmd += ['--proxy', proxy] if proxy.present?
+        cmd += ["--cookies", cookies_path] if cookies_path.present?
+        cmd += ["--proxy", proxy] if proxy.present?
+        cmd << videos_url
         cmd
       end
 
-      def execute_yt_dlp(command)
-        Timeout.timeout(120) { Open3.capture3(*command) }
+      def execute_yt_dlp(command, timeout: 240)
+        Timeout.timeout(timeout) { Open3.capture3(*command) }
       end
 
       def parse_metadata(data)

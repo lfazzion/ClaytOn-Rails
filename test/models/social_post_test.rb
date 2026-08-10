@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "test_helper"
 
 class SocialPostTest < ActiveSupport::TestCase
@@ -26,6 +28,18 @@ class SocialPostTest < ActiveSupport::TestCase
     @post.post_type = "invalid_type"
     assert_not @post.valid?
     assert_includes @post.errors[:post_type], "is not included in the list"
+  end
+
+  test "performance_band should allow valid bands and nil" do
+    @post.performance_band = "excelente"
+    assert @post.valid?
+
+    @post.performance_band = nil
+    assert @post.valid?
+
+    @post.performance_band = "invalid_band"
+    assert_not @post.valid?
+    assert_includes @post.errors[:performance_band], "is not included in the list"
   end
 
   test "should be unique per profile" do
@@ -59,6 +73,22 @@ class SocialPostTest < ActiveSupport::TestCase
     assert_equal 100, @post.engagement_count
   end
 
+  test "engagement_count should return nil when all metrics are nil" do
+    @post.likes_count = nil
+    @post.comments_count = nil
+    @post.shares_count = nil
+
+    assert_nil @post.engagement_count
+  end
+
+  test "engagement_count should sum correctly when metrics are zero" do
+    @post.likes_count = 0
+    @post.comments_count = 0
+    @post.shares_count = 0
+
+    assert_equal 0, @post.engagement_count
+  end
+
   test "recent scope should return posts from last N days" do
     recent_post = create(:social_post, posted_at: 1.day.ago)
     old_post = create(:social_post, posted_at: 31.days.ago)
@@ -78,4 +108,9 @@ class SocialPostTest < ActiveSupport::TestCase
   test "should belong to social_profile" do
     assert_respond_to @post, :social_profile
   end
+
+  test "should have many post_snapshots" do
+    assert_respond_to @post, :post_snapshots
+  end
 end
+

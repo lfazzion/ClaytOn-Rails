@@ -11,12 +11,18 @@ class SocialProfile < ApplicationRecord
   validates :platform_user_id, presence: true
   validates :platform, uniqueness: { scope: :platform_user_id }
 
+  before_validation :normalize_platform_username
+
   scope :verified, -> { where(verified: true) }
   scope :by_platform, ->(platform) { where(platform: platform) }
+  scope :monitored, -> { where(monitoring_status: "active", archived_at: nil) }
+  scope :archived, -> { where.not(archived_at: nil) }
 
   scope :needs_collection, lambda {
-    where.not(last_collected_at: nil)
-         .where('last_collected_at < ?', 2.hours.ago)
+    monitored
+      .where("blocked_until IS NULL OR blocked_until < ?", Time.current)
+      .where.not(last_collected_at: nil)
+      .where("last_collected_at < ?", 2.hours.ago)
   }
 
   scope :pending_first_collection, lambda {
@@ -24,7 +30,10 @@ class SocialProfile < ApplicationRecord
   }
 
   scope :by_platform_and_needs_collection, lambda { |platform|
-    by_platform(platform).where('last_collected_at IS NULL OR last_collected_at < ?', 2.hours.ago)
+    by_platform(platform)
+      .monitored
+      .where("blocked_until IS NULL OR blocked_until < ?", Time.current)
+      .where("last_collected_at IS NULL OR last_collected_at < ?", 2.hours.ago)
   }
 
   def should_collect?(window = 2.hours)
@@ -35,14 +44,14 @@ class SocialProfile < ApplicationRecord
 
   def platform_url
     case platform
-    when 'instagram' then "https://www.instagram.com/#{platform_username}/"
-    when 'twitter' then "https://twitter.com/#{platform_username}/"
-    when 'youtube' then begin
+    when "instagram" then "https://www.instagram.com/#{platform_username}/"
+    when "twitter" then "https://twitter.com/#{platform_username}/"
+    when "youtube" then begin
       "https://www.youtube.com/@#{platform_username}"
     rescue StandardError
       "https://www.youtube.com/channel/#{platform_user_id}"
     end
-    when 'tiktok' then "https://www.tiktok.com/@#{platform_username}/"
+    when "tiktok" then "https://www.tiktok.com/@#{platform_username}/"
     end
   end
 
@@ -63,16 +72,23 @@ class SocialProfile < ApplicationRecord
 
   private
 
+  def normalize_platform_username
+    return if platform_username.blank?
+
+    self.platform_username = platform_username.to_s.strip.sub(/\A@/, "").downcase
+  end
+
   def set_platform_url
     self.platform_url ||= case platform
-                          when 'instagram' then "https://www.instagram.com/#{platform_username}/"
-                          when 'twitter' then "https://twitter.com/#{platform_username}/"
-                          when 'youtube' then begin
+                          when "instagram" then "https://www.instagram.com/#{platform_username}/"
+                          when "twitter" then "https://twitter.com/#{platform_username}/"
+                          when "youtube" then begin
                             "https://www.youtube.com/@#{platform_username}"
                           rescue StandardError
                             "https://www.youtube.com/channel/#{platform_user_id}"
                           end
-                          when 'tiktok' then "https://www.tiktok.com/@#{platform_username}/"
+                          when "tiktok" then "https://www.tiktok.com/@#{platform_username}/"
                           end
   end
 end
+
