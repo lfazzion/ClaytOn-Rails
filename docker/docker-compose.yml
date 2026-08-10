@@ -98,6 +98,9 @@ services:
       RAILS_LOG_TO_STDOUT: "true"
       PYTHON_SCRAPER_URL: "http://python-scraper:8080"
       DISCORD_OPEN_CHANNEL_IDS: ${DISCORD_OPEN_CHANNEL_IDS:-}
+      # Donos das ferramentas de gestao (add/remove/promote profile). Sem isso
+      # o owner? do ManagementToolBase retorna false para TODO mundo.
+      DISCORD_OWNER_IDS: ${DISCORD_OWNER_IDS:-}
       DISCORD_MUTE_PREFIX: ${DISCORD_MUTE_PREFIX:-//}
       DISCORD_COMPACTION_THRESHOLD: ${DISCORD_COMPACTION_THRESHOLD:-0.75}
       DISCORD_REHYDRATE_MESSAGES: ${DISCORD_REHYDRATE_MESSAGES:-30}
