@@ -18,13 +18,20 @@ module Research
     ENGAGEMENT_WEIGHTS = {
       "x"          => [["likes", 0.55], ["reposts", 0.25], ["replies", 0.15], ["quotes", 0.05]],
       "hackernews" => [["points", 0.55], ["comments", 0.45]],
-      "polymarket" => [["volume", 0.60], ["liquidity", 0.40]]
+      "polymarket" => [["volume", 0.60], ["liquidity", 0.40]],
+      "github"     => [["reactions", 0.55], ["comments", 0.45]]
     }.freeze
 
     # Alias de campo por canal: o scoring procura `reposts`, o canal X entrega
     # `retweets` — sem o alias, item com só retweet vira engagement nil.
-    FIELD_ALIASES = { "reposts" => "retweets" }.freeze
+    # `comments` -> `num_comments` é defesa se algum canal emitir num_comments.
+    FIELD_ALIASES = {
+      "reposts"  => "retweets",
+      "comments" => "num_comments"
+    }.freeze
 
+    # Referência de escala logarítmica por plataforma.
+    # github (5.5) e polymarket (13.5) são estimativas especulativas por ordem de grandeza.
     VOTE_LOG_REFERENCE = {
       "reddit"     => 7.6,
       "hackernews" => 6.2,
@@ -32,7 +39,9 @@ module Research
       "tiktok"     => 10.3,
       "instagram"  => 9.2,
       "x"          => 9.2,
-      "bluesky"    => 9.2
+      "bluesky"    => 9.2,
+      "github"     => 5.5,
+      "polymarket" => 13.5
     }.freeze
 
     VOTE_LOG_REFERENCE_DEFAULT = 7.6

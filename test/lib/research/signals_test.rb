@@ -50,6 +50,29 @@ class ResearchSignalsTest < ActiveSupport::TestCase
     assert raw > 0
   end
 
+  test "engagement_raw calcula pesos para github com reactions e comments" do
+    eng_gh = { "reactions" => 10, "comments" => 5 }
+    raw_gh = Research::Signals.engagement_raw("github", eng_gh)
+
+    refute_nil raw_gh
+    expected = 0.55 * Research::Signals.log1p(10) + 0.45 * Research::Signals.log1p(5)
+    assert_in_delta expected, raw_gh, 0.0001
+  end
+
+  test "comments alias para num_comments funciona no engagement_raw" do
+    eng_hn = { "points" => 50, "num_comments" => 10 }
+    raw_hn = Research::Signals.engagement_raw("hackernews", eng_hn)
+
+    refute_nil raw_hn, "num_comments deve ser aceito como alias de comments em ENGAGEMENT_WEIGHTS"
+    expected = 0.55 * Research::Signals.log1p(50) + 0.45 * Research::Signals.log1p(10)
+    assert_in_delta expected, raw_hn, 0.0001
+  end
+
+  test "VOTE_LOG_REFERENCE contem entradas calibradas para github e polymarket" do
+    assert_equal 5.5, Research::Signals::VOTE_LOG_REFERENCE["github"]
+    assert_equal 13.5, Research::Signals::VOTE_LOG_REFERENCE["polymarket"]
+  end
+
   test "source_quality usa tabela com fallback 0.6" do
     assert_equal 0.85, Research::Signals.source_quality("youtube")
     assert_equal 0.6, Research::Signals.source_quality("reddit")

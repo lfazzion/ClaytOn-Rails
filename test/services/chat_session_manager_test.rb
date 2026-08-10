@@ -262,4 +262,81 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
   ensure
     ENV["ENABLE_PAGE_FETCH"] = original
   end
+
+  test "all_tool_classes registra as tools de watchlist (TopicAddTool, TopicListTool, TopicRemoveTool)" do
+    ChatSessionManager.unstub(:all_tool_classes)
+    tools = ChatSessionManager.send(:all_tool_classes)
+    assert_includes tools, TopicAddTool
+    assert_includes tools, TopicListTool
+    assert_includes tools, TopicRemoveTool
+  end
+
+
+  test "ask define Thread.current[:cleitin_actor] durante a chamada e limpa no ensure" do
+    actor_durante_execucao = nil
+
+    chat = mock("chat")
+    chat.stubs(:with_thinking).returns(chat)
+    chat.stubs(:with_params).returns(chat)
+    chat.stubs(:with_tool).returns(chat)
+    chat.stubs(:with_instructions).returns(chat)
+    chat.stubs(:add_message).returns(chat)
+    chat.stubs(:ask).with do |_msg|
+      actor_durante_execucao = Thread.current[:cleitin_actor]
+      true
+    end.returns(stub(content: "resposta ok"))
+    RubyLLM.stubs(:chat).returns(chat)
+
+    res = ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "999", username: "usuario_teste")
+
+    assert_equal "resposta ok", res
+    assert_equal({ user_id: "999", username: "usuario_teste" }, actor_durante_execucao)
+    assert_nil Thread.current[:cleitin_actor], "cleitin_actor deve ser limpo apos a execucao"
+  end
+
+  test "ask limpa Thread.current[:cleitin_actor] mesmo quando ocorre excecao ou resposta em branco" do
+    # Caso resposta em branco (usando next)
+    stub_chat("")
+    res = ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "999", username: "usuario_teste")
+    assert_equal ChatSessionManager::BLANK_RESPONSE_WARNING, res
+    assert_nil Thread.current[:cleitin_actor], "cleitin_actor deve ser limpo apos resposta em branco"
+
+    # Caso excecao
+    chat_err = mock("chat_err")
+    chat_err.stubs(:with_thinking).returns(chat_err)
+    chat_err.stubs(:with_params).returns(chat_err)
+    chat_err.stubs(:with_tool).returns(chat_err)
+    chat_err.stubs(:with_instructions).returns(chat_err)
+    chat_err.stubs(:add_message).returns(chat_err)
+    chat_err.stubs(:ask).raises(RubyLLM::Error, "erro llm")
+    RubyLLM.stubs(:chat).returns(chat_err)
+
+    assert_raises(RubyLLM::Error) do
+      ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "999", username: "usuario_teste")
+    end
+    assert_nil Thread.current[:cleitin_actor], "cleitin_actor deve ser limpo apos excecao"
+  end
+
+  test "ask define e limpa Thread.current[:cleitin_turn] durante o turno" do
+    turn_durante_execucao = nil
+
+    chat = mock("chat")
+    chat.stubs(:with_thinking).returns(chat)
+    chat.stubs(:with_params).returns(chat)
+    chat.stubs(:with_tool).returns(chat)
+    chat.stubs(:with_instructions).returns(chat)
+    chat.stubs(:add_message).returns(chat)
+    chat.stubs(:ask).with do |_msg|
+      turn_durante_execucao = Thread.current[:cleitin_turn]
+      true
+    end.returns(stub(content: "resposta ok"))
+    RubyLLM.stubs(:chat).returns(chat)
+
+    res = ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "999", username: "usuario_teste")
+
+    assert_equal "resposta ok", res
+    assert_not_nil turn_durante_execucao, "cleitin_turn deve ser definido durante ask"
+    assert_nil Thread.current[:cleitin_turn], "cleitin_turn deve ser limpo apos a execucao"
+  end
 end
+

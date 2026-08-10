@@ -54,36 +54,43 @@ class ChatSessionManager
   class << self
     def ask(scope:, content:, user_id:, username:)
       with_scope_lock(scope.key) do
-        conversation = conversation_for(scope)
-
-        chat = prepare_chat(scope, conversation)
-        texto = ask_through_chain(chat, outgoing_content(conversation, content, username),
-                                  scope: scope, conversation: conversation)
-
-        next handle_blank_response(scope) if texto.blank?
-
-        # Título e mensagens só são persistidos DEPOIS da resposta — ver
-        # outgoing_content — e em transação. O título antes da resposta gravava
-        # uma pergunta que não existe quando a cadeia vinha em branco ou
-        # estourava; e três escritas soltas deixavam `user` órfão se a segunda
-        # falhasse (ex.: SQLITE_BUSY). O rescue despeja o cache quente: sem o
-        # despejo, a próxima reidratação leria do banco a pergunta sem resposta
-        # e duplicaria a fala do usuário.
+        Thread.current[:cleitin_actor] = { user_id: user_id, username: username }
+        Thread.current[:cleitin_turn] = SecureRandom.hex(8)
         begin
-          ActiveRecord::Base.transaction do
-            conversation.assign_title_from(content)
-            ChatMessage.create!(conversation: conversation, role: "user", content: content,
-                                discord_user_id: user_id, discord_username: username)
-            ChatMessage.create!(conversation: conversation, role: "assistant", content: texto)
-            conversation.touch_activity!
+          conversation = conversation_for(scope)
+
+          chat = prepare_chat(scope, conversation)
+          texto = ask_through_chain(chat, outgoing_content(conversation, content, username),
+                                    scope: scope, conversation: conversation)
+
+          next handle_blank_response(scope) if texto.blank?
+
+          # Título e mensagens só são persistidos DEPOIS da resposta — ver
+          # outgoing_content — e em transação. O título antes da resposta gravava
+          # uma pergunta que não existe quando a cadeia vinha em branco ou
+          # estourava; e três escritas soltas deixavam `user` órfão se a segunda
+          # falhasse (ex.: SQLITE_BUSY). O rescue despeja o cache quente: sem o
+          # despejo, a próxima reidratação leria do banco a pergunta sem resposta
+          # e duplicaria a fala do usuário.
+          begin
+            ActiveRecord::Base.transaction do
+              conversation.assign_title_from(content)
+              ChatMessage.create!(conversation: conversation, role: "user", content: content,
+                                  discord_user_id: user_id, discord_username: username)
+              ChatMessage.create!(conversation: conversation, role: "assistant", content: texto)
+              conversation.touch_activity!
+            end
+          rescue StandardError => e
+            Rails.logger.error "[ChatSessionManager] Falha ao persistir o turno " \
+                               "(#{e.class.name}: #{e.message}) — despejando cache quente"
+            evict(scope.key)
+            raise
           end
-        rescue StandardError => e
-          Rails.logger.error "[ChatSessionManager] Falha ao persistir o turno " \
-                             "(#{e.class.name}: #{e.message}) — despejando cache quente"
-          evict(scope.key)
-          raise
+          texto
+        ensure
+          Thread.current[:cleitin_actor] = nil
+          Thread.current[:cleitin_turn] = nil
         end
-        texto
       end
     end
 
@@ -436,12 +443,14 @@ class ChatSessionManager
     def all_tool_classes
       tools = [
         ProfileLookupTool, ProfileListTool, ProfileSearchTool, ProfileCompareTool,
+        AddProfileTool, SetProfileMonitoringTool, RemoveProfileTool, PromoteProspectTool,
         RecentPostsTool, TopPostsTool, PostsByTypeTool, PostEngagementTool,
         EngagementRateTool, SnapshotTrendTool, ProfileRankingTool,
         ProspectsTool, UnclassifiedProfilesTool,
         UpcomingCatalogTool, PopularCatalogTool,
         UpcomingEventsTool, RecentArticlesTool,
-        WebSearchTool, PlatformSearchTool
+        WebSearchTool, PlatformSearchTool,
+        TopicAddTool, TopicListTool, TopicRemoveTool
       ]
       tools << PageFetchTool if ENV["ENABLE_PAGE_FETCH"].to_s.downcase == "true"
       tools

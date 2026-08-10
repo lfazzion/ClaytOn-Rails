@@ -1,13 +1,17 @@
 # frozen_string_literal: true
 
-class ScrapeYoutubeJob < ApplicationJob
-  queue_as :default
+require Rails.root.join("lib/fetcher/cookie_jar")
+require Rails.root.join("lib/fetcher/session_cookies")
+require Rails.root.join("lib/fetcher/channels/youtube")
 
-  SNAPSHOT_DEDUP_WINDOW = 2.hours
+class ScrapeYoutubeJob < ApplicationJob
+  queue_as :scraping
+
+  SNAPSHOT_DEDUP_WINDOW = 20.hours
 
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
-    raise ArgumentError, "Perfil #{profile_id} não é YouTube" unless profile.platform == 'youtube'
+    raise ArgumentError, "Perfil #{profile_id} não é YouTube" unless profile.platform == "youtube"
 
     return unless profile.should_collect?(SNAPSHOT_DEDUP_WINDOW)
 
@@ -17,37 +21,78 @@ class ScrapeYoutubeJob < ApplicationJob
     metadata = ScrapingServices::YoutubeScraperService.extract_channel_metadata(channel_url, proxy: proxy)
     return if metadata.nil?
 
-    videos = ScrapingServices::YoutubeScraperService.extract_videos_detailed(
-      channel_url,
-      limit: options.fetch(:limit, 50),
-      proxy: proxy
-    )
+    limit = options.fetch(:limit, 30)
+    videos, fallback_used = extract_videos_with_cookies(channel_url, limit: limit, proxy: proxy)
 
     update_profile(profile, metadata)
     create_posts(profile, videos)
     create_snapshot(profile, metadata)
 
-    profile.update!(
-      last_collected_at: Time.current,
-      collection_status: 'success'
-    )
+    if fallback_used
+      Rails.logger.warn "[ScrapeYoutubeJob] Perfil #{profile.id}: fallback para flat-playlist (sem dados detalhados)"
+      profile.update!(
+        last_collected_at: Time.current,
+        collection_status: "partial"
+      )
+      ScrapingFailureAlertJob.perform_later(
+        "youtube",
+        profile.id,
+        "fallback: sem dados detalhados (likes/comments nil)",
+        "partial_collection"
+      )
+    else
+      profile.update!(
+        last_collected_at: Time.current,
+        collection_status: "success"
+      )
+    end
   rescue ScrapingServices::RateLimitError => e
-    profile&.update(collection_status: 'rate_limited') if profile
+    profile&.update!(collection_status: "rate_limited", blocked_until: Time.current + e.retry_after) if profile
     retry_job wait: e.retry_after
+  rescue ArgumentError
+    raise
   rescue StandardError => e
     Rails.logger.error "[ScrapeYoutubeJob] Erro ao coletar perfil #{profile_id}: #{e.message}"
-    profile&.update(collection_status: 'error') if profile
-    raise e
+    if profile
+      profile.update!(collection_status: "degraded")
+      ScrapingFailureAlertJob.perform_later("youtube", profile.id, e.message, "scrape_error")
+    end
   end
 
   private
 
-  def build_channel_url(profile)
-    if profile.platform_username.present?
-      "https://www.youtube.com/@#{profile.platform_username}"
-    else
-      "https://www.youtube.com/channel/#{profile.platform_user_id}"
+  def extract_videos_with_cookies(channel_url, limit:, proxy:)
+    cookies, = Fetcher::SessionCookies.for("youtube.com")
+    Fetcher::CookieJar.with_netscape_file("youtube.com", cookies: cookies) do |cookies_path|
+      result = ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+        channel_url,
+        limit: limit,
+        proxy: proxy,
+        cookies_path: cookies_path
+      )
+      Fetcher::CookieJar.refresh_from_netscape!(
+        domain: "youtube.com",
+        path: cookies_path,
+        auth_cookies: Fetcher::Channels::Youtube::AUTH_COOKIES,
+        expires_at: 7.days.from_now
+      )
+      result
     end
+  rescue Fetcher::CookieJar::Expired
+    Rails.logger.warn "[ScrapeYoutubeJob] Sessão de youtube.com ausente ou expirada. Coletando sem cookies."
+    ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+      channel_url,
+      limit: limit,
+      proxy: proxy,
+      cookies_path: nil
+    )
+  end
+
+  def build_channel_url(profile)
+    return "https://www.youtube.com/channel/#{profile.platform_user_id}" if profile.platform_user_id.to_s.match?(SocialProfile::CHANNEL_ID_PATTERN)
+    return "https://www.youtube.com/channel/#{profile.platform_username}" if profile.platform_username.to_s.match?(SocialProfile::CHANNEL_ID_PATTERN)
+    return "https://www.youtube.com/@#{profile.platform_username}" if profile.platform_username.present?
+    "https://www.youtube.com/channel/#{profile.platform_user_id}"
   end
 
   def current_proxy(options)
@@ -67,7 +112,7 @@ class ScrapeYoutubeJob < ApplicationJob
   end
 
   def create_posts(profile, videos)
-    videos.each do |video|
+    Array(videos).each do |video|
       post = SocialPost.find_or_initialize_by(
         social_profile: profile,
         platform_post_id: video[:platform_post_id]
@@ -78,7 +123,11 @@ class ScrapeYoutubeJob < ApplicationJob
       # Não sobrescrever um valor já coletado com nil — preserva o melhor dado
       # que já temos. CLAUDE.md regra 3: nil = falha, não dado.
       post.assign_attributes(
-        post_type: video[:post_type] || post.post_type || 'video',
+        # fix 13: só sobrescreve post_type quando a detecção é POSITIVA de
+        # short (webpage_url com /shorts/). Um short que perde a detecção num
+        # run (parse devolve 'video') mantém 'short' do run anterior; vídeo
+        # comum nunca vira short.
+        post_type: video[:post_type] == 'short' ? 'short' : (post.post_type || 'video'),
         content: video[:title] || post.content,
         posted_at: video[:posted_at] || post.posted_at,
         views_count: video[:views_count] || post.views_count,
@@ -89,10 +138,30 @@ class ScrapeYoutubeJob < ApplicationJob
       )
 
       post.save! if post.changed?
+
+      create_post_snapshot(post)
     end
+
+    prune_post_snapshots
+  end
+
+  def create_post_snapshot(post)
+    today = Time.current.in_time_zone("America/Sao_Paulo").beginning_of_day
+    snapshot = PostSnapshot.find_or_initialize_by(social_post: post, recorded_at: today)
+
+    snapshot.views_count = post.views_count if post.views_count.present?
+    snapshot.likes_count = post.likes_count if post.likes_count.present?
+    snapshot.comments_count = post.comments_count if post.comments_count.present?
+
+    snapshot.save! if snapshot.changed?
+  end
+
+  def prune_post_snapshots
+    PostSnapshot.where("recorded_at < ?", 180.days.ago).delete_all
   end
 
   def create_snapshot(profile, metadata)
+
     ProfileSnapshot.find_or_create_by(
       social_profile: profile,
       recorded_at: Time.current.beginning_of_hour

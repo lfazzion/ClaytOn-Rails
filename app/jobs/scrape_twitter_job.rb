@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
 class ScrapeTwitterJob < ApplicationJob
-  queue_as :default
+  queue_as :scraping
 
-  SNAPSHOT_DEDUP_WINDOW = 2.hours
+  SNAPSHOT_DEDUP_WINDOW = 20.hours
 
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
@@ -23,13 +23,14 @@ class ScrapeTwitterJob < ApplicationJob
 
     profile.update!(last_collected_at: Time.current, collection_status: "success")
   rescue ScrapingServices::RateLimitError => e
-    profile&.update(collection_status: "rate_limited") if profile
+    profile&.update!(collection_status: "rate_limited", blocked_until: Time.current + e.retry_after) if profile
     retry_job wait: e.retry_after
   rescue StandardError => e
     Rails.logger.error "[ScrapeTwitterJob] Erro ao coletar perfil #{profile_id}: #{e.message}"
     if profile
       create_snapshot(profile, {}, degraded: true)
-      profile.update(last_collected_at: Time.current, collection_status: "degraded")
+      profile.update!(last_collected_at: Time.current, collection_status: "degraded")
+      ScrapingFailureAlertJob.perform_later("twitter", profile.id, e.message, "scrape_error")
     end
   end
 
@@ -86,14 +87,17 @@ class ScrapeTwitterJob < ApplicationJob
   end
 
   def create_snapshot(profile, data, degraded: false)
-    ProfileSnapshot.find_or_create_by(
+    snapshot = ProfileSnapshot.find_or_initialize_by(
       social_profile: profile,
       recorded_at: Time.current.beginning_of_hour
-    ) do |snapshot|
+    )
+
+    if snapshot.new_record? || !degraded
       snapshot.followers_count = data[:followers_count]
       snapshot.following_count = data[:following_count]
       snapshot.posts_count = data[:posts_count]
       snapshot.source_degraded = degraded
+      snapshot.save!
     end
   end
 end

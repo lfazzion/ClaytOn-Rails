@@ -18,8 +18,8 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     }
   end
 
-  test 'should enqueue in default queue' do
-    assert_equal 'default', ScrapeTwitterJob.new.queue_name
+  test 'should enqueue in scraping queue' do
+    assert_equal 'scraping', ScrapeTwitterJob.new.queue_name
   end
 
   test 'should update profile and create snapshot on success' do
@@ -70,7 +70,7 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
   end
 
   test 'should skip when profile was recently collected' do
-    @profile.update!(last_collected_at: 30.minutes.ago)
+    @profile.update!(last_collected_at: 3.hours.ago)
     ScrapingServices::TwitterScraper.expects(:new).never
 
     ScrapeTwitterJob.perform_now(@profile.id)
@@ -90,11 +90,12 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     assert_equal first_count, ProfileSnapshot.where(social_profile: @profile).count
   end
 
-  test 'should complete without raising and mark degraded on StandardError' do
+  test 'should complete without raising, mark degraded, and enqueue ScrapingFailureAlertJob on StandardError' do
     mock_scraper = mock('scraper')
     mock_scraper.stubs(:scrape_profile).raises(StandardError.new('timeout'))
     mock_scraper.stubs(:close)
     ScrapingServices::TwitterScraper.stubs(:new).returns(mock_scraper)
+    ScrapingFailureAlertJob.expects(:perform_later).with('twitter', @profile.id, 'timeout', 'scrape_error')
 
     assert_nothing_raised do
       ScrapeTwitterJob.perform_now(@profile.id)
@@ -117,7 +118,31 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     assert_equal false, snapshot.source_degraded
   end
 
-  test 'should set rate_limited status on RateLimitError' do
+  test 'good retry overwrites degraded snapshot created in same hour' do
+    ProfileSnapshot.create!(
+      social_profile: @profile,
+      recorded_at: Time.current.beginning_of_hour,
+      source_degraded: true,
+      followers_count: nil,
+      following_count: nil,
+      posts_count: nil
+    )
+
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(@scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::TwitterScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeTwitterJob.perform_now(@profile.id)
+
+    snapshot = ProfileSnapshot.where(social_profile: @profile).last
+    assert_equal false, snapshot.source_degraded
+    assert_equal 10_000, snapshot.followers_count
+    assert_equal 500, snapshot.following_count
+    assert_equal 200, snapshot.posts_count
+  end
+
+  test 'should set rate_limited status and blocked_until on RateLimitError' do
     mock_scraper = mock('scraper')
     mock_scraper.stubs(:scrape_profile).raises(ScrapingServices::RateLimitError.new('429'))
     mock_scraper.stubs(:close)
@@ -127,5 +152,6 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
 
     @profile.reload
     assert_equal 'rate_limited', @profile.collection_status
+    assert_not_nil @profile.blocked_until
   end
 end

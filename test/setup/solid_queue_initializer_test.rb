@@ -35,8 +35,12 @@ class SolidQueueInitializerTest < ActiveSupport::TestCase
     default_workers = config["default"]["workers"]
 
     assert default_workers, "default workers should be defined"
-    assert_equal "*", default_workers.first["queues"], "should process all queues by default"
+    assert_equal ["default", "critical", "low_priority", "solid_queue_recurring"], default_workers.first["queues"]
     assert default_workers.first["threads"], "threads should be configured"
+
+    scraping_worker = default_workers.find { |w| w["queues"] == "scraping" }
+    assert scraping_worker, "scraping worker should be defined"
+    assert_equal 1, scraping_worker["threads"], "scraping should run with single thread"
   end
 
   test "active_job queue_adapter should be :solid_queue in production" do
