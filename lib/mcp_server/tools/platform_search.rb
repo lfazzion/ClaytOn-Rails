@@ -14,9 +14,9 @@ module McpServer
       title "Busca dentro do YouTube, Reddit e X"
       description(
         "Lê conteúdo DENTRO do YouTube, do Reddit e do X pelo caminho nativo da plataforma, e devolve " \
-        "os permalinks. No youtube e no reddit, `query` é o ASSUNTO procurado. No X é DIFERENTE: não " \
-        "existe busca por assunto, então `query` é o PERFIL (@handle) e o retorno são os posts mais " \
-        "recentes dele. Buscador web não indexa permalink de plataforma de forma confiável — use esta " \
+        "os permalinks. No youtube e no reddit, `query` é o ASSUNTO procurado. No X, `query` é o ASSUNTO " \
+        "(busca por frase, ex. 'ruby rails') OU o PERFIL se vier com @ (ex. '@jack' — posts recentes do perfil). " \
+        "Buscador web não indexa permalink de plataforma de forma confiável — use esta " \
         "ferramenta, não web_search, quando a pergunta for sobre o que está dentro dessas três."
       )
 
@@ -29,7 +29,7 @@ module McpServer
       input_schema(
         properties: {
           platform: { type: "string", enum: %w[youtube reddit x], description: "Onde ler" },
-          query: { type: "string", description: "Assunto (youtube/reddit) ou @perfil (x), 1-200 chars" },
+          query: { type: "string", description: "Assunto (youtube/reddit/x) ou @perfil (x), 1-200 chars" },
           limit: { type: "integer", minimum: 1, maximum: 25, description: "Máximo de resultados (padrão 10)" }
         },
         required: %w[platform query],
