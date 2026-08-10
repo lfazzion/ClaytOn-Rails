@@ -108,6 +108,10 @@ services:
       # nao limite de uso.
       DISCORD_SESSIONS_MAX: ${DISCORD_SESSIONS_MAX:-500}
       DISCORD_COMMAND_GUILD_ID: ${DISCORD_COMMAND_GUILD_ID:-}
+      DISCORD_ATTACHMENT_MAX_BYTES: ${DISCORD_ATTACHMENT_MAX_BYTES:-10485760}
+      DISCORD_ATTACHMENT_MAX_CHARS: ${DISCORD_ATTACHMENT_MAX_CHARS:-30000}
+      DISCORD_OUTPUT_CODE_LINES: ${DISCORD_OUTPUT_CODE_LINES:-25}
+      DISCORD_OUTPUT_PROSE_CHARS: ${DISCORD_OUTPUT_PROSE_CHARS:-4000}
       # Esforco de raciocinio do elo Nous. Aceitos: none, low, medium, high.
       # Valor fora dessa lista da HTTP 400 em TODA chamada do elo, entao a
       # ModelChain recusa o invalido e cai em `none`, com aviso no log.

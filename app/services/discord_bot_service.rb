@@ -2,6 +2,7 @@
 
 require "discordrb"
 require "concurrent"
+require "tempfile"
 
 class DiscordBotService
   MAX_DISCORD_MESSAGE = 2000
@@ -156,18 +157,76 @@ class DiscordBotService
         return
       end
 
-      Rails.logger.info "[DiscordBotService] Mensagem recebida (user: #{user_id}, " \
-                        "channel: #{channel_id}, #{content.length} chars)"
+      attachments = event.message.respond_to?(:attachments) ? Array(event.message.attachments) : []
 
-      if content.empty?
-        Rails.logger.info "[DiscordBotService] Content vazio após limpeza, ignorando"
+      # B4 (revisão Opus): o gate é sobre anexos SUPORTADOS, não sobre qualquer
+      # anexo. Um print.png + pergunta não pode virar "Formato não suportado"
+      # e descartar a pergunta — antes do PR o anexo era ignorado e a pergunta
+      # respondida. Anexo não-suportado cai no fluxo de texto normal.
+      suportados = attachments.select do |a|
+        nome = a.respond_to?(:filename) ? a.filename.to_s : ""
+        AttachmentProcessor::ALLOWED_EXTENSIONS.include?(File.extname(nome).downcase)
+      end
+
+      if suportados.size > 1
+        event.respond("Envie apenas um arquivo por mensagem.")
         return
       end
 
-      command = Discord::CommandRouter.parse_text(content)
-      return respond_in_chunks(event, run_command(command, scope)) if command
+      truncated = false
+      truncated_reason = nil
 
-      answer(event, scope, content, user_id, username)
+      if suportados.size == 1
+        # N5 (revisão Opus): o caminho de anexo não logava recebimento nenhum.
+        anexo = suportados.first
+        Rails.logger.info "[DiscordBotService] Anexo recebido (user: #{user_id}, " \
+                          "channel: #{channel_id}, filename: " \
+                          "#{anexo.respond_to?(:filename) ? anexo.filename : '?'}, " \
+                          "size: #{anexo.respond_to?(:size) ? anexo.size : '?'})"
+
+        # #4 (revisão Opus): qualquer falha inesperada do processamento termina
+        # em resposta educada (ex.: File.extname com NUL no nome levanta
+        # ArgumentError), nunca deixa o usuário no vácuo.
+        begin
+          res = AttachmentProcessor.process(anexo, content)
+        rescue StandardError => e
+          Rails.logger.error "[DiscordBotService] Falha inesperada ao processar anexo: " \
+                             "#{e.class.name} - #{e.message}"
+          event.respond("Não consegui processar o arquivo.")
+          return
+        end
+
+        unless res.success
+          event.respond(res.error_message)
+          return
+        end
+
+        content = res.content
+        truncated = res.truncated
+        truncated_reason = res.truncated_reason
+      else
+        Rails.logger.info "[DiscordBotService] Mensagem recebida (user: #{user_id}, " \
+                          "channel: #{channel_id}, #{content.length} chars)"
+
+        if content.empty?
+          Rails.logger.info "[DiscordBotService] Content vazio após limpeza, ignorando"
+          return
+        end
+
+        command = Discord::CommandRouter.parse_text(content)
+        return respond_in_chunks(event, run_command(command, scope)) if command
+      end
+
+      answer(event, scope, content, user_id, username, truncated: truncated,
+             truncated_reason: truncated_reason)
+    rescue StandardError => e
+      # #4 (2ª rodada de revisão): rede final do handle_message. O filtro de
+      # suportados (File.extname acima) roda FORA do begin do process — um
+      # filename com NUL ou bytes UTF-8 inválidos levanta ArgumentError antes
+      # de qualquer rescue interno. Sem isto, o usuário fica no vácuo.
+      Rails.logger.error "[DiscordBotService] Falha inesperada em handle_message: " \
+                         "#{e.class.name} - #{e.message}"
+      event.respond("⚠️ Erro ao processar. Tente novamente.") rescue nil
     end
 
     def run_command(command, scope)
@@ -185,7 +244,7 @@ class DiscordBotService
 
     private
 
-    def answer(event, scope, content, user_id, username)
+    def answer(event, scope, content, user_id, username, truncated: false, truncated_reason: nil)
       typing_running = Concurrent::AtomicBoolean.new(true)
       typing_thread = Thread.new do
         while typing_running.true?
@@ -197,7 +256,19 @@ class DiscordBotService
       begin
         texto = ChatSessionManager.ask(scope: scope, content: content, user_id: user_id,
                                        username: username)
-        respond_in_chunks(event, texto)
+        texto = truncation_notice(texto, truncated_reason) if truncated
+        attachment = ResponseAttachmentBuilder.build(texto)
+
+        if attachment
+          # M3 (revisão Opus): no caminho de prosa o aviso de truncamento
+          # ficaria enterrado dentro do .md — vai para o caption, visível.
+          if truncated && attachment.kind == :prose
+            attachment.caption = "#{truncation_notice('', truncated_reason).strip} — #{attachment.caption}"
+          end
+          send_attachment_with_fallback(event, texto, attachment)
+        else
+          respond_in_chunks(event, texto)
+        end
       rescue StandardError => e
         Rails.logger.error "[DiscordBotService] Erro: #{e.class.name} - #{e.message}"
         event.respond("⚠️ Erro ao processar. Tente novamente.")
@@ -205,6 +276,45 @@ class DiscordBotService
         typing_running.make_false
         typing_thread&.join(1)
       end
+    end
+
+    def send_attachment_with_fallback(event, texto, attachment)
+      tempfile = Tempfile.new(["discord_att", File.extname(attachment.filename)])
+      tempfile.binmode
+      tempfile.write(attachment.content)
+      tempfile.rewind
+
+      begin
+        event.channel.send_file(tempfile, caption: attachment.caption, filename: attachment.filename)
+      rescue StandardError => e
+        Rails.logger.error "[DiscordBotService] Erro ao enviar anexo (#{e.class.name}: #{e.message}), caindo para chunks"
+        respond_in_chunks(event, texto)
+        return
+      end
+
+      # B2 (revisão Opus): o excedente do caption (>2000) nunca se perde — é
+      # entregue como mensagens após o arquivo, como o split_message faria.
+      respond_in_chunks(event, attachment.caption_resto) if attachment.caption_resto.present?
+    ensure
+      if tempfile
+        tempfile.close
+        tempfile.unlink rescue nil
+      end
+    end
+
+    # B3 (revisão Opus): o aviso de truncamento não pode afirmar um número de
+    # caracteres quando o corte foi por PÁGINAS no sidecar — o número estaria
+    # errado. Honesto por motivo: chars, páginas, ou genérico.
+    def truncation_notice(texto, truncated_reason)
+      aviso = case truncated_reason
+              when :pages then "⚠️ *(O arquivo é longo demais e foi lido parcialmente.)*"
+              when :chars
+                max_chars = ENV.fetch("DISCORD_ATTACHMENT_MAX_CHARS", AttachmentProcessor::DEFAULT_MAX_CHARS).to_i
+                "⚠️ *(O arquivo foi truncado em #{max_chars} caracteres.)*"
+              else
+                "⚠️ *(O arquivo foi lido parcialmente.)*"
+              end
+      "#{texto}\n\n#{aviso}"
     end
 
     def reset_response(scope)

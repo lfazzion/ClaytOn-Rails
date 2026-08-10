@@ -103,4 +103,37 @@ class SidecarClientTest < ActiveSupport::TestCase
 
     assert_predicate status, :success?
   end
+
+  test 'extract_pdf envia bytes brutos e devolve hash de resposta' do
+    ENV['PYTHON_SCRAPER_TOKEN'] = 'segredo'
+    extract_url = 'http://python-scraper:8080/extract-pdf'
+
+    stub_request(:post, extract_url)
+      .with(
+        body: '%PDF-1.4 sample',
+        headers: { 'Authorization' => 'Bearer segredo', 'Content-Type' => 'application/pdf' }
+      )
+      .to_return(
+        status: 200,
+        body: { text: 'conteudo extraido', chars: 17, pages: 1, truncated: false }.to_json,
+        headers: { 'Content-Type' => 'application/json' }
+      )
+
+    res = ScrapingServices::SidecarClient.extract_pdf(bytes: '%PDF-1.4 sample')
+
+    assert_kind_of Hash, res
+    assert_equal 'conteudo extraido', res['text']
+    assert_equal 1, res['pages']
+    assert_equal false, res['truncated']
+  end
+
+  test 'extract_pdf quando sidecar indisponivel devolve hash com error' do
+    extract_url = 'http://python-scraper:8080/extract-pdf'
+    stub_request(:post, extract_url).to_raise(Errno::ECONNREFUSED)
+
+    res = ScrapingServices::SidecarClient.extract_pdf(bytes: '%PDF-1.4 sample')
+
+    assert_kind_of Hash, res
+    assert_match(/sidecar indisponível/i, res['error'])
+  end
 end

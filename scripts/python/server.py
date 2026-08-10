@@ -43,6 +43,9 @@ ALLOWED_SCRIPTS = frozenset(
 )
 
 MAX_BODY_BYTES = 256 * 1024
+MAX_PDF_BYTES = 10 * 1024 * 1024
+MAX_PDF_PAGES = 200
+MAX_PDF_CHARS = 60000
 MAX_ARGS = 32
 MAX_ARG_LENGTH = 4096
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -51,6 +54,16 @@ MAX_TIMEOUT = 300
 MAX_CONCURRENCY = int(os.environ.get("SCRAPER_MAX_CONCURRENCY", "2"))
 ACQUIRE_TIMEOUT = 30
 
+# B2 (revisão Opus): o parse de PDF hostil tem semáforo PRÓPRIO e roda em
+# subprocesso matável (run_pdf_extractor). O motivo é o mesmo que levou o /run
+# a despachar scripts hostis como processo: um PDF-bomba não pode segurar um
+# slot do scraping (nem a thread HTTP) sem timeout. PDF_PARSE_TIMEOUT curto —
+# extração de texto de PDF nativo é rápida; o que demora é indicativo de bomba.
+PDF_PARSE_TIMEOUT = int(os.environ.get("SCRAPER_PDF_TIMEOUT", "25"))
+PDF_CONCURRENCY = int(os.environ.get("SCRAPER_PDF_CONCURRENCY", "1"))
+_pdf_slots = threading.BoundedSemaphore(PDF_CONCURRENCY)
+
+# Slots do SCRAPING (/run): não confundir com _pdf_slots. B2 separou os dois.
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
@@ -170,6 +183,68 @@ def try_parse(stdout):
         return None
 
 
+def run_pdf_extractor(tmp_path):
+    """Roda extract_pdf.py como subprocesso matável (timeout + killpg).
+
+    B2 (revisão Opus): o mesmo padrão do run_script para /run — nunca parsear
+    entrada hostil na thread do ThreadingHTTPServer sem timeout. O script fica
+    no MESMO diretório do server.py (o container monta scripts/python).
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extract_pdf.py")
+    if not os.path.isfile(script):
+        return {"error_kind": "unavailable", "error": "extract_pdf.py ausente no sidecar"}
+
+    command = [sys.executable, "-u", script, tmp_path, str(MAX_PDF_PAGES), str(MAX_PDF_CHARS)]
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=PDF_PARSE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()  # reap do grupo morto (evita zombie)
+        return {"error_kind": "unavailable", "error": "timeout de %ds no parse do PDF" % PDF_PARSE_TIMEOUT}
+
+    data = try_parse(stdout)
+    if proc.returncode != 0 or not isinstance(data, dict):
+        detail = clip(stderr).strip() or ("exit %s" % proc.returncode)
+        # Falha de execução do script é problema de infra/parse, não do documento:
+        # o consumidor decide como nomear (parse mantém "deste PDF" como defeito
+        # do documento apenas quando o PRÓPRIO script reporta error_kind parse).
+        kind = "parse" if isinstance(data, dict) and data.get("error_kind") in ("parse", "invalid") else "unavailable"
+        return {"error_kind": kind, "error": "erro ao ler PDF: %s" % detail}
+    return data
+
+
+def extract_pdf_from_bytes(raw_bytes):
+    if not raw_bytes.startswith(b"%PDF-"):
+        return {"error_kind": "invalid", "error": "arquivo não é um PDF válido"}
+
+    import tempfile
+
+    tmp_path = None
+    if not _pdf_slots.acquire(timeout=ACQUIRE_TIMEOUT):
+        raise BadRequest("parse de PDF saturado (%d simultâneos)" % PDF_CONCURRENCY, status=503)
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+            f.write(raw_bytes)
+            tmp_path = f.name
+        return run_pdf_extractor(tmp_path)
+    finally:
+        _pdf_slots.release()
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "cleitin-scraper/1.0"
     protocol_version = "HTTP/1.1"
@@ -181,7 +256,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"status": "ok", "scripts": sorted(ALLOWED_SCRIPTS)})
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/run":
+        path = self.path.split("?")[0]
+        if path not in ("/run", "/extract-pdf"):
             self.discard_unread_body()
             return self.send_json(404, {"error": "rota inexistente"})
 
@@ -189,35 +265,57 @@ class Handler(BaseHTTPRequestHandler):
             self.discard_unread_body()
             return self.send_json(401, {"error": "token inválido"})
 
-        try:
-            raw = self.read_body()
-            script, args, timeout = parse_run_payload(raw)
-            result = run_script(script, args, timeout)
-        except BadRequest as exc:
-            return self.send_json(exc.status, {"error": exc.message})
-        except Exception as exc:  # noqa: BLE001 — nunca derrubar o servidor por um request
-            self.log_error("erro inesperado: %s: %s", type(exc).__name__, exc)
-            # Estado da conexão desconhecido (a leitura do corpo pode ter
-            # falhado no meio): não reusar o keep-alive.
-            self.close_connection = True
-            return self.send_json(500, {"error": "%s: %s" % (type(exc).__name__, exc)})
+        if path == "/run":
+            try:
+                raw = self.read_body()
+                script, args, timeout = parse_run_payload(raw)
+                result = run_script(script, args, timeout)
+            except BadRequest as exc:
+                return self.send_json(exc.status, {"error": exc.message})
+            except Exception as exc:  # noqa: BLE001 — nunca derrubar o servidor por um request
+                self.log_error("erro inesperado: %s: %s", type(exc).__name__, exc)
+                # Estado da conexão desconhecido (a leitura do corpo pode ter
+                # falhado no meio): não reusar o keep-alive.
+                self.close_connection = True
+                return self.send_json(500, {"error": "%s: %s" % (type(exc).__name__, exc)})
+            return self.send_json(200, result)
 
-        self.send_json(200, result)
+        if path == "/extract-pdf":
+            try:
+                raw = self.read_pdf_body()
+                result = extract_pdf_from_bytes(raw)
+            except BadRequest as exc:
+                return self.send_json(exc.status, {"error": exc.message})
+            except Exception as exc:  # noqa: BLE001 — nunca derrubar o servidor por um request
+                self.log_error("erro inesperado em extract-pdf: %s: %s", type(exc).__name__, exc)
+                self.close_connection = True
+                return self.send_json(500, {"error": "%s: %s" % (type(exc).__name__, exc)})
+            return self.send_json(200, result)
 
     def read_body(self):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            # Não dá para saber onde o corpo termina: fecha em vez de
-            # interpretar bytes do corpo como request-line seguinte.
             self.close_connection = True
             raise BadRequest("Content-Length inválido")
         if length <= 0:
             raise BadRequest("corpo vazio")
         if length > MAX_BODY_BYTES:
-            # Corpo grande demais para drenar no worker: fecha a conexão.
             self.close_connection = True
             raise BadRequest("corpo excede %d bytes" % MAX_BODY_BYTES, status=413)
+        return self.rfile.read(length)
+
+    def read_pdf_body(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.close_connection = True
+            raise BadRequest("Content-Length inválido")
+        if length <= 0:
+            raise BadRequest("corpo vazio")
+        if length > MAX_PDF_BYTES:
+            self.close_connection = True
+            raise BadRequest("corpo excede %d bytes" % MAX_PDF_BYTES, status=413)
         return self.rfile.read(length)
 
     def discard_unread_body(self):
