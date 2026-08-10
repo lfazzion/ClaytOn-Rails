@@ -45,6 +45,11 @@ class DiscordBotService
         handle_message(event)
       end
 
+      bot.ready do |event|
+        Rails.logger.info "[DiscordBotService] Gateway pronto — sessão estabelecida " \
+                          "(bot: #{event.bot.profile.username rescue '?'})"
+      end
+
       # bot.mention dispara em paralelo ao bot.message sempre que a mensagem também
       # bate em should_handle? (DM, canal aberto, ou comando "!"). Nesses casos
       # handle_message já respondeu — reprocessar aqui duplicaria a resposta. Isso

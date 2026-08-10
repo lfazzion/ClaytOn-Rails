@@ -56,6 +56,10 @@ class ChatSessionManager
       with_scope_lock(scope.key) do
         Thread.current[:cleitin_actor] = { user_id: user_id, username: username }
         Thread.current[:cleitin_turn] = SecureRandom.hex(8)
+        inicio = Time.now
+        Rails.logger.info "[ChatSessionManager] Iniciando ask — " \
+                          "scope=#{scope.key} user=#{user_id} " \
+                          "chars=#{content.to_s.length}"
         begin
           conversation = conversation_for(scope)
 
@@ -63,7 +67,10 @@ class ChatSessionManager
           texto = ask_through_chain(chat, outgoing_content(conversation, content, username),
                                     scope: scope, conversation: conversation)
 
-          next handle_blank_response(scope) if texto.blank?
+          if texto.blank?
+            Rails.logger.info "[ChatSessionManager] ask concluído em #{format("%.1f", (Time.now - inicio))}s chars=#{texto.to_s.length}"
+            next handle_blank_response(scope)
+          end
 
           # Título e mensagens só são persistidos DEPOIS da resposta — ver
           # outgoing_content — e em transação. O título antes da resposta gravava
@@ -86,6 +93,7 @@ class ChatSessionManager
             evict(scope.key)
             raise
           end
+          Rails.logger.info "[ChatSessionManager] ask concluído em #{format("%.1f", (Time.now - inicio))}s chars=#{texto.to_s.length}"
           texto
         ensure
           Thread.current[:cleitin_actor] = nil
@@ -93,7 +101,6 @@ class ChatSessionManager
         end
       end
     end
-
     def reset!(scope)
       with_scope_lock(scope.key) do
         Conversation.active_for(scope.key)&.close!

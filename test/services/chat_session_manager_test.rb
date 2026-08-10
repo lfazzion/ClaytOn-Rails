@@ -56,6 +56,28 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_equal "olá humano", bot_msg.content
   end
 
+  test "ask loga Iniciando ask e ask concluido no caminho de sucesso" do
+    linhas = []
+    Rails.logger.stubs(:info).with { |m| linhas << m.to_s; true }
+    stub_chat("resposta ok")
+
+    ChatSessionManager.ask(scope: @scope, content: "oi bot", user_id: "101", username: "joao")
+
+    assert linhas.any? { |l| l =~ /Iniciando ask/ }, "deveria logar 'Iniciando ask' — log foi: #{linhas.inspect}"
+    assert linhas.any? { |l| l =~ /ask concluído/ }, "deveria logar 'ask concluído' — log foi: #{linhas.inspect}"
+  end
+
+  test "ask loga Iniciando ask e ask concluido mesmo em resposta em branco" do
+    linhas = []
+    Rails.logger.stubs(:info).with { |m| linhas << m.to_s; true }
+    stub_chat("")
+
+    ChatSessionManager.ask(scope: @scope, content: "oi bot", user_id: "101", username: "joao")
+
+    assert linhas.any? { |l| l =~ /Iniciando ask/ }, "deveria logar 'Iniciando ask' — log foi: #{linhas.inspect}"
+    assert linhas.any? { |l| l =~ /ask concluído/ }, "deveria logar 'ask concluído' — log foi: #{linhas.inspect}"
+  end
+
   test "ask devolve BLANK_RESPONSE_WARNING quando o modelo responde em branco e limpa o cache" do
     stub_chat("")
 

@@ -76,7 +76,8 @@ if gem_available
     config.openai_use_system_role = true
     config.logger = Rails.logger
     config.log_level = Rails.env.production? ? :info : :debug
-    config.request_timeout = 120
+    # 40s/link — cadeia de 3 links = máx ~2min; antes 120s/link = 6min de silêncio
+    config.request_timeout = 40
   end
 
   # Sem isto ninguém sabe em qual rota o bot está rodando — mesma lição do
