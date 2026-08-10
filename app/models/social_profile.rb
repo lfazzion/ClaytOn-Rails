@@ -91,11 +91,9 @@ class SocialProfile < ApplicationRecord
   end
 
   def youtube_url
-    if platform_username.to_s.match?(CHANNEL_ID_PATTERN) || platform_user_id.to_s.match?(CHANNEL_ID_PATTERN)
-      "https://www.youtube.com/channel/#{platform_user_id}"
-    else
-      "https://www.youtube.com/@#{platform_username}"
-    end
+    return "https://www.youtube.com/channel/#{platform_user_id}" if platform_user_id.to_s.match?(CHANNEL_ID_PATTERN)
+    return "https://www.youtube.com/channel/#{platform_username}" if platform_username.to_s.match?(CHANNEL_ID_PATTERN)
+    "https://www.youtube.com/@#{platform_username}"
   end
 end
 

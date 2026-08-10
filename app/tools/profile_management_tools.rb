@@ -216,13 +216,15 @@ class RemoveProfileTool < ManagementToolBase
       success({
                 status: :confirmation_required,
                 resumo: "perfil ##{profile.id} (#{profile.platform}/#{profile.platform_username}) — #{posts_count} posts, #{snapshots_count} snapshots",
-                instrucao: "repita 'confirmo a remoção de #{profile.platform_username}' na próxima mensagem para executar"
+                instrucao: 'quando o usuário confirmar, chame novamente passando confirmation_phrase com o texto literal da mensagem do usuário (ex.: "confirmo a remoção de #{profile.platform_username}")'
               })
     elsif pending[:turn] != current_turn
       # Gate primário: a frase literal de confirmação do usuário na próxima
       # mensagem. Turn-ID distinto é só um gate secundário (achado 2 do PR #36).
       phrase = confirmation_phrase.to_s.downcase
-      unless phrase.include?('confirmo') && phrase.include?(profile.platform_username.to_s.downcase)
+      username = profile.platform_username.to_s.downcase
+      token_matches = username.present? && phrase.match?(/(?<![A-Za-z0-9_])#{Regexp.escape(username)}(?![A-Za-z0-9_])/)
+      unless phrase.include?('confirmo') && token_matches
         return error("Confirmação inválida — o usuário precisa dizer 'confirmo a remoção de #{profile.platform_username}' na próxima mensagem")
       end
 
@@ -237,7 +239,7 @@ class RemoveProfileTool < ManagementToolBase
       success({
                 status: :confirmation_required,
                 resumo: "perfil ##{profile.id} (#{profile.platform}/#{profile.platform_username}) — #{posts_count} posts, #{snapshots_count} snapshots",
-                instrucao: "repita 'confirmo a remoção de #{profile.platform_username}' na próxima mensagem para executar"
+                instrucao: 'quando o usuário confirmar, chame novamente passando confirmation_phrase com o texto literal da mensagem do usuário (ex.: "confirmo a remoção de #{profile.platform_username}")'
               })
     end
   rescue ActiveRecord::RecordInvalid => e

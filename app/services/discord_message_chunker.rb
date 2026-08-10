@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Chunker único de mensagens do Discord (Achado 5, PR #36).
+# Helper compartilhado pelos jobs de digest (Achado 5, PR #36).
 #
 # Antes, Last30DaysTopicJob#chunk_text e WeeklyDigestJob#send_digest_message
 # resolviam o mesmo problema (limite de 2000 chars do Discord, quebra por
@@ -9,7 +9,7 @@
 # o limite (URL longa, bloco de código, tabela).
 #
 # Módulo puro, sem dependência de Rails: recebe a mensagem e o limite e
-# devolve um Array<String> pronto para o DiscordApiClient.send_message.
+# devolve um Array<String> pronto para DiscordApiClient.send_message.
 # O Zeitwerk carrega app/services — os jobs usam a constante sem
 # require_relative.
 module DiscordMessageChunker
@@ -18,6 +18,8 @@ module DiscordMessageChunker
   # Quebra `message` em chunks de no máximo `limit` caracteres.
   # Sempre devolve Array<String>; mensagem <= limit → [message].
   def self.chunk(message, limit: DEFAULT_LIMIT)
+    message = message.to_s
+    return [] if message.strip.empty?
     return [message] if message.length <= limit
 
     chunks = []
@@ -52,6 +54,6 @@ module DiscordMessageChunker
     end
 
     chunks << current_chunk.join("\n") if current_chunk.any?
-    chunks
+    chunks.reject { |c| c.strip.empty? }
   end
 end

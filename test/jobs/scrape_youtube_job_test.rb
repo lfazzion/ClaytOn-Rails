@@ -260,6 +260,29 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
                  ScrapeYoutubeJob.new.send(:build_channel_url, profile)
   end
 
+  # R2 — build_channel_url must check username FIRST when user_id is not
+  # canonical, otherwise the real channel ID held in username is missed and
+  # the scraper dies with a nil-metadata silent failure.
+  test 'build_channel_url usa /channel/<username> quando platform_user_id nao e channel ID mas username e' do
+    channel_id = 'UCn8SzhX6Z1qW9_123456789'
+    profile = create(:social_profile, :youtube,
+                     platform_username: channel_id,
+                     platform_user_id: 'pending:youtube:abc123')
+
+    assert_equal "https://www.youtube.com/channel/#{channel_id}",
+                 ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
+  test 'build_channel_url cai em /channel/<user_id> quando user_id e channel ID e username e downcased (legado)' do
+    channel_id = 'UCn8SzhX6Z1qW9_123456789'
+    profile = create(:social_profile, :youtube,
+                     platform_username: channel_id.downcase,
+                     platform_user_id: channel_id)
+
+    assert_equal "https://www.youtube.com/channel/#{channel_id}",
+                 ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
   test 'build_channel_url cai em /channel/ por platform_user_id quando username em branco' do
     profile = create(:social_profile, :youtube, platform_username: 'some_channel', platform_user_id: 'abc123')
     profile.update_columns(platform_username: '')

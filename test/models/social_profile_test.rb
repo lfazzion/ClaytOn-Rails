@@ -59,6 +59,21 @@ class SocialProfileTest < ActiveSupport::TestCase
     assert_equal "https://www.youtube.com/channel/#{channel_id}", profile[:platform_url], 'coluna platform_url deve ser gravada com a URL canônica'
   end
 
+  # R1 — youtube_url must use the value that MATCHED the channel ID pattern,
+  # not always platform_user_id. When the prospect tool persists a pending
+  # user_id like "pending:youtube:UCxxx..." but the username holds the real
+  # canonical channel ID, the URL must resolve to that ID.
+  test "youtube_url usa username canônico quando platform_user_id é pending e username é channel ID" do
+    channel_id = "UCn8SzhX6Z1qW9_123456789"
+    profile = create(:social_profile, :youtube,
+                     platform_username: channel_id,
+                     platform_user_id: "pending:youtube:#{channel_id}")
+
+    assert_equal "https://www.youtube.com/channel/#{channel_id}", profile.platform_url
+    assert_equal "https://www.youtube.com/channel/#{channel_id}", profile[:platform_url],
+                 "platform_url gravado na coluna deve conter o channel ID canônico"
+  end
+
   test "should be unique per platform and platform_user_id" do
     create(:social_profile, platform: "twitter", platform_user_id: "12345")
     duplicate = build(:social_profile, platform: "twitter", platform_user_id: "12345")

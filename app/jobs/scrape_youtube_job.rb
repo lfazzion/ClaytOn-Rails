@@ -89,13 +89,10 @@ class ScrapeYoutubeJob < ApplicationJob
   end
 
   def build_channel_url(profile)
-    if profile.platform_user_id.to_s.match?(SocialProfile::CHANNEL_ID_PATTERN)
-      "https://www.youtube.com/channel/#{profile.platform_user_id}"
-    elsif profile.platform_username.present?
-      "https://www.youtube.com/@#{profile.platform_username}"
-    else
-      "https://www.youtube.com/channel/#{profile.platform_user_id}"
-    end
+    return "https://www.youtube.com/channel/#{profile.platform_user_id}" if profile.platform_user_id.to_s.match?(SocialProfile::CHANNEL_ID_PATTERN)
+    return "https://www.youtube.com/channel/#{profile.platform_username}" if profile.platform_username.to_s.match?(SocialProfile::CHANNEL_ID_PATTERN)
+    return "https://www.youtube.com/@#{profile.platform_username}" if profile.platform_username.present?
+    "https://www.youtube.com/channel/#{profile.platform_user_id}"
   end
 
   def current_proxy(options)

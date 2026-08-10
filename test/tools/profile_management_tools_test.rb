@@ -291,6 +291,42 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
   # ── 4. RemoveProfileTool ──────────────────────────────────────────────────────
 
+  # R3 — token-boundary matching: confirming "ana" with a phrase that only
+  # contains "ana_clara" must FAIL. The old include?('ana') wrongly matched
+  # the substring inside "ana_clara".
+  test 'remove_profile: confirmar ana com frase que menciona apenas ana_clara retorna error' do
+    profile_ana = create(:social_profile, :twitter, platform_username: 'ana')
+    create_list(:social_post, 1, social_profile: profile_ana)
+    profile_ana_clara = create(:social_profile, :twitter, platform_username: 'ana_clara')
+
+    tool = RemoveProfileTool.new
+
+    Thread.current[:cleitin_turn] = 'turn_a'
+    tool.execute(identifier: 'ana')
+
+    Thread.current[:cleitin_turn] = 'turn_b'
+    res = tool.execute(identifier: 'ana',
+                       confirmation_phrase: 'confirmo a remoção de ana_clara')
+    assert_equal :error, res[:status]
+    assert_nil profile_ana.reload.archived_at
+  end
+
+  test 'remove_profile: username vazio nao remove mesmo com confirmo' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_empty')
+    tool = RemoveProfileTool.new
+
+    Thread.current[:cleitin_turn] = 'turn_a'
+    tool.execute(identifier: 'to_remove_empty')
+
+    profile.update_columns(platform_username: '')
+
+    Thread.current[:cleitin_turn] = 'turn_b'
+    res = tool.execute(identifier: 'to_remove_empty',
+                       confirmation_phrase: 'confirmo a remoção')
+    assert_equal :error, res[:status]
+    assert_nil profile.reload.archived_at
+  end
+
   test 'remove_profile em dois turnos: primeiro pede confirmação e segundo arquiva' do
     profile = create(:social_profile, :twitter, platform_username: 'to_remove')
     create_list(:social_post, 3, social_profile: profile)

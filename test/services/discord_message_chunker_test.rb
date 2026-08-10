@@ -14,8 +14,12 @@ class DiscordMessageChunkerTest < ActiveSupport::TestCase
     assert_equal [message], DiscordMessageChunker.chunk(message)
   end
 
-  test "mensagem vazia retorna array com string vazia" do
-    assert_equal [""], DiscordMessageChunker.chunk("")
+  test "mensagem vazia retorna array vazio" do
+    assert_equal [], DiscordMessageChunker.chunk("")
+  end
+
+  test "mensagem nil retorna array vazio" do
+    assert_equal [], DiscordMessageChunker.chunk(nil)
   end
 
   test "mensagem de exatamente limit chars retorna um unico chunk" do
