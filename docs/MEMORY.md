@@ -10,6 +10,41 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-10]** Fase 3 — fusão RRF + clustering implementada (`lib/research/fusion.rb`, `lib/research/cluster.rb`) e revisada.
+  - Porta Ruby do pipeline de fusão (Weighted Reciprocal Rank Fusion) e do
+    cluster greedy + MMR da referência Python. Tokens mantidos em pt-BR:
+    `RRF_K = 60`, `MAX_ITEMS_PER_AUTHOR = 3`, `DIVERSITY_RELEVANCE_THRESHOLD = 0.25`,
+    thresholds do greedy 0.42 (breaking_news) / 0.48 (demais), MMR lambda 0.75
+    com limite 3, `THIN_EVIDENCE_FLOOR = 0.55`.
+  - **Escala do score (decisão de design)**: o `rrf_score` do Fusion vale no
+    máximo ~0,0164 por stream e NUNCA 0-100 como o `final_score` da referência.
+    Por isso o Cluster usa `local_relevance` (0-1, emitido pelo Scorer via
+    `relevance_score`) como score de TRABALHO — líder, ordenação do grupo,
+    MMR e thin-evidence — e mantém `rrf_score` apenas para ordenação do pool
+    (feita no Fusion) e como desempate. Ver `cluster.rb#score_of` e
+    `fusion.rb#extract_local_relevance`.
+  - **Fase 4 (adiado)**: o segundo pass do cluster (`_merge_entity_clusters`
+    da referência, que funde clusters pequenos com entidades compartilhadas)
+    depende de `entity_extract`, ainda não portado. Marcado em
+    `cluster.rb#build_clusters` como TODO e decidido com o delegado para a
+    Fase 4 — mantém o ponto onde o plug-in entra sem inflar o escopo da Fase 3.
+  - **Diversidade por fonte**: o bucket de `diversify_pool` usa o campo
+    escalar `source` do candidato (atualizado quando o item vence o
+    `primary_score` no merge), espelhando a referência que usa `c.source`
+    ATUALIZADO — e não o primeiro item de `sources` (congelado no build).
+  - **idempotência do sort**: `sort_by` do Ruby não é estável; empate de
+    `rrf_score` é o caso comum (todo rank-1 de 1 stream dá 1/61). Adicionada
+    chave de desempate por `key` em fusion.rb (sort_key) e cluster.rb
+    (group + final cluster sort).
+  - **Correções S (suspeitas confirmadas)**: `normalize_url` agora
+    percent-encode a entrada antes do parse (URLs com acento/CJK não
+    caem no rescue silencioso), descarta params com valor vazio no
+    decode_www_form (paridade com `parse_qs` Python) e alargou o rescue
+    para `URI::Error, ArgumentError`. `split_stream_key` sem `":"` agora
+    devolve `["", stream_key]` (a chave é a fonte) em vez de gravar
+    source "" no provenance.
+  - 37 testes (19 fusion + 17 cluster + 1 integração) passando no harness
+    isolado do worker; veredito oficial fica com o orquestrador no docker.
 - **[2026-08-09]** Correção de documentação (PR3, revisão): a afirmação da
   entrada de 2026-03-23 de que as sessões vivem "em memória com TTL 30min via
   `ChatSessionManager`" ficou FALSA quando as conversas passaram a viver no
@@ -90,6 +125,7 @@
 | 2026-03-14 | Jobs idempotentes com dedup window de 2h | Safe to re-run sem duplicatas |
 | 2026-03-13 | Gemini Flash como modelo primário de análise | Custo-benefício vs. capacidade — pesquisa em `docs/comparativo_IA_gemini_gemma.md` |
 | 2026-08-09 | Execução Python via sidecar HTTP autenticado (8080) | Scraping evasivo (nodriver/camoufox/curl_cffi) migrado de `Open3` in-process para `POST /run` no container `python-scraper`, com auth Bearer `PYTHON_SCRAPER_TOKEN`. |
+| 2026-08-10 | RRF K=60 + Cluster usa `local_relevance` (0-1) como score de TRABALHO | `rrf_score` do Fusion é ~0.016-0.05; usar como score do Cluster degenera (thin-evidence sempre, MMR pune 10× mais que score). `local_relevance` vem do `relevance_score` do Scorer (0-1). Ver `lib/research/cluster.rb#score_of` e `fusion.rb#extract_local_relevance`. |
 
 ---
 
@@ -109,6 +145,7 @@
 | 2026-03-28 | Deploy rollback com snapshot_images() era ineficaz | Snapshot tirado DEPOIS do `git pull` capturava imagens do novo código quebrado, não do código anterior funcional. Rollback marcava imagens atuais com `-rollback` em vez de restaurar as anteriores | Simplificar: `git reset --hard` + `docker compose build` para rebuild do código anterior |
 | 2026-03-28 | Migration falha não parava deploy | deploy.sh usava `WARNING` + `cat` sem `exit 1`, continuava deploy com banco incompatível | Adicionar `rollback` + `exit 1` no bloco de falha de migration |
 | 2026-08-09 | Limiar inerte no initializer de LLM: falha silenciosa que mascara bug nosso | `require 'ruby_llm'` e os `require` locais de `lib/llm/` dividiam o mesmo `rescue LoadError`; require errado ou registro incompleto subia a app "de pé", logando "Gem não disponível" enganoso, sem provedor nem modelo novo | `require 'ruby_llm'` é o único ponto coberto pelo rescue; `require` locais ficam FORA dele, então erro ali estoura o boot (regra 3/CLAUDE.md). Citações: `config/initializers/ruby_llm.rb` e `test/lib/llm/model_chain_test.rb` |
+| 2026-08-10 | Score de TRABALHO do Cluster tem que ser `local_relevance`, NÃO `rrf_score` | Porta Ruby do Fusion emite `rrf_score = 1/(60+rank)` (≈0.016-0.05) por stream, nunca 0-100 como o `final_score` Python. Sem ler `relevance_score` no `extract_local_relevance`, o Cluster via todo candidato com `local_relevance = 0.0`, disparava `thin-evidence` para todos os clusters multi-fonte (regra `max_score < 0.55`) e o MMR tinha `0.75*0.05 - 0.25*0.5` na fórmula — diversidade pesando ~10× mais que score. | Ler `relevance_score` (campo do Scorer) em `fusion.rb#extract_local_relevance` e usar `local_relevance` como score de TRABALHO em `cluster.rb#score_of` (fallback para `rrf_score`, nunca o inverso). Citações: `lib/research/fusion.rb:128-` e `lib/research/cluster.rb#score_of`. |
 
 <!-- Template para novas entradas:
 | YYYY-MM-DD | Descrição concisa do bug | O que causou | Como foi resolvido (`arquivo.rb`, classe, método) |
@@ -176,6 +213,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | 2026-03-30 | Deploy hardening (Propostas 1-3): set -Eeuo pipefail, healthcheck nativo docker-compose, image tagging com IMAGE_TAG, --wait em vez de health check loop, rollback sem rebuild, FASE 10.5 systemd timer cleanup. | Contexto Ativo |
 | 2026-03-30 | Correções script↔guia: KexAlgorithms pós-quântico (sntrup761x25519) no SSH, tabela de fases 9→10 com NTP/Chrony (FASE 7), Fail2Ban dual jail, troubleshooting zRAM. | Contexto Ativo |
 | 2026-08-09 | Decisão arquitetural registrada: execução Python via sidecar HTTP autenticado (8080, `PYTHON_SCRAPER_TOKEN`) em vez de `Open3` in-process. | Padrões Ratificados |
+| 2026-08-10 | Fase 3 implementada e revisada: fusão RRF + clustering (`lib/research/fusion.rb`, `lib/research/cluster.rb`). Decisão de escala registrada (local_relevance como score de trabalho, rrf para ordenação). Entity-cluster da Fase 4 adiado (depende de entity_extract). | Contexto Ativo, Padrões Ratificados, Lições Aprendidas |
 
 ---
 
