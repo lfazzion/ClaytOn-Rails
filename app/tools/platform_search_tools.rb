@@ -20,18 +20,16 @@ require_relative "../../lib/fetcher/channels/polymarket"
 # X não existe caminho para busca de timeline (medido em 05/08: espelhos só
 # servem post único, `syndication.twitter.com` dá 429 global, as 5 instâncias
 # Nitter testadas dão 403/400). O que dá para ler com a sessão do dono é a
-# timeline de UM PERFIL.
+# timeline de UM PERFIL ou a busca por ASSUNTO (f=live).
 class PlatformSearchTool < ToolBase
   description "Lê conteúdo DENTRO do YouTube, do Reddit, do Hacker News, do GitHub, do Polymarket " \
               "e do X (Twitter) pelo caminho nativo da própria plataforma, e devolve os permalinks. " \
-              "No youtube, no reddit, no hackernews, no github e no polymarket, `query` é o " \
+              "No youtube, no reddit, no hackernews, no github, no polymarket e no x, `query` é o " \
               "ASSUNTO procurado — 'acha um vídeo sobre X', 'o que o pessoal do Reddit diz sobre X', " \
               "'discussões do Hacker News sobre X', 'issues do GitHub sobre X', 'mercados do Polymarket " \
-              "sobre X'. No X é DIFERENTE e não há ambiguidade: NÃO existe busca por assunto no X, " \
-              "então `query` é o PERFIL (o @handle, com ou sem arroba) e o retorno são os posts " \
-              "MAIS RECENTES desse perfil — use para 'o que fulano postou no X', 'últimos tuítes " \
-              "do fulano'. Se o usuário pedir um ASSUNTO no X, não chute um perfil: diga que aqui " \
-              "só dá para listar os posts de um perfil informado. Para o resto da internet " \
+              "sobre X', 'tuítes sobre X'. No X, se `query` for um PERFIL com @ explícito (ex: '@jack'), " \
+              "a busca traz os posts MAIS RECENTES desse perfil ('o que fulano postou no X'). Se `query` " \
+              "for um assunto no X (frase sem @, ex: 'ruby rails' ou 'bitcoin'), faz a busca nativa por assunto. Para o resto da internet " \
               "(notícia, preço, documentação, site), use web_search: ela NÃO acha permalink de " \
               "YouTube, Reddit, Hacker News, GitHub, Polymarket nem X, os buscadores web não indexam isso. " \
               "Depois de escolher um resultado, passe a `url` para page_fetch para ler a transcrição " \
@@ -39,7 +37,7 @@ class PlatformSearchTool < ToolBase
 
   param :query,    type: :string,
                    desc: "No youtube, reddit, hackernews, github e polymarket: o assunto procurado " \
-                         "(1-200 chars). No x: o perfil/handle a listar, com ou sem @ (1-15 chars [A-Za-z0-9_])",
+                         "(1-200 chars). No x: o perfil com @ explícito (ex: '@jack') para posts do perfil ou o assunto sem @ (ex: 'ruby rails')",
                    required: true
   param :platform, type: :string,
                    desc: "Onde ler: youtube | reddit | hackernews | github | polymarket | x",
@@ -56,7 +54,7 @@ class PlatformSearchTool < ToolBase
     "polymarket"  => Fetcher::Channels::Polymarket
   }.freeze
 
-  # Plataformas em que `query` é perfil, não assunto. Uma lista em vez de um `if
+  # Plataformas em que `query` pode ser perfil. Uma lista em vez de um `if
   # nome == "x"` porque a pergunta ("este canal lê perfil?") vai ser feita em
   # três pontos, e espalhar o nome literal é como se esquece um deles.
   POR_PERFIL = %w[x].freeze
@@ -82,18 +80,13 @@ class PlatformSearchTool < ToolBase
       return error("plataforma desconhecida: #{platform.inspect} — válidas: #{PLATFORMS.keys.join(', ')}")
     end
 
-    alvo = por_perfil?(nome) ? perfil(q) : q
-    # Handle inválido é frase de busca no lugar do perfil: erro que ENSINA a
-    # fronteira, e antes de gastar Chrome com `x.com/<frase>`.
-    return error(erro_de_perfil(nome, q)) if alvo.nil?
+    handle = por_perfil?(nome) ? perfil(q) : nil
+    alvo   = handle || q
 
     n = limit ? clamp(limit, MIN_LIMIT, MAX_LIMIT) : DEFAULT_LIMIT
-    resultados = Array(ler(nome, canal, alvo, n))
+    resultados = Array(ler(nome, canal, alvo, n, is_profile: handle.present?))
 
-    # Plataformas POR_PERFIL (X) têm contrato cronológico ("posts mais
-    # recentes") — reordenar por popularidade quebraria a promessa da tool.
-    # O scoring temático só se aplica a busca por ASSUNTO (youtube/reddit).
-    reordenados = por_perfil?(nome) ? resultados : sort_resultados(resultados, alvo)
+    reordenados = handle.present? ? resultados : sort_resultados(resultados, alvo)
 
     success({ platform: nome, query: alvo, count: reordenados.size, results: reordenados })
   rescue Fetcher::CookieJar::Expired => e
@@ -117,25 +110,19 @@ class PlatformSearchTool < ToolBase
     POR_PERFIL.include?(nome)
   end
 
-  # No X o parâmetro não é busca: é navegação até `x.com/<handle>`. O canal
-  # valida de novo (é o portão de verdade), mas validar aqui é o que impede a
-  # chamada de custar um Chrome e uma requisição na conta pessoal do dono.
+  # No X o parâmetro pode ser perfil (navegação até `x.com/<handle>`).
   def perfil(bruto)
-    limpo = bruto.delete_prefix("@").strip
+    str = bruto.to_s.strip
+    return unless str.start_with?("@")
+
+    limpo = str.delete_prefix("@").strip
     limpo if limpo.match?(Fetcher::Channels::X::HANDLE)
   end
 
-  def erro_de_perfil(nome, bruto)
-    "no #{nome} o parâmetro `query` é um PERFIL, não um assunto — #{bruto.inspect} não é um handle " \
-      "válido (1-15 caracteres [A-Za-z0-9_], com ou sem @). Busca por assunto no #{nome} não existe " \
-      "nesta ferramenta: informe o @perfil de quem se quer ler os posts recentes"
-  end
-
-  # Cada canal tem o verbo do que ele sabe fazer: os dois com busca nativa
-  # expõem `search(query:)`, e o X expõe `timeline(user:)`. Uniformizar o nome
-  # esconderia justamente a diferença que o modelo precisa enxergar.
-  def ler(nome, canal, alvo, limite)
-    return canal.timeline(user: alvo, limit: limite) if por_perfil?(nome)
+  # Cada canal tem o verbo do que ele sabe fazer: busca por perfil chama `timeline`,
+  # busca por assunto chama `search`.
+  def ler(nome, canal, alvo, limite, is_profile: false)
+    return canal.timeline(user: alvo, limit: limite) if is_profile
 
     canal.search(query: alvo, limit: limite)
   end

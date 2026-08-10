@@ -192,8 +192,9 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
   end
 
   # ---------------------------------------------------------------------------
-  # X (Twitter) — aqui `query` NÃO é assunto, é perfil. Busca por assunto no X
-  # não existe neste bot, e o modelo não pode ficar adivinhando qual dos dois é.
+  # X (Twitter) — `query` pode ser perfil (@handle → timeline) ou assunto
+  # (termo sem @ → busca por assunto). A tool faz a fronteira e o modelo
+  # precisa enxergar a diferença em vez de adivinhar.
   # ---------------------------------------------------------------------------
 
   POSTS = [
@@ -202,11 +203,11 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
       "likes" => 1234, "retweets" => nil, "replies" => nil }
   ].freeze
 
-  test "no x a query e o perfil, e o roteamento vai para timeline" do
+  test "no x a query com @ e o perfil, e o roteamento vai para timeline" do
     Fetcher::Channels::X.expects(:timeline).with(user: "jack", limit: 10).returns(POSTS)
     Fetcher::Channels::X.expects(:search).never
 
-    result = PlatformSearchTool.new.execute(query: "jack", platform: "x")
+    result = PlatformSearchTool.new.execute(query: "@jack", platform: "x")
 
     assert_equal :success, result[:status]
     assert_equal "x", result[:data][:platform]
@@ -218,37 +219,50 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     Fetcher::Channels::X.expects(:timeline).with(user: "jack", limit: 10).twice.returns([])
 
     assert_equal :success, PlatformSearchTool.new.execute(query: " @jack ", platform: "x")[:status]
-    assert_equal :success, PlatformSearchTool.new.execute(query: "jack", platform: "x")[:status]
+    assert_equal :success, PlatformSearchTool.new.execute(query: "@jack", platform: "x")[:status]
   end
 
-  # Se o modelo tratar o X como busca por assunto, a resposta tem de ENSINAR a
-  # fronteira — não abrir Chrome para carregar `x.com/<frase>`.
-  test "assunto no lugar do perfil vira erro que ensina, sem tocar no canal" do
+  test "termo de 1 palavra sem @ no x e roteado para search e passa pelo scorer" do
     Fetcher::Channels::X.expects(:timeline).never
+    Fetcher::Channels::X.expects(:search).with(query: "bitcoin", limit: 10).returns(POSTS)
 
-    result = PlatformSearchTool.new.execute(query: "o que estao falando de ruby", platform: "x")
+    result = PlatformSearchTool.new.execute(query: "bitcoin", platform: "x")
 
-    assert_equal :error, result[:status]
-    assert_includes result[:reason], "perfil"
-    assert_includes result[:reason], "@"
+    assert_equal :success, result[:status]
+    assert_equal "x", result[:data][:platform]
+    # O Scorer acrescenta relevance_score sobre os resultados do canal, como no
+    # youtube e no reddit — ver asserções em ~linhas 41/57.
+    assert_kind_of Float, result[:data][:results].first["relevance_score"]
+  end
+
+  test "query nao-perfil no x e roteada para X.search e passa pelo scorer" do
+    Fetcher::Channels::X.expects(:timeline).never
+    Fetcher::Channels::X.expects(:search).with(query: "ruby rails", limit: 10).returns(POSTS)
+
+    result = PlatformSearchTool.new.execute(query: "ruby rails", platform: "x")
+
+    assert_equal :success, result[:status]
+    assert_equal "x", result[:data][:platform]
+    assert_equal "https://x.com/jack/status/1001", result[:data][:results].first["url"]
+    assert_kind_of Float, result[:data][:results].first["relevance_score"]
   end
 
   test "limite no x e clampado igual aos outros" do
     Fetcher::Channels::X.expects(:timeline).with(user: "jack", limit: PlatformSearchTool::MAX_LIMIT).returns([])
 
-    assert_equal :success, PlatformSearchTool.new.execute(query: "jack", platform: "x", limit: 999)[:status]
+    assert_equal :success, PlatformSearchTool.new.execute(query: "@jack", platform: "x", limit: 999)[:status]
   end
 
   test "rate limit e sessao expirada do x viram erro nomeado, nunca lista vazia" do
     Fetcher::Channels::X.stubs(:timeline).raises(Fetcher::Channels::X::RateLimited.new("x.com"))
-    limitado = PlatformSearchTool.new.execute(query: "jack", platform: "x")
+    limitado = PlatformSearchTool.new.execute(query: "@jack", platform: "x")
 
     assert_equal :error, limitado[:status]
     assert_includes limitado[:reason], "x.com"
 
     Fetcher::Channels::X.unstub(:timeline)
     Fetcher::Channels::X.stubs(:timeline).raises(Fetcher::CookieJar::Expired.new("x.com"))
-    sem_sessao = PlatformSearchTool.new.execute(query: "jack", platform: "x")
+    sem_sessao = PlatformSearchTool.new.execute(query: "@jack", platform: "x")
 
     assert_equal :error, sem_sessao[:status]
     assert_includes sem_sessao[:reason], "sessão"
@@ -258,35 +272,42 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
   test "timeline ilegivel vira erro nomeado, nao sucesso com zero posts" do
     Fetcher::Channels::X.stubs(:timeline).raises(Fetcher::Channels::X::TimelineFailed.new)
 
-    result = PlatformSearchTool.new.execute(query: "jack", platform: "x")
+    result = PlatformSearchTool.new.execute(query: "@jack", platform: "x")
 
     assert_equal :error, result[:status]
     assert_includes result[:reason], "timeline", "o motivo do canal chega ao modelo, nao um sucesso vazio"
   end
 
+  # Busca por assunto no X que falha — a tool deve devolver erro nomeado (hash
+  # com :error), espelhando o padrão do teste de erro da timeline acima.
+  test "busca ilegivel no x vira erro nomeado via SearchFailed, nao sucesso com zero posts" do
+    Fetcher::Channels::X.stubs(:search).raises(Fetcher::Channels::X::SearchFailed.new)
+
+    result = PlatformSearchTool.new.execute(query: "ruby rails", platform: "x")
+
+    assert_equal :error, result[:status]
+    assert_includes result[:reason], "busca", "o motivo do canal chega ao modelo, nao um sucesso vazio"
+  end
+
   test "x aparece entre as plataformas validas quando o modelo erra o nome" do
-    result = PlatformSearchTool.new.execute(query: "jack", platform: "twitter")
+    result = PlatformSearchTool.new.execute(query: "@jack", platform: "twitter")
 
     assert_equal :error, result[:status]
     assert_includes result[:reason], "x"
   end
 
-  # Sem isto escrito na description, o modelo manda assunto para o X e recebe
-  # erro em toda chamada — ou pior, entende o resultado de um perfil como se
-  # fosse busca por assunto.
-  test "a description diz que no X e perfil e nao assunto" do
+  test "a description explica a busca por perfil e por assunto no X" do
     desc = PlatformSearchTool.description.to_s
 
     assert_includes desc, "X"
     assert_match(/perfil/i, desc)
-    assert_match(/recentes/i, desc)
-    assert_match(/n(ã|a)o (é|e) busca por assunto|n(ã|a)o existe busca por assunto/i, desc)
+    assert_match(/assunto/i, desc)
   end
 
   test "a description do parametro query explica o duplo papel" do
     query = PlatformSearchTool.parameters[:query]
 
-    assert_match(/perfil|handle/i, query.description.to_s)
+    assert_match(/perfil|handle|assunto/i, query.description.to_s)
   end
 
   test "parametro inventado pelo modelo e ignorado, nao derruba a chamada" do

@@ -10,6 +10,10 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-10]** Feature — Busca por assunto no X (`X.search`, `SearchFailed`, `SEARCH_BUDGET` 30/h, fronteira `@perfil`/assunto da tool `PlatformSearchTool`).
+  - `Fetcher::Channels::X.search(query:, limit: 10)`: busca nativa no X com `f=live&src=typed_query`. Detecção do estado vazio legítimo via marcador `[data-testid="empty_state_header_text"]` (retorna `[]`); sem marcador, levanta `SearchFailed`. `SEARCH_BUDGET` e `TIMELINE_BUDGET` reduzidos para 30/h (4/min) mantendo teto da conta do dono em ~60/h. Mensagem de `RateLimited` inclui o escopo (`[timeline]` / `[search]`).
+  - `PlatformSearchTool`: exige `@` explícito para perfis (ex: `@jack` -> `X.timeline`); termos sem `@` (frases ou palavras soltas ex: `bitcoin` ou `ruby rails`) acionam `X.search`.
+  - Prompts do chatbot (`chatbot.yml`) e MCP tool (`platform_search.rb`) atualizados para refletir a busca por assunto no X.
 - **[2026-08-10]** Tarefa F6-A — busca por assunto nos canais Hackernews, Github e Polymarket (`lib/fetcher/channels/`) + ajustes no `Research::Signals` e `Research::Scorer`.
   - `Hackernews.search(query:, limit: 10)`: busca em Algolia API com filtro `created_at_i>30d_epoch`, devendo `comments` (num_comments), `points`, `author`, `created_at` ISO e `external_url` separado.
   - `Github.search(query:, limit: 10)`: busca REST API `/search/issues` com `created:>=30d`, `sort=reactions`, achatamento de `reactions` (total_count Numeric) e fallback gracioso `[]` para 403/429/5xx.
@@ -178,6 +182,7 @@
 
 - [ ] Estratégia de rate-limiting para scraping multi-plataforma (Twitter vs. Instagram)
 - [ ] Escolha final de browser headless para Docker: Ferrum vs. Nodriver (Python)
+- [ ] **DÍVIDA**: busca no X pode conter post promovido (anúncio entra como `article[data-testid="tweet"]`); sem marcador confiável medido — reavaliar com medição ao vivo.
 
 ---
 
@@ -236,6 +241,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | 2026-03-30 | Correções script↔guia: KexAlgorithms pós-quântico (sntrup761x25519) no SSH, tabela de fases 9→10 com NTP/Chrony (FASE 7), Fail2Ban dual jail, troubleshooting zRAM. | Contexto Ativo |
 | 2026-08-09 | Decisão arquitetural registrada: execução Python via sidecar HTTP autenticado (8080, `PYTHON_SCRAPER_TOKEN`) em vez de `Open3` in-process. | Padrões Ratificados |
 | 2026-08-10 | Fase 3 implementada e revisada: fusão RRF + clustering (`lib/research/fusion.rb`, `lib/research/cluster.rb`). Decisão de escala registrada (local_relevance como score de trabalho, rrf para ordenação). Entity-cluster da Fase 4 adiado (depende de entity_extract). | Contexto Ativo, Padrões Ratificados, Lições Aprendidas |
+| 2026-08-10 | Atualização da busca por assunto no X: X.search com marcador de estado vazio `empty_state_header_text`, SEARCH_BUDGET/TIMELINE_BUDGET (30/h), scope em RateLimited e fronteira @perfil/assunto em PlatformSearchTool. | Contexto Ativo, Padrões Ratificados |
 
 ---
 
@@ -244,5 +250,5 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 - **Headers extras no SafeHttpClient com regra de origem**: `get(url, headers:)` envia os headers apenas na origem original; redirect SAME-ORIGIN (scheme+host+porta normalizada) preserva, qualquer mudança de origem (cross-host, downgrade HTTPS→HTTP, origem inparseável) limpa — fail-closed. Motivo: `Authorization: Bearer` do canal GitHub não pode vazar para outro domínio, mas repo transferido (redirect 301 same-host) precisa manter a autenticação.
 - **Teto externo por URL no ExtractService**: `TOTAL_PER_URL_TIMEOUT = CHANNEL_TIMEOUT` (40s) imposto por `Timeout.timeout` em volta de toda a extração em `ExtractService.call`. O caminho comum (estático 25s + browser 25s) roda SEQUENCIAL e gastaria 50s/URL; o teto externo torna a conta "2 ondas × 40s = 80s < 90s" do reader verdadeira. `Timeout::Error` vira failure no contrato, nunca 500.
 - **Política de erro de canal**: erro de API (não-2xx nomeado) NÃO faz fallback para o caminho comum — vira `error` por URL. Exceção deliberada: GitHub 403/429/5xx devolve nil (escala para o HTML) porque a cota anônima de 60 req/h estouraria e derrubaria TODAS as issues; 404 continua erro nomeado (`IssueNotFound`).
-- **Canais não cobram rate limit próprio**: `HostRateLimiter.exceeded?` só no ExtractService (via `budget_for` com `MAX_PER_WINDOW` do canal). Cobrança dupla (canal + serviço) derrubava o teto efetivo para 2/min (medido 09/08).
+- **Canais não cobram rate limit próprio no ExtractService**: `HostRateLimiter.exceeded?` no ExtractService (via `budget_for` com `MAX_PER_WINDOW` do canal) previne cobrança dupla. Exceção deliberada: `Fetcher::Channels::X` cobra orçamentos próprios logados (`TIMELINE_BUDGET` e `SEARCH_BUDGET`, 30 req/h cada, 4 req/min com escopo na mensagem de `RateLimited`) para proteger a conta pessoal do dono.
 - **`/market/` do Polymarket não é canal**: a Gamma API de eventos só responde slug de evento; rotear `/market/` produziria `EventNotFound` duro. Market cai no caminho comum (nil).

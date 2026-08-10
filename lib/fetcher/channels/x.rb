@@ -42,9 +42,10 @@ module Fetcher
       # nomeado; devolver lista vazia faria o modelo concluir "esse perfil não
       # tem posts".
       class RateLimited < Error
-        def initialize(host)
-          super("rate limit local: #{host} atingiu #{TIMELINE_BUDGET[:max]} leitura(s)/min " \
-                "ou #{TIMELINE_BUDGET[:per_hour]}/hora — repita daqui a pouco")
+        def initialize(host, budget = TIMELINE_BUDGET)
+          scope_suffix = budget[:scope] ? " [#{budget[:scope]}]" : ""
+          super("rate limit local: #{host} atingiu #{budget[:max]} leitura(s)/min " \
+                "ou #{budget[:per_hour]}/hora#{scope_suffix} — repita daqui a pouco")
         end
       end
 
@@ -66,6 +67,15 @@ module Fetcher
         end
       end
 
+      class SearchFailed < Error
+        SEM_PERMALINK = "trouxe artigos e nenhum permalink de post legível — o seletor do link mudou " \
+                        "ou a página não é a da busca"
+
+        def initialize(sintoma = "veio ilegível — o seletor mudou ou a página não é a da busca")
+          super("busca de x.com #{sintoma}")
+        end
+      end
+
       DEFAULT_MIRROR = "api.fxtwitter.com"
       # `/i/status/123` é a forma sem autor que o próprio X gera ao compartilhar.
       STATUS_PATH = %r{\A/(?<user>[A-Za-z0-9_]{1,15}|i)/status(?:es)?/(?<id>\d+)}
@@ -75,14 +85,15 @@ module Fetcher
       COOKIE_DOMAIN  = "x.com"
       CANONICAL_HOST = "x.com"
       # Dois caminhos, dois custos, dois baldes. O espelho (`fetch`) não usa a
-      # sessão do dono e usa o teto da casa; a timeline usa, e é ela que precisa
-      # de freio. Um balde só fazia o extract de um permalink derrubar a leitura
-      # de timeline do bot — medido em 06/08.
+      # sessão do dono e usa o teto da casa; a timeline e a busca usam, e são elas
+      # que precisam de freio. Um balde só fazia o extract de um permalink derrubar
+      # a leitura de timeline/busca do bot — medido em 06/08.
       #
-      # 4/min com 60/h mantém a média sustentada de 1/min de antes, com folga
-      # para bot e reader caírem no mesmo minuto. Os 60 saem da nossa demanda
+      # 4/min com 30/h para cada serviço mantém o teto da conta em ~60/h agregado,
+      # com folga para bot e reader caírem no mesmo minuto. Os 30 saem da nossa demanda
       # medida (nada agendado lê o X), NÃO de medida da tolerância do X.
-      TIMELINE_BUDGET = { scope: "timeline", max: 4, per_hour: 60 }.freeze
+      TIMELINE_BUDGET = { scope: "timeline", max: 4, per_hour: 30 }.freeze
+      SEARCH_BUDGET   = { scope: "search", max: 4, per_hour: 30 }.freeze
       MIRROR_BUDGET   = { scope: "mirror", max: HostRateLimiter::MAX_PER_WINDOW }.freeze
 
       # Orçamento do caminho que o `/internal/extract` usa: permalink por espelho.
@@ -190,7 +201,8 @@ module Fetcher
                 replies: contador(a, "reply")
               });
             }
-            return JSON.stringify(out);
+            var empty = document.querySelector('[data-testid="empty_state_header_text"]') != null;
+            return JSON.stringify({ items: out, empty: empty });
           } catch (e) {
             return null;
           }
@@ -274,7 +286,8 @@ module Fetcher
         def from_timeline_page(page:, user:, limit: MAX_RESULTADOS)
           handle = handle!(user)
           n = clamp_limit(limit)
-          brutos = coletar(page, n)
+          res = coletar(page, n)
+          brutos = res[:items]
           # Zero artigos não é "perfil sem posts" — ver `TimelineFailed`.
           raise TimelineFailed if brutos.empty?
 
@@ -291,6 +304,41 @@ module Fetcher
           lidos.select { |lido| lido["screen_name"].casecmp?(handle) }.first(n)
         end
 
+        # Busca por assunto no X (Twitter), renderizada no Chrome com a sessão do
+        # dono.
+        #
+        # Mesmo contrato de `Youtube.search` e `Reddit.search`: Array de Hash de
+        # chaves STRING.
+        def search(query:, limit: 10)
+          termo = query.to_s.strip
+          return [] if termo.empty?
+
+          CookieJar.require!(COOKIE_DOMAIN)
+          raise RateLimited.new(COOKIE_DOMAIN, SEARCH_BUDGET) if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **SEARCH_BUDGET)
+
+          BrowserSession.with_page(search_url(termo)) do |page|
+            from_search_page(page: page, limit: limit)
+          end
+        end
+
+        # Público pelo mesmo motivo de `from_timeline_page`: é por aqui que o
+        # teste entra sem precisar de um Chrome.
+        def from_search_page(page:, limit: MAX_RESULTADOS)
+          n = clamp_limit(limit)
+          res = coletar(page, n, error_class: SearchFailed)
+          brutos = res[:items]
+          if brutos.empty?
+            return [] if res[:empty]
+
+            raise SearchFailed
+          end
+
+          lidos = brutos.filter_map { |bruto| item(bruto) }
+          raise SearchFailed, SearchFailed::SEM_PERMALINK if lidos.empty?
+
+          lidos.first(n)
+        end
+
         # Devolve [usuario, id] ou nil. `nil` significa "não é post meu" — perfil,
         # busca e home seguem pelo caminho comum.
         def status_from(url)
@@ -304,6 +352,10 @@ module Fetcher
         end
 
         private
+
+        def search_url(termo)
+          "https://#{CANONICAL_HOST}/search?#{URI.encode_www_form(q: termo, f: 'live', src: 'typed_query')}"
+        end
 
         # Aceita com e sem "@" e valida o formato ANTES de qualquer gasto.
         def handle!(bruto)
@@ -330,19 +382,24 @@ module Fetcher
         # permalink; item sem permalink entra pelo próprio hash, porque ele ainda
         # conta como "vi um artigo" (é o que separa página ilegível de perfil sem
         # post).
-        def coletar(page, alvo)
+        def coletar(page, alvo, error_class: TimelineFailed)
           vistos = {}
           rolagens = 0
+          vazio_detectado = false
+
           (ULTIMA_PASSADA + 1).times do |passada|
-            lote = parse_lote(page.evaluate(TIMELINE_JS))
-            raise TimelineFailed unless lote.is_a?(Array)
+            lote_data = parse_lote(page.evaluate(TIMELINE_JS))
+            raise error_class unless lote_data.is_a?(Hash)
+
+            lote = lote_data[:items]
+            vazio_detectado ||= lote_data[:empty]
 
             antes = vistos.size
             lote.each { |bruto| vistos[bruto.is_a?(Hash) ? (bruto["url"] || bruto) : bruto] ||= bruto }
             # `vistos.any?` no meio da condição é o conserto de 05/08: com a lista
             # AINDA vazia, "a contagem não cresceu" não significa que acabou —
             # significa que a página não hidratou. Ver `aguardar_hidratacao`.
-            break if vistos.size >= alvo || (vistos.any? && vistos.size == antes) || passada == ULTIMA_PASSADA
+            break if vistos.size >= alvo || (vistos.any? && vistos.size == antes) || (vazio_detectado && vistos.empty?) || passada == ULTIMA_PASSADA
 
             # Enquanto não veio artigo nenhum, rolar não adianta: não há lista
             # virtualizada para avançar, só React que ainda não montou. Espera —
@@ -358,7 +415,7 @@ module Fetcher
               rolagens += 1
             end
           end
-          vistos.values
+          { items: vistos.values, empty: vazio_detectado }
         end
 
         # `x.com` e SPA React: o `go_to` volta quando o documento carrega, ANTES de
@@ -385,9 +442,17 @@ module Fetcher
         end
 
         def parse_lote(bruto)
-          return bruto if bruto.is_a?(Array)
-
-          JSON.parse(bruto.to_s)
+          parsed = bruto.is_a?(Array) || bruto.is_a?(Hash) ? bruto : JSON.parse(bruto.to_s)
+          if parsed.is_a?(Array)
+            { items: parsed, empty: false }
+          elsif parsed.is_a?(Hash)
+            {
+              items: Array(parsed["items"] || parsed[:items]),
+              empty: !!(parsed["empty"] || parsed[:empty])
+            }
+          else
+            nil
+          end
         rescue JSON::ParserError
           nil
         end

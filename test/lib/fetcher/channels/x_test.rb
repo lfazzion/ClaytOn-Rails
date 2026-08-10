@@ -158,7 +158,7 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
 
       @leituras += 1
       lote = @lotes[[@leituras - 1, @lotes.size - 1].min]
-      lote.is_a?(Array) ? JSON.generate(lote) : lote
+      lote.is_a?(Array) || lote.is_a?(Hash) ? JSON.generate(lote) : lote
     end
   end
 
@@ -425,8 +425,8 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
 
   # No X quem paga a rajada é a CONTA PESSOAL do dono, não só o IP. A rajada é mais
   # frouxa que a do YouTube de propósito (4/min contra 2/min), para bot e reader não
-  # se atropelarem no mesmo minuto — mas o VOLUME sustentado é mais apertado: 60/h
-  # é 1/min de média, metade do que o teto do YouTube permitiria.
+  # se atropelarem no mesmo minuto — mas o VOLUME sustentado é mais apertado: 30/h
+  # é 1/2/min de média, metade do que o teto do YouTube permitiria.
   test "limitador barra antes de abrir o browser, e o volume sustentado e mais conservador que o do youtube" do
     Fetcher::CookieJar.stubs(:valid?).returns(true)
     Fetcher::HostRateLimiter.expects(:exceeded?)
@@ -449,9 +449,129 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     assert_includes js, '[data-testid="tweetText"]'
     assert_includes js, "time"
     %w[like retweet reply].each { |c| assert_includes js, c }
+    # O JS de produção devolve {items, empty} (hash) — não um Array puro. O teste
+    # de contrato fixa que ambas as chaves estão presentes no JS, para que a
+    # camada de leitura Ruby dependa delas sem ramo de compatibilidade.
+    assert_match /items\s*:/, js
+    assert_match /empty\s*:/, js
+    assert_match /empty_state_header_text/, js
     # Um seletor que mudou tem de virar campo nulo, não exceção que derruba a
     # chamada inteira — é o que o Reddit já faz.
     assert_operator js.scan("catch").size, :>=, 4
     refute_match(/querySelector\(\s*['"]\s*>/, js)
+  end
+
+  # O JS de produção devolve {items, empty} (hash). Este teste usa FakePage
+  # devolvendo esse formato real e confirma que from_timeline_page decodifica e
+  # devolve o item — sem ele, a camada Ruby só é testada contra Array (ramo de
+  # compatibilidade que produção nunca emite).
+  test "from_timeline_page aceita o formato real do JS ({items, empty}) e devolve os posts" do
+    Kernel.stubs(:sleep)
+    post = raw_post(id: 7001, text: "formato real do hash")
+    hash_real = { "items" => [post], "empty" => false }
+
+    itens = from_timeline([hash_real])
+
+    assert_equal 1, itens.size
+    assert_equal "https://x.com/jack/status/7001", itens.first["url"]
+    assert_equal "formato real do hash", itens.first["text"]
+  end
+
+  # ---------------------------------------------------------------------------
+  # Busca por assunto (X.search / X.from_search_page)
+  # ---------------------------------------------------------------------------
+
+  def from_search(lotes, limit: 10)
+    Fetcher::Channels::X.from_search_page(page: FakePage.new(lotes), limit: limit)
+  end
+
+  test "from_search_page com busca com resultados devolve hash de chaves string" do
+    lote = [raw_post(id: 5001, user: "alice", text: "ruby on rails 8.1")]
+    itens = from_search([lote])
+
+    assert_equal 1, itens.size
+    assert_equal %w[url text author screen_name created_at likes retweets replies].sort, itens.first.keys.sort
+    assert_equal "https://x.com/alice/status/5001", itens.first["url"]
+    assert_equal "ruby on rails 8.1", itens.first["text"]
+    assert_equal "alice", itens.first["screen_name"]
+  end
+
+  test "from_search_page com busca vazia legitima devolve array vazio sem erro" do
+    Kernel.stubs(:sleep)
+    itens = from_search([{ "items" => [], "empty" => true }])
+
+    assert_equal [], itens
+  end
+
+  test "from_search_page sem artigos e sem marcador de estado vazio vira SearchFailed" do
+    Kernel.stubs(:sleep)
+    erro = assert_raises(Fetcher::Channels::X::SearchFailed) { from_search([[]]) }
+
+    assert_kind_of Fetcher::Channels::Error, erro
+    assert_includes erro.message, "busca"
+  end
+
+  test "from_search_page com JSON invalido vira SearchFailed" do
+    erro = assert_raises(Fetcher::Channels::X::SearchFailed) { from_search([nil]) }
+
+    assert_kind_of Fetcher::Channels::Error, erro
+    assert_includes erro.message, "busca"
+  end
+
+  test "from_search_page com artigos sem permalink legivel vira SearchFailed" do
+    Kernel.stubs(:sleep)
+    cegos = Array.new(3) { |i| raw_post(id: i + 1, extras: { "url" => nil }) }
+
+    erro = assert_raises(Fetcher::Channels::X::SearchFailed) { from_search([cegos]) }
+
+    assert_includes erro.message, "permalink"
+    assert_includes erro.message, "busca"
+  end
+
+  test "search com query vazia devolve lista vazia sem abrir browser" do
+    Fetcher::BrowserSession.expects(:with_page).never
+
+    assert_equal [], Fetcher::Channels::X.search(query: "   ")
+  end
+
+  test "search navega na URL de busca com f=live e o termo codificado" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+    Fetcher::BrowserSession.expects(:with_page)
+                           .with("https://x.com/search?q=ruby+rails&f=live&src=typed_query")
+                           .returns([])
+
+    Fetcher::Channels::X.search(query: "ruby rails")
+  end
+
+  test "search sem sessao no jar levanta Expired nomeando x.com, antes do browser" do
+    Fetcher::CookieJar.stubs(:valid?).returns(false)
+    Fetcher::BrowserSession.expects(:with_page).never
+
+    erro = assert_raises(Fetcher::CookieJar::Expired) { Fetcher::Channels::X.search(query: "ruby") }
+
+    assert_equal "x.com", erro.domain
+  end
+
+  test "chamada de busca sem sessao nao queima cota do limitador" do
+    Fetcher::CookieJar.stubs(:valid?).returns(false)
+    Fetcher::HostRateLimiter.expects(:exceeded?).never
+    Fetcher::BrowserSession.expects(:with_page).never
+
+    assert_raises(Fetcher::CookieJar::Expired) { Fetcher::Channels::X.search(query: "ruby") }
+  end
+
+  test "search com rate limit estoura RateLimited nomeando x.com e o orcamento de busca" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.expects(:exceeded?)
+                            .with("x.com", **Fetcher::Channels::X::SEARCH_BUDGET)
+                            .returns(true)
+    Fetcher::BrowserSession.expects(:with_page).never
+
+    erro = assert_raises(Fetcher::Channels::X::RateLimited) { Fetcher::Channels::X.search(query: "ruby") }
+
+    assert_includes erro.message, "x.com"
+    assert_includes erro.message, "search"
+    assert Fetcher::Channels::X::RateLimited < Fetcher::Channels::Error
   end
 end
