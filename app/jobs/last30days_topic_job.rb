@@ -115,35 +115,11 @@ class Last30DaysTopicJob < ApplicationJob
   end
 
   def send_message_chunks(channel_id, message)
-    if message.length <= 2000
-      DiscordApiClient.send_message(channel_id, message)
-    else
-      chunks = chunk_text(message, limit: 1900)
-      chunks.each do |chunk|
-        DiscordApiClient.send_message(channel_id, chunk)
-      end
+    # Achado 5 (PR #36): chunking delegado ao helper único
+    # DiscordMessageChunker (Zeitwerk carrega app/services; SEM require_relative,
+    # que quebraria o eager_load — lição da noite). Cada chunk vira um envio.
+    DiscordMessageChunker.chunk(message).each do |chunk|
+      DiscordApiClient.send_message(channel_id, chunk)
     end
-  end
-
-  def chunk_text(text, limit: 1900)
-    lines = text.split("\n")
-    chunks = []
-    current_chunk = []
-    current_length = 0
-
-    lines.each do |line|
-      line_len = line.length + 1
-      if current_length + line_len > limit && current_chunk.any?
-        chunks << current_chunk.join("\n")
-        current_chunk = [line]
-        current_length = line_len
-      else
-        current_chunk << line
-        current_length += line_len
-      end
-    end
-
-    chunks << current_chunk.join("\n") if current_chunk.any?
-    chunks
   end
 end

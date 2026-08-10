@@ -241,5 +241,31 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_not_nil snapshot
     assert_equal 1000, snapshot.views_count
   end
+
+  # Achado 1+3 — build_channel_url deve priorizar channel ID canônico (case preservado)
+  test 'build_channel_url usa /channel/ com case preservado quando platform_user_id é channel ID' do
+    channel_id = 'UCn8SzhX6Z1qW9_123456789'
+    profile = create(:social_profile, :youtube,
+                     platform_username: channel_id,
+                     platform_user_id: channel_id)
+
+    assert_equal "https://www.youtube.com/channel/#{channel_id}",
+                 ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
+  test 'build_channel_url usa /@handle/ quando platform_user_id não é channel ID' do
+    profile = create(:social_profile, :youtube, platform_username: 'handle_nao_id', platform_user_id: 'UC123')
+
+    assert_equal 'https://www.youtube.com/@handle_nao_id',
+                 ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
+  test 'build_channel_url cai em /channel/ por platform_user_id quando username em branco' do
+    profile = create(:social_profile, :youtube, platform_username: 'some_channel', platform_user_id: 'abc123')
+    profile.update_columns(platform_username: '')
+
+    assert_equal 'https://www.youtube.com/channel/abc123',
+                 ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
 end
 

@@ -41,6 +41,24 @@ class SocialProfileTest < ActiveSupport::TestCase
     assert_equal "tegece", profile.platform_username
   end
 
+  test "should preserve case of youtube channel ID in platform_username" do
+    channel_id = "UCn8SzhX6Z1qW9_123456789"
+
+    profile = build(:social_profile, :youtube, platform_username: channel_id)
+    profile.valid?
+
+    assert_equal channel_id, profile.platform_username
+  end
+
+  test "youtube channel ID should build canonical /channel/ platform_url" do
+    channel_id = "UCn8SzhX6Z1qW9_123456789"
+
+    profile = create(:social_profile, :youtube, platform_username: channel_id, platform_user_id: channel_id)
+
+    assert_equal "https://www.youtube.com/channel/#{channel_id}", profile.platform_url
+    assert_equal "https://www.youtube.com/channel/#{channel_id}", profile[:platform_url], 'coluna platform_url deve ser gravada com a URL canônica'
+  end
+
   test "should be unique per platform and platform_user_id" do
     create(:social_profile, platform: "twitter", platform_user_id: "12345")
     duplicate = build(:social_profile, platform: "twitter", platform_user_id: "12345")

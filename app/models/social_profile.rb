@@ -3,6 +3,12 @@
 class SocialProfile < ApplicationRecord
   PLATFORMS = %w[twitter instagram youtube tiktok].freeze
 
+  # Channel ID canônico do YouTube: "UC" + 22 chars [A-Za-z0-9_-].
+  # Case significativo — o @handle e o channel ID vivem em namespaces
+  # distintos no YouTube; um ID downcasado vira um handle que não resolve
+  # e a coleta morre em silêncio (achado 1/3 do PR #36).
+  CHANNEL_ID_PATTERN = /\AUC[A-Za-z0-9_-]{22}\z/
+
   has_many :social_posts, dependent: :destroy
   has_many :profile_snapshots, dependent: :destroy
 
@@ -46,11 +52,7 @@ class SocialProfile < ApplicationRecord
     case platform
     when "instagram" then "https://www.instagram.com/#{platform_username}/"
     when "twitter" then "https://twitter.com/#{platform_username}/"
-    when "youtube" then begin
-      "https://www.youtube.com/@#{platform_username}"
-    rescue StandardError
-      "https://www.youtube.com/channel/#{platform_user_id}"
-    end
+    when "youtube" then youtube_url
     when "tiktok" then "https://www.tiktok.com/@#{platform_username}/"
     end
   end
@@ -75,20 +77,25 @@ class SocialProfile < ApplicationRecord
   def normalize_platform_username
     return if platform_username.blank?
 
-    self.platform_username = platform_username.to_s.strip.sub(/\A@/, "").downcase
+    self.platform_username = platform_username.to_s.strip.sub(/\A@/, "")
+    self.platform_username = self.platform_username.downcase unless self.platform_username.match?(CHANNEL_ID_PATTERN)
   end
 
   def set_platform_url
-    self.platform_url ||= case platform
+    self[:platform_url] = case platform
                           when "instagram" then "https://www.instagram.com/#{platform_username}/"
                           when "twitter" then "https://twitter.com/#{platform_username}/"
-                          when "youtube" then begin
-                            "https://www.youtube.com/@#{platform_username}"
-                          rescue StandardError
-                            "https://www.youtube.com/channel/#{platform_user_id}"
-                          end
+                          when "youtube" then youtube_url
                           when "tiktok" then "https://www.tiktok.com/@#{platform_username}/"
                           end
+  end
+
+  def youtube_url
+    if platform_username.to_s.match?(CHANNEL_ID_PATTERN) || platform_user_id.to_s.match?(CHANNEL_ID_PATTERN)
+      "https://www.youtube.com/channel/#{platform_user_id}"
+    else
+      "https://www.youtube.com/@#{platform_username}"
+    end
   end
 end
 

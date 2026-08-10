@@ -2,6 +2,7 @@
 
 require 'test_helper'
 require_relative '../../app/services/discord_api_client'
+require_relative '../../app/services/discord_message_chunker'
 require_relative '../../app/jobs/weekly_digest_job'
 
 class WeeklyDigestJobTest < ActiveSupport::TestCase
@@ -34,13 +35,16 @@ class WeeklyDigestJobTest < ActiveSupport::TestCase
   end
 
 
-  test 'perform chunka digest longo quando excede 2000 chars' do
+  # Achado 5 (PR #36): o job DELEGA o chunking ao DiscordMessageChunker
+  # (helper único). O algoritmo migrou para o unit test do chunker
+  # (test/services/discord_message_chunker_test.rb) — lá o limite é verificado
+  # como <= 1900, mais estrito que o <= 2000 deste teste antigo. Aqui fica o
+  # contrato de integração: 1 chamada ao helper + 1 send_message por chunk
+  # devolvido (mensagem longa → 2 chunks → 2 envios).
+  test 'perform delega chunking ao DiscordMessageChunker devolvendo multiplos chunks' do
     ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
 
-    50.times do |i|
-      p = create(:social_profile, platform: 'youtube', platform_username: "very_long_username_#{i}_padding_text_to_inflate_length", followers_count: 10_000 + i)
-      create(:profile_snapshot, social_profile: p, followers_count: 9_000, recorded_at: 7.days.ago)
-    end
+    DiscordMessageChunker.expects(:chunk).returns(['chunk_um', 'chunk_dois'])
 
     sent_messages = []
     DiscordApiClient.stubs(:send_message).with do |_channel_id, msg|
@@ -51,10 +55,9 @@ class WeeklyDigestJobTest < ActiveSupport::TestCase
     job = WeeklyDigestJob.new
     job.perform
 
-    assert sent_messages.size > 1, 'Digest > 2000 chars deve ser dividido em mensagens'
-    sent_messages.each do |msg|
-      assert msg.length <= 2000, 'Cada chunk de mensagem deve ser <= 2000 chars'
-    end
+    assert_equal ['chunk_um', 'chunk_dois'], sent_messages,
+                 'job deve enviar 1 mensagem por chunk devolvido pelo helper'
+    assert sent_messages.size > 1, 'mensagem longa deve gerar multiplos envios'
 
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end

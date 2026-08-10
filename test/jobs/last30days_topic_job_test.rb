@@ -2,6 +2,7 @@
 
 require "test_helper"
 require_relative "../../app/services/discord_api_client"
+require_relative "../../app/services/discord_message_chunker"
 require_relative "../../app/jobs/last30days_topic_job"
 require_relative "../../app/models/topic"
 require_relative "../../app/models/topic_delivery"
@@ -166,5 +167,37 @@ class Last30DaysTopicJobTest < ActiveSupport::TestCase
     # 8 clusters × 3 itens = 24, NÃO 10×4=40
     assert_equal 24, count,
                  "Esperado exatamente 24 entregas (MAX_CLUSTERS 8 × MAX_ITEMS 3), mas gravou #{count}"
+  end
+
+  # Achado 5 (PR #36): o job DELEGA o chunking ao DiscordMessageChunker (helper
+  # único). O algoritmo migrou para o unit test do chunker
+  # (test/services/discord_message_chunker_test.rb); aqui verifica-se o
+  # contrato de integração: 1 chamada ao helper + 1 send_message por chunk.
+  test "perform delega chunking ao DiscordMessageChunker e envia 1 mensagem por chunk" do
+    clusters = [
+      {
+        "cluster_id" => "cluster-1",
+        "title" => "Cluster 1",
+        "sources" => ["github"],
+        "score" => 1.0,
+        "uncertainty" => nil,
+        "items" => [{ "title" => "Item 1", "url" => "https://example.com/1", "source" => "github", "key" => "key-1" }]
+      }
+    ]
+
+    Research::Fusion.stubs(:fuse).returns([{ "key" => "k", "title" => "t", "score" => 0.5 }])
+    Research::Cluster.stubs(:cluster).returns(clusters)
+    Fetcher::Channels::Hackernews.stubs(:search).returns([])
+    Fetcher::Channels::Github.stubs(:search).returns([])
+    Fetcher::Channels::Polymarket.stubs(:search).returns([])
+
+    DiscordMessageChunker.expects(:chunk).returns(["chunk_um", "chunk_dois"])
+    DiscordApiClient.expects(:send_message).with("123456", "chunk_um").returns(true)
+    DiscordApiClient.expects(:send_message).with("123456", "chunk_dois").returns(true)
+
+    job = Last30DaysTopicJob.new
+    res = job.perform(@topic.id, "123456")
+
+    assert res[:sent]
   end
 end

@@ -11,6 +11,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ENV['DISCORD_OWNER_IDS'] = '12345'
     Thread.current[:cleitin_actor] = { user_id: '12345', username: 'dono' }
     Thread.current[:cleitin_turn] = 'turn_setup'
+    Rails.cache.clear
   end
 
   teardown do
@@ -161,14 +162,14 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
   test 'normalize_handle preserva case de URL youtube /channel/' do
     tool = AddProfileTool.new
-    url = 'https://www.youtube.com/channel/UCn8SzhX6Z1qW9_1234567890'
+    url = 'https://www.youtube.com/channel/UCn8SzhX6Z1qW9_123456789'
     normalized = tool.send(:normalize_handle, url)
 
-    assert_equal 'UCn8SzhX6Z1qW9_1234567890', normalized
+    assert_equal 'UCn8SzhX6Z1qW9_123456789', normalized
   end
 
   test 'add_profile em youtube com URL /channel/ usa id sem downcase para platform_user_id e platform_username' do
-    channel_id = 'UCn8SzhX6Z1qW9_1234567890'
+    channel_id = 'UCn8SzhX6Z1qW9_123456789'
     metadata = {
       channel_id: channel_id,
       title: 'Canal ID Preservado',
@@ -188,7 +189,39 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     profile = SocialProfile.find_by(platform: 'youtube', platform_user_id: channel_id)
     assert_not_nil profile
     assert_equal channel_id, profile.platform_user_id
-    assert_equal channel_id.downcase, profile.platform_username
+    assert_equal channel_id, profile.platform_username
+  end
+
+  test 'add_profile com URL /channel/ cria perfil e build_channel_url monta URL de canal com case correto' do
+    channel_id = 'UCn8SzhX6Z1qW9_123456789'
+    metadata = {
+      channel_id: channel_id,
+      title: 'Canal ID Preservado',
+      subscriber_count: 5_000
+    }
+
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
+                                           .with("https://www.youtube.com/channel/#{channel_id}", timeout: 8)
+                                           .returns(metadata)
+    ScrapeYoutubeJob.stubs(:perform_later)
+
+    tool = AddProfileTool.new
+    result = tool.execute(platform: 'youtube', handle: "https://www.youtube.com/channel/#{channel_id}")
+
+    assert_equal :success, result[:status]
+    profile = SocialProfile.find_by(platform: 'youtube', platform_user_id: channel_id)
+    assert_not_nil profile
+    assert_equal channel_id, profile.platform_username
+
+    assert_equal "https://www.youtube.com/channel/#{channel_id}",
+                 ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
+  test 'normalize_handle preserva case de channel ID informado bare (sem URL)' do
+    tool = AddProfileTool.new
+
+    assert_equal 'UCn8SzhX6Z1qW9_123456789', tool.send(:normalize_handle, 'UCn8SzhX6Z1qW9_123456789')
+    assert_equal 'UCn8SzhX6Z1qW9_123456789', tool.send(:normalize_handle, '@UCn8SzhX6Z1qW9_123456789')
   end
 
   test 'add_profile em youtube passa timeout 8s para extract_channel_metadata e trata Timeout::Error' do
@@ -281,14 +314,63 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert_equal :confirmation_required, res_same[:data][:status]
     assert_nil profile.reload.archived_at
 
-    # Turno 2 (novo turn ID): executa a remoção
+    # Turno 2 (novo turn ID): executa SÓ com a frase literal de confirmação
     Thread.current[:cleitin_turn] = 'turn_2222'
-    res2 = tool.execute(identifier: profile.platform_username)
+    res2 = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'confirmo a remoção de to_remove')
     assert_equal :success, res2[:status]
     assert_equal 'removed', res2[:data][:status]
     assert_not_nil profile.reload.archived_at
     assert_equal 'paused', profile.monitoring_status
     assert_equal 3, profile.social_posts.count
+  end
+
+  test 'remove_profile em turno diferente SEM confirmation_phrase NÃO remove' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_sem_frase')
+
+    tool = RemoveProfileTool.new
+
+    Thread.current[:cleitin_turn] = 'turn_a'
+    res1 = tool.execute(identifier: profile.platform_username)
+    assert_equal :confirmation_required, res1[:data][:status]
+
+    Thread.current[:cleitin_turn] = 'turn_b'
+    res2 = tool.execute(identifier: profile.platform_username)
+
+    assert_equal :error, res2[:status]
+    assert_includes res2[:reason], 'Confirmação inválida'
+    assert_nil profile.reload.archived_at
+  end
+
+  test 'remove_profile em turno diferente com frase sem a palavra confirmo NÃO remove' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_sem_conf')
+
+    tool = RemoveProfileTool.new
+
+    Thread.current[:cleitin_turn] = 'turn_a'
+    tool.execute(identifier: profile.platform_username)
+
+    Thread.current[:cleitin_turn] = 'turn_b'
+    res = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'quero apagar o to_remove_sem_conf')
+
+    assert_equal :error, res[:status]
+    assert_nil profile.reload.archived_at
+  end
+
+  test 'remove_profile em turno diferente com frase citando OUTRO perfil NÃO remove' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_alvo')
+    outro = create(:social_profile, :twitter, platform_username: 'outro_canal')
+
+    tool = RemoveProfileTool.new
+
+    Thread.current[:cleitin_turn] = 'turn_a'
+    tool.execute(identifier: profile.platform_username)
+
+    Thread.current[:cleitin_turn] = 'turn_b'
+    res = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'confirmo a remoção de outro_canal')
+
+    assert_equal :error, res[:status]
+    assert_nil profile.reload.archived_at
+    assert_not_nil outro
   end
 
   # ── 5. PromoteProspectTool ──────────────────────────────────────────────────

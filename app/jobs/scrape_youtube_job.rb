@@ -47,14 +47,14 @@ class ScrapeYoutubeJob < ApplicationJob
       )
     end
   rescue ScrapingServices::RateLimitError => e
-    profile&.update(collection_status: "rate_limited", blocked_until: Time.current + e.retry_after) if profile
+    profile&.update!(collection_status: "rate_limited", blocked_until: Time.current + e.retry_after) if profile
     retry_job wait: e.retry_after
   rescue ArgumentError
     raise
   rescue StandardError => e
     Rails.logger.error "[ScrapeYoutubeJob] Erro ao coletar perfil #{profile_id}: #{e.message}"
     if profile
-      profile.update(collection_status: "degraded")
+      profile.update!(collection_status: "degraded")
       ScrapingFailureAlertJob.perform_later("youtube", profile.id, e.message, "scrape_error")
     end
   end
@@ -89,7 +89,9 @@ class ScrapeYoutubeJob < ApplicationJob
   end
 
   def build_channel_url(profile)
-    if profile.platform_username.present?
+    if profile.platform_user_id.to_s.match?(SocialProfile::CHANNEL_ID_PATTERN)
+      "https://www.youtube.com/channel/#{profile.platform_user_id}"
+    elsif profile.platform_username.present?
       "https://www.youtube.com/@#{profile.platform_username}"
     else
       "https://www.youtube.com/channel/#{profile.platform_user_id}"

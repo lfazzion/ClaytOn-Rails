@@ -20,25 +20,11 @@ class WeeklyDigestJob < ApplicationJob
   def send_digest_message(channel_id, message)
     return if message.blank?
 
-    if message.length <= 1900
-      DiscordApiClient.send_message(channel_id, message)
-    else
-      chunks = []
-      current_chunk = +""
-
-      message.each_line do |line|
-        if current_chunk.length + line.length > 1900
-          chunks << current_chunk.strip
-          current_chunk = line.dup
-        else
-          current_chunk << line
-        end
-      end
-      chunks << current_chunk.strip if current_chunk.present?
-
-      chunks.each do |chunk|
-        DiscordApiClient.send_message(channel_id, chunk)
-      end
+    # Achado 5 (PR #36): chunking delegado ao helper único
+    # DiscordMessageChunker (Zeitwerk carrega app/services; SEM require_relative).
+    # Cada chunk vira um envio.
+    DiscordMessageChunker.chunk(message).each do |chunk|
+      DiscordApiClient.send_message(channel_id, chunk)
     end
   end
 

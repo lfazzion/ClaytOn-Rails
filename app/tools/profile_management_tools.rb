@@ -44,7 +44,13 @@ class ManagementToolBase < ToolBase
       str = Regexp.last_match(1)
     end
 
-    str.sub(/\A@/, '').downcase.strip
+    str = str.sub(/\A@/, '').strip
+    # Channel ID canônico: case significativo (achado 1/3 do PR #36).
+    # Preservar — @handle e channel ID são namespaces distintos no YouTube
+    # e um ID downcasado vira um handle que nunca resolve.
+    return str if str.match?(SocialProfile::CHANNEL_ID_PATTERN)
+
+    str.downcase
   end
 
   def find_profile(identifier, platform = nil)
@@ -107,7 +113,7 @@ class AddProfileTool < ManagementToolBase
     end
 
     if plt == 'youtube'
-      is_channel_id = handle.to_s =~ %r{/channel/}i || (normalized_handle.start_with?('UC') && normalized_handle.length == 24)
+      is_channel_id = handle.to_s =~ %r{/channel/}i || normalized_handle.match?(SocialProfile::CHANNEL_ID_PATTERN)
       channel_url = is_channel_id ? "https://www.youtube.com/channel/#{normalized_handle}" : "https://www.youtube.com/@#{normalized_handle}"
 
       begin
@@ -188,8 +194,9 @@ class RemoveProfileTool < ManagementToolBase
 
   param :identifier, type: :string, desc: 'ID numérico ou username do perfil', required: true
   param :platform, type: :string, desc: 'Plataforma opcional para desambiguação', required: false
+  param :confirmation_phrase, type: :string, desc: "Texto literal da mensagem do usuário confirmando a remoção (ex.: 'confirmo a remoção de canalx')", required: false
 
-  def run(identifier:, platform: nil)
+  def run(identifier:, platform: nil, confirmation_phrase: nil)
     return owner_error unless owner?
 
     profile = find_profile(identifier, platform)
@@ -212,6 +219,13 @@ class RemoveProfileTool < ManagementToolBase
                 instrucao: "repita 'confirmo a remoção de #{profile.platform_username}' na próxima mensagem para executar"
               })
     elsif pending[:turn] != current_turn
+      # Gate primário: a frase literal de confirmação do usuário na próxima
+      # mensagem. Turn-ID distinto é só um gate secundário (achado 2 do PR #36).
+      phrase = confirmation_phrase.to_s.downcase
+      unless phrase.include?('confirmo') && phrase.include?(profile.platform_username.to_s.downcase)
+        return error("Confirmação inválida — o usuário precisa dizer 'confirmo a remoção de #{profile.platform_username}' na próxima mensagem")
+      end
+
       Rails.cache.delete(cache_key)
       profile.update!(archived_at: Time.current, monitoring_status: 'paused')
 
