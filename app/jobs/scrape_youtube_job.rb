@@ -15,6 +15,8 @@ class ScrapeYoutubeJob < ApplicationJob
 
     return unless profile.should_collect?(SNAPSHOT_DEDUP_WINDOW)
 
+    Scraping::FetchPacer.wait("youtube.com")
+
     proxy = current_proxy(options)
     channel_url = build_channel_url(profile)
 

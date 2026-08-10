@@ -339,5 +339,41 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     assert_equal 1, videos.size
     assert_equal 'short', videos.first[:post_type]
   end
+
+  test 'os 4 builders de listagem incluem --sleep-interval 8 e --max-sleep-interval 20' do
+    svc = ScrapingServices::YoutubeScraperService
+    builders = %i[build_videos_command build_videos_flat_command build_shorts_command build_shorts_flat_command]
+
+    builders.each do |builder|
+      cmd = svc.send(builder, 'https://www.youtube.com/@TeGeCe', 10, nil)
+
+      sleep_idx = cmd.index('--sleep-interval')
+      assert_not_nil sleep_idx, "#{builder} deve incluir --sleep-interval"
+      assert_equal '8', cmd[sleep_idx + 1], "#{builder} deve ter --sleep-interval 8"
+
+      max_sleep_idx = cmd.index('--max-sleep-interval')
+      assert_not_nil max_sleep_idx, "#{builder} deve incluir --max-sleep-interval"
+      assert_equal '20', cmd[max_sleep_idx + 1], "#{builder} deve ter --max-sleep-interval 20"
+    end
+  end
+
+  test 'build_metadata_command nao inclui --sleep-interval nem --max-sleep-interval' do
+    cmd = ScrapingServices::YoutubeScraperService.send(:build_metadata_command, 'https://www.youtube.com/@TeGeCe', nil)
+
+    refute_includes cmd, '--sleep-interval'
+    refute_includes cmd, '--max-sleep-interval'
+  end
+
+  test 'execute_yt_dlp usa timeout 600 por padrao' do
+    svc = ScrapingServices::YoutubeScraperService
+    fake_status = Struct.new(:success?).new(true)
+
+    Timeout.expects(:timeout).with(600).yields.returns(['fake_output', '', fake_status])
+    Open3.expects(:capture3).with('yt-dlp', '--version').returns(['fake_output', '', fake_status])
+
+    out, _err, _status = svc.send(:execute_yt_dlp, ['yt-dlp', '--version'])
+
+    assert_equal 'fake_output', out
+  end
 end
 

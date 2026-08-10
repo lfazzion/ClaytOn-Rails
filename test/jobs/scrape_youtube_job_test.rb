@@ -4,6 +4,7 @@ require 'test_helper'
 
 class ScrapeYoutubeJobTest < ActiveJob::TestCase
   setup do
+    Scraping::FetchPacer.stubs(:wait)
     @profile = create(:social_profile, :youtube, platform_username: 'test_channel')
     @metadata = {
       channel_id: 'UC123',

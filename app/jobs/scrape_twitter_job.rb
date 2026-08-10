@@ -10,6 +10,8 @@ class ScrapeTwitterJob < ApplicationJob
 
     return unless should_collect?(profile)
 
+    Scraping::FetchPacer.wait("twitter.com")
+
     scraper_data = scrape_profile(profile, options)
 
     if scraper_data.nil?

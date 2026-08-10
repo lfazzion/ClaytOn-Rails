@@ -4,6 +4,7 @@ require 'test_helper'
 
 class ScrapeInstagramJobTest < ActiveJob::TestCase
   setup do
+    Scraping::FetchPacer.stubs(:wait)
     @profile = create(:social_profile, :instagram, platform_username: 'test_user')
     @scraper_data = {
       user_id: '12345',

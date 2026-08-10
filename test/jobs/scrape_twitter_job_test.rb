@@ -4,6 +4,7 @@ require 'test_helper'
 
 class ScrapeTwitterJobTest < ActiveJob::TestCase
   setup do
+    Scraping::FetchPacer.stubs(:wait)
     @profile = create(:social_profile, :twitter, platform_username: 'test_user')
     @scraper_data = {
       user_id: '12345',
