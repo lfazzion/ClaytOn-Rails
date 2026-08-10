@@ -17,10 +17,10 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     ChatSessionManager.stubs(:all_tool_classes).returns([])
   end
 
-  def mock_event(user_id: "123", channel_id: "456", content: "pergunta", username: "joao", private: false)
+  def mock_event(user_id: "123", channel_id: "456", content: "pergunta", username: "joao", private: false, attachments: [])
     user = stub(id: user_id, display_name: username, username: username, bot_account?: false)
     channel = stub(id: channel_id, private?: private, start_typing: nil)
-    message = stub(content: content)
+    message = stub(content: content, attachments: attachments)
     event = mock("event")
     event.stubs(:user).returns(user)
     event.stubs(:channel).returns(channel)
@@ -395,5 +395,121 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     assert_equal "há 1 hora", DiscordBotService.send(:time_ago, 1.hour.ago)
     assert_equal "há 2 horas", DiscordBotService.send(:time_ago, 2.hours.ago)
     assert_equal "há 3 dias", DiscordBotService.send(:time_ago, 3.days.ago)
+  end
+
+  # --- anexos de arquivos ---
+
+  test "handle_message com mais de um anexo responde aviso educado" do
+    att1 = stub(filename: "a.txt")
+    att2 = stub(filename: "b.txt")
+    event = mock_event(attachments: [att1, att2])
+
+    event.expects(:respond).with("Envie apenas um arquivo por mensagem.")
+    ChatSessionManager.expects(:ask).never
+
+    DiscordBotService.handle_message(event)
+  end
+
+  # B4 (revisão Opus): anexo NÃO-suportado não bloqueia a pergunta — o fluxo
+  # volta ao normal (sem processar) e a pergunta é respondida. Antes do fix,
+  # print.png + pergunta virava "Formato de arquivo não suportado" e descartava.
+  test "handle_message ignora anexo nao suportado e responde a pergunta (B4)" do
+    att = stub(filename: "print.png")
+    event = mock_event(content: "por que isso da erro?", attachments: [att])
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+
+    AttachmentProcessor.expects(:process).never
+    ChatSessionManager.expects(:ask)
+                      .with(scope: scope, content: "por que isso da erro?", user_id: "123", username: "joao")
+                      .returns("resposta normal")
+
+    event.expects(:respond).with("resposta normal")
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "handle_message responde erro do process para anexo suportado que falha" do
+    att = stub(filename: "texto.txt")
+    event = mock_event(attachments: [att])
+
+    AttachmentProcessor.expects(:process).with(att, "pergunta").returns(
+      AttachmentProcessor::Result.new(success: false, error_message: "Não consegui baixar o arquivo.")
+    )
+    event.expects(:respond).with("Não consegui baixar o arquivo.")
+    ChatSessionManager.expects(:ask).never
+
+    DiscordBotService.handle_message(event)
+  end
+
+  # #4 (2ª rodada): filename com NUL levanta ArgumentError no File.extname do
+  # filtro de suportados — a rede final do handle_message responde educado,
+  # nunca deixa o usuário no vácuo.
+  test "handle_message com filename contendo NUL responde erro educado (#4)" do
+    att = stub(filename: "rel\u0000atorio.txt")
+    event = mock_event(attachments: [att])
+
+    AttachmentProcessor.expects(:process).never
+    ChatSessionManager.expects(:ask).never
+    event.expects(:respond).with("⚠️ Erro ao processar. Tente novamente.")
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "handle_message com anexo valido passa o frame para ChatSessionManager.ask e ignora comando de texto" do
+    att = stub(filename: "doc.txt")
+    event = mock_event(content: "!help", attachments: [att])
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+    frame_content = "!help\n\n[ARQUIVO nome=\"doc.txt\"]\nConteudo\n[/ARQUIVO]"
+
+    AttachmentProcessor.expects(:process).with(att, "!help").returns(
+      AttachmentProcessor::Result.new(success: true, content: frame_content, truncated: false, filename: "doc.txt")
+    )
+    ChatSessionManager.expects(:ask)
+                      .with(scope: scope, content: frame_content, user_id: "123", username: "joao")
+                      .returns("Resposta da LLM sobre o arquivo")
+
+    event.expects(:respond).with("Resposta da LLM sobre o arquivo")
+
+    DiscordBotService.handle_message(event)
+  end
+
+  test "handle_message com anexo truncado por chars adiciona aviso com numero (B3)" do
+    att = stub(filename: "grande.txt")
+    event = mock_event(content: "analise", attachments: [att])
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+    frame_content = "analise\n\n[ARQUIVO nome=\"grande.txt\"]\nConteudo\n[truncado em 30000 chars]\n[/ARQUIVO]"
+
+    AttachmentProcessor.expects(:process).with(att, "analise").returns(
+      AttachmentProcessor::Result.new(success: true, content: frame_content, truncated: true,
+                                      truncated_reason: :chars, filename: "grande.txt")
+    )
+    ChatSessionManager.expects(:ask)
+                      .with(scope: scope, content: frame_content, user_id: "123", username: "joao")
+                      .returns("Analise feita")
+
+    event.expects(:respond).with("Analise feita\n\n⚠️ *(O arquivo foi truncado em 30000 caracteres.)*")
+
+    DiscordBotService.handle_message(event)
+  end
+
+  # B3 (revisão Opus): corte por PÁGINAS no sidecar não pode virar um aviso de
+  # N caracteres (número errado) — o aviso é genérico de leitura parcial.
+  test "handle_message com anexo truncado por paginas usa aviso honesto (B3)" do
+    att = stub(filename: "slides.pdf")
+    event = mock_event(content: "conclusao", attachments: [att])
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+    frame_content = "conclusao\n\n[ARQUIVO nome=\"slides.pdf\"]\nSlide 1\n[arquivo longo demais — o início foi lido]\n[/ARQUIVO]"
+
+    AttachmentProcessor.expects(:process).with(att, "conclusao").returns(
+      AttachmentProcessor::Result.new(success: true, content: frame_content, truncated: true,
+                                      truncated_reason: :pages, filename: "slides.pdf")
+    )
+    ChatSessionManager.expects(:ask)
+                      .with(scope: scope, content: frame_content, user_id: "123", username: "joao")
+                      .returns("A conclusão está na parte que não li")
+
+    event.expects(:respond).with("A conclusão está na parte que não li\n\n⚠️ *(O arquivo é longo demais e foi lido parcialmente.)*")
+
+    DiscordBotService.handle_message(event)
   end
 end

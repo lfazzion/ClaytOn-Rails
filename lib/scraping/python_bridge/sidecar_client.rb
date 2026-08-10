@@ -54,6 +54,47 @@ module ScrapingServices
         failure("sidecar indisponível (#{e.class}: #{e.message})")
       end
 
+      # Extrai texto de um PDF via rota POST /extract-pdf no sidecar python-scraper.
+      # Recebe os bytes brutos do PDF.
+      # Retorna Hash: {"text" => "...", "chars" => N, "pages" => N, "truncated" => bool} ou {"error" => "..."}.
+      def extract_pdf(bytes:, timeout: 30)
+        uri = URI.join("#{base_url}/", 'extract-pdf')
+        request = Net::HTTP::Post.new(uri)
+        request['Content-Type'] = 'application/pdf'
+        request['Authorization'] = "Bearer #{token}" if token
+        request.body = bytes
+
+        http = Net::HTTP.new(uri.hostname, uri.port)
+        http.use_ssl = uri.scheme == 'https'
+        http.open_timeout = CONNECT_TIMEOUT
+        http.read_timeout = timeout + RESPONSE_MARGIN
+
+        response = Timeout.timeout(timeout + RESPONSE_MARGIN) { http.request(request) }
+        parsed = parse_json(response.body)
+
+        unless response.is_a?(Net::HTTPSuccess)
+          # N2 (revisão Opus): erro classificado por símbolo, não por substring
+          # de mensagem localizada. 413 = acima do teto -> "arquivo muito grande"
+          # no consumidor; qualquer outro não-2xx = infra -> "agora".
+          kind = response.code == '413' ? 'limit' : 'unavailable'
+          message = parsed.is_a?(Hash) ? parsed['error'].to_s : response.body.to_s
+          return { 'error_kind' => kind, 'error' => "sidecar respondeu #{response.code}: #{message}" }
+        end
+
+        return { 'error_kind' => 'unavailable', 'error' => 'resposta do sidecar não é JSON' } unless parsed.is_a?(Hash)
+
+        parsed
+      rescue Net::OpenTimeout
+        Rails.logger.error "[SidecarClient] extract-pdf indisponível (Net::OpenTimeout após #{CONNECT_TIMEOUT}s)"
+        { 'error_kind' => 'unavailable', 'error' => "sidecar indisponível (não aceitou conexão após #{CONNECT_TIMEOUT}s)" }
+      rescue Timeout::Error
+        Rails.logger.error "[SidecarClient] timeout em extract-pdf"
+        { 'error_kind' => 'unavailable', 'error' => 'timeout ao extrair PDF' }
+      rescue StandardError => e
+        Rails.logger.error "[SidecarClient] extract-pdf falhou: #{e.class}: #{e.message}"
+        { 'error_kind' => 'unavailable', 'error' => "sidecar indisponível (#{e.class}: #{e.message})" }
+      end
+
       def base_url
         ENV['PYTHON_SCRAPER_URL'].presence || DEFAULT_BASE_URL
       end

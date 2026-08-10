@@ -39,7 +39,8 @@ RUN pip install --no-cache-dir \
     "aiohttp>=3.10.0" \
     "playwright" \
     "yt-dlp" \
-    "curl_cffi>=0.8"
+    "curl_cffi>=0.8" \
+    "pypdf==6.15.0"
 
 RUN playwright install chromium --with-deps
 
