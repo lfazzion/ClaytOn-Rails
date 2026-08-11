@@ -184,4 +184,28 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
 
     assert_equal :ok, Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
   end
+
+  test "inject_cookies pula cookies fora da allowlist e nao chama set no Ferrum" do
+    misturados = [
+      { "name" => "reddit_session", "value" => "ok", "domain" => ".reddit.com", "path" => "/" },
+      { "name" => "__Secure-YNID", "value" => "bad", "domain" => ".youtube.com", "path" => "/" }
+    ]
+    Fetcher::SessionCookies.stubs(:for).with("old.reddit.com").returns([misturados, :jar])
+
+    @page.cookies.expects(:set).with(has_entry(name: "reddit_session")).once
+    @page.cookies.expects(:set).with(has_entry(name: "__Secure-YNID")).never
+
+    Fetcher::BrowserSession.with_page("https://old.reddit.com/r/test") { |_p| :ok }
+  end
+
+  test "inject_cookies passa secure: true para cookies __Secure-*" do
+    sec_cookie = { "name" => "__Secure-3PSID", "value" => "sec_val", "domain" => ".youtube.com", "path" => "/" }
+    Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[sec_cookie], :jar])
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    posto = @page.cookies.postos.find { |c| c[:name] == "__Secure-3PSID" }
+    assert_not_nil posto
+    assert_equal true, posto[:secure]
+  end
 end
