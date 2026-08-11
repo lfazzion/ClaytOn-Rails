@@ -36,10 +36,52 @@ module Fetcher
       "x.com"       => %w[auth_token].freeze
     }.freeze
 
+    PLATFORM_DOMAINS = {
+      "youtube.com" => ["youtube.com"].freeze,
+      "reddit.com"  => ["reddit.com"].freeze,
+      "x.com"       => ["x.com", "twitter.com"].freeze
+    }.freeze
+
     class << self
+      def platform_for(host)
+        alvo = normalize(host)
+        platform, _ = PLATFORM_DOMAINS.find do |dominio, list|
+          alvo == dominio || alvo.end_with?(".#{dominio}") ||
+            list.any? { |d| alvo == d || alvo.end_with?(".#{d}") }
+        end
+        platform
+      end
+
+      def allowed_domain?(host, cookie_domain)
+        platform = platform_for(host)
+        if platform.nil?
+          Rails.logger.warn "[Fetcher::CookieJar] plataforma não cadastrada na allowlist para host '#{host}' — cookie não filtrado"
+          return true
+        end
+
+        allowed_list = PLATFORM_DOMAINS[platform]
+        cdom = cookie_domain.to_s.downcase.sub(/\A\./, "")
+        return false if cdom.empty?
+
+        allowed_list.any? do |allowed|
+          norm_allowed = allowed.downcase.sub(/\A\./, "")
+          cdom == norm_allowed || cdom.end_with?(".#{norm_allowed}")
+        end
+      end
+
+      def filter_cookies(host, cookies)
+        Array(cookies).select do |cookie|
+          cdom = cookie["domain"] || cookie[:domain]
+          allowed_domain?(host, cdom)
+        end
+      end
+
       def store!(domain:, cookies:, expires_at:)
+        filtered = filter_cookies(domain, cookies)
+        return false if filtered.blank?
+
         record = BrowserSessionCookie.find_or_initialize_by(domain: normalize(domain))
-        record.payload = JSON.generate(Array(cookies))
+        record.payload = JSON.generate(filtered)
         record.expires_at = expires_at
         record.save!
         true
@@ -124,10 +166,11 @@ module Fetcher
       # rejeitada durante a visita deixa a página com o conjunto anônimo — que não é
       # vazio e passaria pelo único guarda que existia antes.
       def refresh_for!(host, cookies)
-        return false if cookies.blank?
+        filtered = filter_cookies(host, cookies)
+        return false if filtered.blank?
 
         sentinelas = sentinels_for(host)
-        if sentinelas.present? && !sentinelas.intersect?(cookies.map { |c| c["name"] })
+        if sentinelas.present? && !sentinelas.intersect?(filtered.map { |c| (c["name"] || c[:name]).to_s })
           Rails.logger.warn "[Fetcher::CookieJar] rotação de #{normalize(host)} recusada: " \
                             "veio sem autenticação e sobrescreveria a sessão boa"
           return false
@@ -136,7 +179,7 @@ module Fetcher
         record = live_record(host)
         return false if record.nil?
 
-        record.update!(payload: JSON.generate(cookies))
+        record.update!(payload: JSON.generate(filtered))
         true
       end
 
@@ -161,9 +204,10 @@ module Fetcher
       # (`expires_at > Time.current`) matava a sessão no prazo antigo — o job se
       # sabota em T0+7d com uma sessão viva e recém-rotacionada no banco.
       def refresh_from_netscape!(domain:, path:, auth_cookies:, expires_at: nil)
-        cookies = parse_netscape(path)
+        raw_cookies = parse_netscape(path)
+        cookies = filter_cookies(domain, raw_cookies)
         return false if cookies.empty?
-        return false if auth_cookies.present? && !auth_cookies.intersect?(cookies.map { |c| c["name"] })
+        return false if auth_cookies.present? && !auth_cookies.intersect?(cookies.map { |c| (c["name"] || c[:name]).to_s })
 
         record = BrowserSessionCookie.find_by(domain: normalize(domain))
         return false if record.nil?

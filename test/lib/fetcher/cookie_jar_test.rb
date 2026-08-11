@@ -9,6 +9,11 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
     { "name" => "HSID", "value" => "def456", "domain" => ".youtube.com", "path" => "/" }
   ].freeze
 
+  REDDIT_COOKIES = [
+    { "name" => "reddit_session", "value" => "abc123", "domain" => ".reddit.com", "path" => "/" },
+    { "name" => "csv", "value" => "def456", "domain" => ".reddit.com", "path" => "/" }
+  ].freeze
+
   test "grava e le por dominio" do
     Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES, expires_at: 7.days.from_now)
 
@@ -25,7 +30,7 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
   end
 
   test "cookie expirado nao e valido e nao e servido" do
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: COOKIES, expires_at: 1.hour.ago)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 1.hour.ago)
 
     refute Fetcher::CookieJar.valid?("reddit.com")
     assert_empty Fetcher::CookieJar.for("reddit.com")
@@ -46,7 +51,7 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
   end
 
   test "subdominio casa o registro do dominio raiz" do
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: COOKIES, expires_at: 7.days.from_now)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
 
     assert Fetcher::CookieJar.valid?("old.reddit.com")
     refute_empty Fetcher::CookieJar.for("old.reddit.com")
@@ -203,7 +208,7 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
   # A armadilha: gravar por `old.reddit.com` criaria um SEGUNDO registro ao lado
   # de `reddit.com`, e as duas copias divergiriam a partir da proxima chamada.
   test "refresh_for! atualiza o registro do dominio raiz, nao cria um por subdominio" do
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: COOKIES, expires_at: 7.days.from_now)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
     novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
 
     assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos)
@@ -252,10 +257,197 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
   end
 
   test "refresh_for! ignora lista vazia em vez de apagar a sessao" do
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: COOKIES, expires_at: 7.days.from_now)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
 
     refute Fetcher::CookieJar.refresh_for!("reddit.com", [])
 
     assert_equal 2, Fetcher::CookieJar.for("reddit.com").size
+  end
+
+  test "allowed_domain? aceita dominio exato, ponto inicial, subdominio legitimo, caixa diferente e rejeita sufixo enganoso" do
+    assert Fetcher::CookieJar.allowed_domain?("reddit.com", "reddit.com")
+    assert Fetcher::CookieJar.allowed_domain?("reddit.com", ".reddit.com")
+    assert Fetcher::CookieJar.allowed_domain?("reddit.com", "old.reddit.com")
+    assert Fetcher::CookieJar.allowed_domain?("old.reddit.com", ".reddit.com")
+    assert Fetcher::CookieJar.allowed_domain?("reddit.com", "Reddit.COM")
+    refute Fetcher::CookieJar.allowed_domain?("reddit.com", "notreddit.com")
+    refute Fetcher::CookieJar.allowed_domain?("reddit.com", "reddit.com.attacker.com")
+  end
+
+  test "allowed_domain? trata politica do X e do Reddit corretamente" do
+    assert Fetcher::CookieJar.allowed_domain?("x.com", ".twitter.com")
+    assert Fetcher::CookieJar.allowed_domain?("x.com", "twitter.com")
+    refute Fetcher::CookieJar.allowed_domain?("x.com", ".doubleclick.net")
+    refute Fetcher::CookieJar.allowed_domain?("reddit.com", ".youtube.com")
+  end
+
+  test "allowed_domain? com plataforma nao cadastrada nao filtra e loga warn" do
+    warn_emitted = false
+    Rails.logger.stubs(:warn).with { |msg| warn_emitted = true if msg.to_s.include?("plataforma não cadastrada") }
+
+    assert Fetcher::CookieJar.allowed_domain?("nao-cadastrado.test", "qualquer.com")
+    assert warn_emitted
+  end
+
+  test "store! filtra cookies pelo dominio da plataforma" do
+    misturados = [
+      { "name" => "reddit_session", "value" => "val1", "domain" => ".reddit.com", "path" => "/" },
+      { "name" => "__Secure-YNID", "value" => "val2", "domain" => ".youtube.com", "path" => "/" }
+    ]
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: misturados, expires_at: 7.days.from_now)
+
+    lidos = Fetcher::CookieJar.for("reddit.com")
+    assert_equal 1, lidos.size
+    assert_equal "reddit_session", lidos.first["name"]
+  end
+
+  test "refresh_for! e refresh_from_netscape! filtram cookies antes de persistir" do
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
+    misturados = [
+      { "name" => "reddit_session", "value" => "novo", "domain" => ".reddit.com", "path" => "/" },
+      { "name" => "IDE", "value" => "track", "domain" => ".doubleclick.net", "path" => "/" }
+    ]
+
+    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", misturados)
+    lidos = Fetcher::CookieJar.for("reddit.com")
+    assert_equal 1, lidos.size
+    assert_equal "novo", lidos.first["value"]
+
+    Tempfile.create(["jar", ".txt"]) do |f|
+      f.puts "# Netscape HTTP Cookie File"
+      f.puts [".reddit.com", "TRUE", "/", "TRUE", 2_000_000_000, "reddit_session", "netscape_val"].join("\t")
+      f.puts [".doubleclick.net", "TRUE", "/", "TRUE", 2_000_000_000, "IDE", "track"].join("\t")
+      f.flush
+      assert Fetcher::CookieJar.refresh_from_netscape!(
+        domain: "reddit.com", path: f.path, auth_cookies: %w[reddit_session]
+      )
+    end
+
+    lidos_net = Fetcher::CookieJar.for("reddit.com")
+    assert_equal 1, lidos_net.size
+    assert_equal "netscape_val", lidos_net.first["value"]
+  end
+
+  test "filtro executa antes do portao de sentinela (sentinela estrangeira presente + conjunto anônimo)" do
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
+    invalidos = [
+      { "name" => "reddit_session", "value" => "foreign", "domain" => ".youtube.com", "path" => "/" },
+      { "name" => "csv", "value" => "anon", "domain" => ".reddit.com", "path" => "/" }
+    ]
+
+    refute Fetcher::CookieJar.refresh_for!("old.reddit.com", invalidos)
+    assert_equal "abc123", Fetcher::CookieJar.for("reddit.com").first["value"]
+  end
+
+  test "conjunto vazio apos filtro nao sobrescreve o jar" do
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
+    so_estrangeiros = [
+      { "name" => "SID", "value" => "val", "domain" => ".youtube.com", "path" => "/" }
+    ]
+
+    refute Fetcher::CookieJar.refresh_for!("reddit.com", so_estrangeiros)
+    assert_equal 2, Fetcher::CookieJar.for("reddit.com").size
+    assert_equal "abc123", Fetcher::CookieJar.for("reddit.com").first["value"]
+  end
+
+  test "cookies de terceiro emitidos durante visita nao sao persistidos" do
+    Fetcher::CookieJar.store!(domain: "x.com", cookies: [{ "name" => "auth_token", "value" => "x1", "domain" => ".x.com", "path" => "/" }], expires_at: 7.days.from_now)
+    visita = [
+      { "name" => "auth_token", "value" => "x2", "domain" => ".x.com", "path" => "/" },
+      { "name" => "IDE", "value" => "track", "domain" => ".doubleclick.net", "path" => "/" }
+    ]
+
+    assert Fetcher::CookieJar.refresh_for!("x.com", visita)
+    lidos = Fetcher::CookieJar.for("x.com")
+    assert_equal 1, lidos.size
+    assert_equal "auth_token", lidos.first["name"]
+    assert_equal "x2", lidos.first["value"]
+  end
+
+  test "nenhum valor de cookie aparece em logs ou mensagens de erro" do
+    segredo = "SEGREDO_SUPER_SECRETO_123"
+    anonimos = [{ "name" => "csv", "value" => segredo, "domain" => ".reddit.com", "path" => "/" }]
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
+
+    log_capturado = ""
+    Rails.logger.stubs(:warn).with { |msg| log_capturado += msg.to_s }
+
+    refute Fetcher::CookieJar.refresh_for!("old.reddit.com", anonimos)
+    refute_includes log_capturado, segredo
+  end
+
+  test "store! com lote nao vazio composto apenas de cookies proibidos recusa gravacao e preserva registro e expires_at" do
+    original_expires = 7.days.from_now.change(usec: 0)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: original_expires)
+    registro_antes = BrowserSessionCookie.find_by(domain: "reddit.com")
+    payload_antes = registro_antes.payload
+
+    proibidos = [
+      { "name" => "SID", "value" => "val", "domain" => ".youtube.com", "path" => "/" }
+    ]
+    novo_expires = 10.days.from_now.change(usec: 0)
+
+    resultado = Fetcher::CookieJar.store!(domain: "reddit.com", cookies: proibidos, expires_at: novo_expires)
+
+    refute resultado, "store! deve retornar false quando todo o lote e filtrado"
+    registro_depois = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_equal payload_antes, registro_depois.payload
+    assert_in_delta original_expires.to_f, registro_depois.expires_at.to_f, 1
+  end
+
+  test "store! inicial com conjunto totalmente proibido nao cria registro e retorna false" do
+    proibidos = [
+      { "name" => "SID", "value" => "val", "domain" => ".youtube.com", "path" => "/" }
+    ]
+
+    resultado = Fetcher::CookieJar.store!(domain: "reddit.com", cookies: proibidos, expires_at: 7.days.from_now)
+
+    refute resultado
+    assert_nil BrowserSessionCookie.find_by(domain: "reddit.com")
+  end
+
+  test "platform_for mapeia twitter.com para x.com" do
+    assert_equal "x.com", Fetcher::CookieJar.platform_for("twitter.com")
+  end
+
+  test "refresh_from_netscape! com auth_cookies presente apenas em dominio proibido retorna false e preserva o jar anterior" do
+    Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES, expires_at: 7.days.from_now)
+
+    Tempfile.create(["jar", ".txt"]) do |f|
+      f.puts "# Netscape HTTP Cookie File"
+      f.puts [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "PREF", "anonimo"].join("\t")
+      f.puts [".doubleclick.net", "TRUE", "/", "TRUE", 2_000_000_000, "SID", "rotacionado"].join("\t")
+      f.flush
+
+      resultado = Fetcher::CookieJar.refresh_from_netscape!(
+        domain: "youtube.com", path: f.path, auth_cookies: %w[SID]
+      )
+
+      refute resultado
+    end
+
+    lidos = Fetcher::CookieJar.for("youtube.com")
+    assert_equal 2, lidos.size
+    assert_equal "abc123", lidos.find { |c| c["name"] == "SID" }&.dig("value")
+  end
+
+  test "refresh_from_netscape! com conjunto totalmente eliminado pelo filtro retorna false e preserva o jar anterior" do
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
+
+    Tempfile.create(["jar", ".txt"]) do |f|
+      f.puts "# Netscape HTTP Cookie File"
+      f.puts [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "SID", "val"].join("\t")
+      f.flush
+
+      resultado = Fetcher::CookieJar.refresh_from_netscape!(
+        domain: "reddit.com", path: f.path, auth_cookies: %w[reddit_session]
+      )
+
+      refute resultado
+    end
+
+    lidos = Fetcher::CookieJar.for("reddit.com")
+    assert_equal 2, lidos.size
+    assert_equal "abc123", lidos.find { |c| c["name"] == "reddit_session" }&.dig("value")
   end
 end

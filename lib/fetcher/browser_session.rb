@@ -48,7 +48,7 @@ module Fetcher
           page = nil
           begin
             page = context.create_page
-            inject_cookies(page, cookies)
+            inject_cookies(page, cookies, host)
             # Assinante ANTES do go_to: é o que captura o remoteIPAddress do
             # documento principal, para o cheque de rebinding abaixo.
             remote_ip = RebindingGuard.capture_document_remote_ip(page) { page.go_to(uri.to_s) }
@@ -90,14 +90,23 @@ module Fetcher
       # (cookies.rb:118). A chamada abaixo continua válida porque o método não
       # declara keywords: em Ruby 3+/4 elas viram o hash posicional que ele espera.
       # Ele preenche `domain` com o default e despacha `Network.setCookie`.
-      def inject_cookies(page, cookies)
+      def inject_cookies(page, cookies, host)
         cookies.each do |cookie|
-          page.cookies.set(
-            name:   cookie["name"].to_s,
+          cdom = cookie["domain"] || cookie[:domain]
+          next unless CookieJar.allowed_domain?(host, cdom)
+
+          name = cookie["name"].to_s
+          opts = {
+            name:   name,
             value:  cookie["value"].to_s,
-            domain: cookie["domain"].to_s,
+            domain: cdom.to_s,
             path:   cookie.fetch("path", "/").to_s
-          )
+          }
+          opts[:secure] = true if name.start_with?("__Secure-")
+          # Nota sobre __Host-*: cookies __Host-* exigem secure: true, path: "/" e ausência de Domain no CDP/browser.
+          # Não inferimos/reescrevemos __Host-* aqui automaticamente (dívida técnica).
+
+          page.cookies.set(opts)
         end
       end
 
