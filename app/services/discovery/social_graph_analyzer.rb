@@ -20,7 +20,8 @@ module Discovery
           next if post.content.blank?
 
           post.content.scan(HANDLE_REGEX) do |match|
-            handles << match.first.downcase
+            username = match.first.sub(/\.+\z/, "").downcase
+            handles << username if username.length >= 2
           end
         end
 

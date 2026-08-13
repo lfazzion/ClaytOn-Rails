@@ -29,6 +29,10 @@ class DiscordBotService
       $stderr.sync = true
       @running = Concurrent::AtomicBoolean.new(true)
 
+      cleanup_mutex = Mutex.new
+      cleanup_cv = ConditionVariable.new
+      cleanup_thread = nil
+
       # discordrb 3.7.2 não define :message_content (Discord intent 15 = 1<<15 = 32768)
       # na constant INTENTS. Bitmask: GUILDS=1 | GUILD_MESSAGES=512 | DM=4096 | MSG_CONTENT=32768
       message_content = 1 << 15
@@ -65,7 +69,11 @@ class DiscordBotService
 
       cleanup_thread = Thread.new do
         while @running.true?
-          sleep 300
+          cleanup_mutex.synchronize do
+            break unless @running.true?
+            cleanup_cv.wait(cleanup_mutex, 300)
+          end
+          break unless @running.true?
           ChatSessionManager.cleanup_expired
         end
       end
@@ -86,6 +94,11 @@ class DiscordBotService
       bot.run
     ensure
       @running&.make_false
+      if cleanup_mutex
+        cleanup_mutex.synchronize do
+          cleanup_cv&.broadcast
+        end
+      end
       cleanup_thread&.join(5)
     end
 
