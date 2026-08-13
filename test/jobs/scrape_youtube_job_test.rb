@@ -312,5 +312,41 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_equal 'https://www.youtube.com/channel/abc123',
                  ScrapeYoutubeJob.new.send(:build_channel_url, profile)
   end
+
+  # ACHADO C (P2, sol 13/08): o rescue StandardError em collect_with_cookies é
+  # muito amplo — NoMethodError/ArgumentError viravam fallback degradado "com
+  # sucesso". Devemos limitar o fallback às exceções conhecidas de
+  # rede/extração (Timeout, erros de parsing) e PROPAGAR o resto.
+  # Testamos a unidade collect_with_cookies diretamente (o perform engole
+  # StandardError como "degraded", então a propagação até ele seria mascarada).
+  test 'collect_with_cookies propagates NoMethodError instead of falling back' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .raises(NoMethodError.new('undefined method for nil'))
+
+    assert_raises(NoMethodError) do
+      ScrapeYoutubeJob.new.send(:collect_with_cookies, 'https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+    end
+  end
+
+  test 'collect_with_cookies propagates ArgumentError instead of falling back' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .raises(ArgumentError.new('nil cipher'))
+
+    assert_raises(ArgumentError) do
+      ScrapeYoutubeJob.new.send(:collect_with_cookies, 'https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+    end
+  end
+
+  test 'collect_with_cookies still falls back to no-cookies on known network/parse errors' do
+    # JSON::ParserError é erro de extração conhecido → continua elegível ao fallback.
+    # Primeira chamada (com cookies) levanta; segunda (sem cookies) retorna.
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .then.raises(JSON::ParserError.new('unexpected token'))
+      .then.returns([@videos, true])
+
+    result = ScrapeYoutubeJob.new.send(:collect_with_cookies, 'https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+
+    assert_equal [@videos, true], result
+  end
 end
 

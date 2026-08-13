@@ -6,7 +6,13 @@ module DigestChannel
   CACHED_CHANNEL_KEY = 'discord:digest_channel_id'
   CHANNEL_NAME = 'digest-updates'
   LOCK_KEY_PREFIX = 'discord:digest_channel_lock'
-  LOCK_TTL = 30.seconds
+  # ACHADO B (P2, sol 13/08): antes era 30s. A seção crítica cria o canal no
+  # Discord (create_text_channel) e pode passar de 30s sob latência/rate-limit;
+  # com TTL curto, outro worker podia entrar após a expiração e duplicar o
+  # canal. 120s cobre o pior caso (handshake + criação) com folga. Não renovamos
+  # o lease: a seção crítica é curta e o compare-delete no unlock (achado A)
+  # impede que um release obsoleto apague o lock do worker que entrou depois.
+  LOCK_TTL = 120.seconds
   LOCK_WAIT_TIMEOUT = 15.seconds
   LOCK_RETRY_INTERVAL = 0.05
 
@@ -63,11 +69,28 @@ module DigestChannel
     begin
       yield
     ensure
-      # Só remove se o token ainda é o nosso: se o TTL expirou e outro
-      # processo adquiriu, apagar o lock dele reintroduziria a corrida
-      # (achado P2 do sol, 13/08).
-      Rails.cache.delete(lock_key) if Rails.cache.read(lock_key) == token
+      # ACHADO A (P1, sol 13/08): o unlock é compare-delete. Rails.cache NÃO
+      # expõe compare-and-swap (CAS) nem delete condicional por valor, e o
+      # backend SolidCache (ActiveSupport::Cache::SolidCacheStore) não oferece
+      # API de delete-atômico-por-valor. A janela read→delete é a MENOR
+      # possível (lê o token e decide apagar na mesma linha); se o TTL expirar
+      # entre o read e o delete, o worker que re-adquiriu o lock continua dono
+      # e o compare (token != atual) impede que este release obsoleto o apague.
+      # Sem CAS no cache, este é o melhor possível — trade-off documentado e
+      # aceito. Veja release_digest_channel_lock (achado F) para o teste que
+      # exercita exatamente esse interleaving.
+      release_digest_channel_lock(guild_id, token)
     end
+  end
+
+  # Unlock distribuído: só remove o lock se ainda for o nosso token
+  # (compare-delete). Extraído de with_digest_channel_lock para ser testável
+  # isoladamente (achado F, sol 13/08) e para o fluxo de recuperação de canal
+  # (achado E) poder reusá-lo. Ver comentário de ACHADO A acima sobre a
+  # ausência de CAS no cache.
+  def release_digest_channel_lock(guild_id, token)
+    lock_key = "#{LOCK_KEY_PREFIX}:#{guild_id}"
+    Rails.cache.delete(lock_key) if Rails.cache.read(lock_key) == token
   end
 
   def resolve_digest_channel(guild_id)
@@ -89,5 +112,27 @@ module DigestChannel
 
     Rails.cache.write(CACHED_CHANNEL_KEY, channel_id, expires_in: 30.days)
     channel_id
+  end
+
+  # ACHADO E (P2, sol 13/08): o canal é aceito do cache por 30 dias SEM validar
+  # se ainda existe no Discord. Se o envio falhar com 404/"Unknown Channel", o
+  # cache está obsoleto e precisa ser invalidado para que o próximo
+  # ensure_digest_channel reutilize o canal existente por nome ou crie um novo.
+  #
+  # DiscordApiClient#request levanta RuntimeError "Discord API error: 404 ..."
+  # para canal inexistente; este método trata SÓ esse caso e propaga o resto.
+  # Os jobs que enviam mensagens (WeeklyDigestJob, FridayIdeationJob,
+  # Last30DaysDigestJob) devem chamar recover_digest_channel(channel_id) no
+  # rescue de 404 de DiscordApiClient.send_message e reenviar com o canal novo.
+  def recover_digest_channel(channel_id)
+    # Valida a existência do canal antes de confiar no cache de 30 dias.
+    DiscordApiClient.get_channel(channel_id)
+    channel_id
+  rescue StandardError => e
+    return channel_id unless e.message.include?('404') || e.message.match?(/unknown channel/i)
+
+    Rails.cache.delete(CACHED_CHANNEL_KEY)
+    Rails.logger.warn "[#{self.class.name}] Canal digest #{channel_id} inválido (404); cache invalidado para re-resolver"
+    ensure_digest_channel
   end
 end

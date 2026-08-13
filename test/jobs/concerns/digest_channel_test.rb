@@ -152,4 +152,68 @@ class DigestChannelTest < ActiveSupport::TestCase
     DiscordApiClient.define_singleton_method(:create_text_channel, original_create) if original_create
     Rails.cache.delete('discord:digest_channel_lock:guild123')
   end
+
+  # --- ACHADOS B, E, F (correções da revisão do sol, 13/08) ---
+
+  # ACHADO B (P2): lease de 30s não cobria o pior caso (criação de canal no
+  # Discord pode passar de 30s). O TTL deve cobrir o pior caso.
+  test 'LOCK_TTL covers the worst-case channel creation window' do
+    assert_equal 120.seconds, DigestChannel::LOCK_TTL
+  end
+
+  # ACHADO F (P2): o unlock antigo NÃO deve remover o lock novo. Testa a
+  # unidade de release isolada (lock distribuído via cache compartilhado).
+  test 'stale unlock does not remove the newer distributed lock' do
+    lock_key = 'discord:digest_channel_lock:guildF'
+    Rails.cache.delete(lock_key)
+    # Worker2 já segura o lock (simula TTL expirado + re-aquisição).
+    Rails.cache.write(lock_key, 'token_new', expires_in: DigestChannel::LOCK_TTL)
+    # Worker1 faz seu unlock obsoleto com o token antigo.
+    DummyJob.new.send(:release_digest_channel_lock, 'guildF', 'token_old')
+    assert_equal 'token_new', Rails.cache.read(lock_key),
+      'o unlock obsoleto não deve apagar o lock novo'
+  end
+
+  # ACHADO F (P2): interleaving completo via with_digest_channel_lock (exercita
+  # o lock distribuído de verdade, não só o mutex local). Dentro da seção
+  # crítica do worker1 o TTL expira e o worker2 escreve tokenB; o unlock
+  # obsoleto de worker1 não deve remover tokenB.
+  test 'distributed lock interleaving keeps the new lock intact' do
+    lock_key = 'discord:digest_channel_lock:guildG'
+    Rails.cache.delete(lock_key)
+    DummyJob.new.send(:with_digest_channel_lock, 'guildG') do
+      # Interleaving: TTL de tokenA expirou e worker2 adquiriu tokenB.
+      Rails.cache.write(lock_key, 'tokenB', expires_in: DigestChannel::LOCK_TTL)
+    end
+    assert_equal 'tokenB', Rails.cache.read(lock_key)
+  end
+
+  # ACHADO E (P2): canal aceito do cache por 30 dias sem validação. Se o
+  # get_channel retornar 404/Unknown Channel, invalidar o cache e re-resolver.
+  test 'recovers digest channel by invalidating cache on Discord 404' do
+    Rails.cache.write('discord:digest_channel_id', 'stale_channel', expires_in: 30.days)
+    DiscordApiClient.stubs(:get_channel).with('stale_channel')
+      .raises(RuntimeError.new('Discord API error: 404 Not Found'))
+    DiscordApiClient.stubs(:get_bot_guilds).returns([{ 'id' => 'guildE' }])
+    DiscordApiClient.stubs(:get_guild_channels).returns([])
+    DiscordApiClient.expects(:create_text_channel).with('guildE', 'digest-updates').returns({ 'id' => 'fresh_channel' })
+
+    channel_id = DummyJob.new.send(:recover_digest_channel, 'stale_channel')
+
+    assert_equal 'fresh_channel', channel_id
+    assert_equal 'fresh_channel', Rails.cache.read('discord:digest_channel_id'),
+      'após 404 o cache deve ser repopulado com o canal recém-resolvido'
+  end
+
+  test 'does not invalidate cache when channel is still valid' do
+    Rails.cache.write('discord:digest_channel_id', 'good_channel', expires_in: 30.days)
+    DiscordApiClient.stubs(:get_channel).with('good_channel').returns({ 'id' => 'good_channel' })
+    DiscordApiClient.expects(:get_bot_guilds).never
+    DiscordApiClient.expects(:create_text_channel).never
+
+    channel_id = DummyJob.new.send(:recover_digest_channel, 'good_channel')
+
+    assert_equal 'good_channel', channel_id
+    assert_equal 'good_channel', Rails.cache.read('discord:digest_channel_id')
+  end
 end

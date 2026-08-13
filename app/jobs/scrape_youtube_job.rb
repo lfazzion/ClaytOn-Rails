@@ -96,6 +96,27 @@ class ScrapeYoutubeJob < ApplicationJob
     )
   end
 
+  # ACHADO C (P2, sol 13/08): o rescue era `StandardError`, portanto
+  # NoMethodError/ArgumentError (bugs de código) viravam fallback "degradado
+  # com sucesso", mascarando falhas. Limitamos o fallback às exceções
+  # CONHECIDAS de extração/rede/cookies — exatamente as que o
+  # YoutubeScraperService e o cliente HTTP levantam sob condições esperadas.
+  # Qualquer outra (NoMethodError, ArgumentError, etc.) PROPAGA para o rescue
+  # de StandardError do perform, que marca degraded + alerta (não finge sucesso).
+  COLLECT_WITH_COOKIES_FALLBACK_ERRORS = [
+    Timeout::Error,
+    Net::ReadTimeout,
+    Net::OpenTimeout,
+    Net::HTTPError,
+    Faraday::Error,
+    JSON::ParserError,
+    Errno::ECONNRESET,
+    Errno::ECONNREFUSED,
+    Errno::ETIMEDOUT,
+    OpenSSL::SSL::SSLError,
+    ScrapingServices::RateLimitError
+  ].freeze
+
   # Apenas a EXTRação com cookies tem fallback sem cookies. O refresh do jar
   # (persistência) NÃO está coberto: falha de banco/integração deve propagar
   # para o retry do job, não ser reinterpretada como problema de sessão
@@ -109,7 +130,7 @@ class ScrapeYoutubeJob < ApplicationJob
     )
   rescue ScrapingServices::RateLimitError
     raise
-  rescue StandardError => e
+  rescue *COLLECT_WITH_COOKIES_FALLBACK_ERRORS => e
     # Non-CookieJar failures inside the cookies block (parse errors, network
     # errors from the scraper, etc.) should not abort the whole collection —
     # fall back to a no-cookies extraction so we still collect degraded data
