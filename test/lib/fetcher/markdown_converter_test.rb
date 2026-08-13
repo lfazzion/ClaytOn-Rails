@@ -72,15 +72,61 @@ class Fetcher::MarkdownConverterTest < ActiveSupport::TestCase
     assert_not_includes markdown, "menu"
   end
 
-  test "imagem sem alt é descartada; com alt vira referência curta" do
+  test "imagem sem alt é descartada; com alt e src vira imagem markdown válida" do
     assert_equal "", convert('<img src="x.png">')
-    assert_equal "![diagrama]", convert('<img src="x.png" alt="diagrama">')
+    assert_equal "![diagrama](x.png)", convert('<img src="x.png" alt="diagrama">')
+  end
+
+  test "imagem com src ausente é descartada" do
+    assert_equal "", convert('<img alt="diagrama">')
+    assert_equal "", convert('<img>')
+  end
+
+  test "imagem com esquema perigoso (javascript, data) é descartada" do
+    assert_equal "", convert('<img src="javascript:alert(1)" alt="x">')
+    assert_equal "", convert('<img src="data:text/html,foo" alt="x">')
+  end
+
+  test "imagem com esquema perigoso bypassa case-sensitive (JavaScript:, Data:, VBScript:)" do
+    assert_equal "", convert('<img src="JavaScript:alert(1)" alt="x">')
+    assert_equal "", convert('<img src="DATA:text/html,foo" alt="x">')
+    assert_equal "", convert('<img src="vbscript:msgbox(1)" alt="x">')
+    assert_equal "", convert('<img src="VBScript:msgbox(1)" alt="x">')
+  end
+
+  test "imagem com scheme perigoso e whitespace obfuscado é descartada" do
+    assert_equal "", convert('<img src="java	script:alert(1)" alt="x">')
+    assert_equal "", convert('<img src="java script:alert(1)" alt="x">')
+  end
+
+  test "imagem com scheme http(s) normal é preservada" do
+    assert_equal "![ok](https://exemplo.com/img.png)", convert('<img src="https://exemplo.com/img.png" alt="ok">')
+    assert_equal "![ok](http://exemplo.com/img.png)", convert('<img src="http://exemplo.com/img.png" alt="ok">')
   end
 
   test "html vazio ou nil devolve string vazia" do
     assert_equal "", convert(nil)
     assert_equal "", convert("")
     assert_equal "", convert("   ")
+  end
+
+  test "tabela vazia no início calcula separador com colunas da primeira linha útil" do
+    html = "<table><tr></tr><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
+    markdown = convert(html)
+
+    assert_includes markdown, "| A | B |"
+    assert_includes markdown, "| 1 | 2 |"
+    assert_match(/^\| --- \| --- \|$/, markdown)
+  end
+
+  test "tabela externa não incorpora linhas de tabela aninhada" do
+    html = "<table><tr><th>A</th><th>B</th></tr><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>"
+    markdown = convert(html)
+
+    assert_includes markdown, "| A | B |"
+    # A linha da tabela interna não deve aparecer como linha independente
+    # (standalone) da tabela externa — ela deve estar apenas dentro da célula.
+    assert_not_includes markdown.lines.map(&:strip), "| inner |"
   end
 
   test "markdown é menor que o HTML de origem" do

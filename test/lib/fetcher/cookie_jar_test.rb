@@ -217,6 +217,35 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
     assert_equal "rotacionado", Fetcher::CookieJar.for("old.reddit.com").first["value"]
   end
 
+  test "refresh_for! atualiza payload e expires_at atomicamente quando fornecido" do
+    original_expires = 3.days.from_now.change(usec: 0)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: original_expires)
+
+    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
+    novo_expires = 7.days.from_now.change(usec: 0)
+
+    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos, expires_at: novo_expires)
+
+    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_equal "rotacionado", Fetcher::CookieJar.for("reddit.com").first["value"]
+    assert_in_delta novo_expires.to_f, registro.expires_at.to_f, 1,
+                     "expires_at atualizado junto do payload"
+  end
+
+  test "refresh_for! preserva expires_at quando omitido" do
+    original_expires = 3.days.from_now.change(usec: 0)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: original_expires)
+
+    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
+
+    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos)
+
+    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_equal "rotacionado", Fetcher::CookieJar.for("reddit.com").first["value"]
+    assert_in_delta original_expires.to_f, registro.expires_at.to_f, 60,
+                     "chamada sem expires_at não deve tocar o prazo existente"
+  end
+
   # O MESMO bug do `RefreshSessionCookiesJob`, no caminho do NAVEGADOR. Se a sessao
   # e rejeitada durante a visita, os cookies da pagina viram o conjunto anonimo, e
   # `persist_rotation` os grava por cima do jar bom. Nao e vazio, entao o unico

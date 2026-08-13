@@ -98,6 +98,16 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
     assert_kind_of Fetcher::Channels::Error, err
   end
 
+  test "5b. API responde HTTP 200 com JSON não-Hash (Array) levanta ApiError herdando de Channels::Error" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 200, body: JSON.generate([]), headers: { "Content-Type" => "application/json" })
+
+    err = assert_raises(Fetcher::Channels::Github::ApiError) do
+      Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+    end
+    assert_kind_of Fetcher::Channels::Error, err
+  end
+
   test "6. comentários com JSON inválido levantam ApiError (não resumo falso)" do
     stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
       .to_return(status: 200, body: JSON.generate({ "title" => "Issue", "state" => "open",

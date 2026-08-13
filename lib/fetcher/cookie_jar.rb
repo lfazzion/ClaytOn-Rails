@@ -165,7 +165,7 @@ module Fetcher
       # quem chega por este método é `BrowserSession#persist_rotation`, e uma sessão
       # rejeitada durante a visita deixa a página com o conjunto anônimo — que não é
       # vazio e passaria pelo único guarda que existia antes.
-      def refresh_for!(host, cookies)
+      def refresh_for!(host, cookies, expires_at: nil)
         filtered = filter_cookies(host, cookies)
         return false if filtered.blank?
 
@@ -179,7 +179,11 @@ module Fetcher
         record = live_record(host)
         return false if record.nil?
 
-        record.update!(payload: JSON.generate(filtered))
+        if expires_at
+          record.update!(payload: JSON.generate(filtered), expires_at: expires_at)
+        else
+          record.update!(payload: JSON.generate(filtered))
+        end
         true
       end
 

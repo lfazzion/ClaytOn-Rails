@@ -21,13 +21,19 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   end
 
   class FakePage
-    attr_reader :cookies, :visitado, :fechada
+    attr_reader :cookies, :visitado, :fechada, :commands
 
     def initialize(document_remote_ip: nil)
       @cookies = FakeCookies.new
       @fechada = false
       @document_remote_ip = document_remote_ip
       @listeners = {}
+      @commands = []
+    end
+
+    def command(name, params = {})
+      @commands << [name, params]
+      true
     end
 
     def go_to(url)
@@ -207,5 +213,46 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     posto = @page.cookies.postos.find { |c| c[:name] == "__Secure-3PSID" }
     assert_not_nil posto
     assert_equal true, posto[:secure]
+  end
+
+  test "inject_cookies envia Network.setCookie via CDP com url, secure e path / sem domain para cookies __Host-*" do
+    host_cookie = { "name" => "__Host-SID", "value" => "host_val", "domain" => "youtube.com", "path" => "/" }
+    Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[host_cookie], :jar])
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    cmd = @page.commands.find { |c, p| c == "Network.setCookie" && p[:name] == "__Host-SID" }
+    assert_not_nil cmd
+    _name, params = cmd
+    assert_equal "host_val", params[:value]
+    assert_equal "https://www.youtube.com/", params[:url]
+    assert_equal true, params[:secure]
+    assert_equal "/", params[:path]
+    assert_not_includes params.keys, :domain
+    assert_not_includes params.keys, "domain"
+  end
+
+  test "persist_rotation solicita renovação de expires_at por sete dias" do
+    sid_cookie = Struct.new(:name, :value, :domain, :path).new(
+      "SID", "abc", ".youtube.com", "/"
+    )
+    @page.cookies.stubs(:all).returns({ "SID" => sid_cookie })
+
+    # Teste REAL (sem stub de refresh_for!): o stub mascara o ArgumentError
+    # quando a assinatura não aceita expires_at: (achado P1 do sol, 13/08).
+    # O setup já criou o registro (domain "youtube.com", 7 dias) — encurta
+    # expires_at para provar que a rotação REALMENTE estende.
+    jar_record = BrowserSessionCookie.find_by(domain: "youtube.com")
+    assert_not_nil jar_record, "setup deve ter criado o registro do jar"
+    jar_record.update!(expires_at: 1.day.from_now)
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    jar_record.reload
+    parsed = JSON.parse(jar_record.payload)
+    assert_equal "abc", parsed.first["value"], "payload deve ser persistido de volta"
+    assert_operator jar_record.expires_at, :>, 6.days.from_now,
+                    "rotacao deve estender expires_at para ~7 dias"
+    assert_operator jar_record.expires_at, :<=, 8.days.from_now
   end
 end

@@ -80,7 +80,7 @@ module Fetcher
           raise ApiError, "API do GitHub respondeu HTTP #{http_resp.status}" unless http_resp.success?
 
           payload = parse_json(http_resp.body)
-          raise ApiError, "resposta inválida da API do GitHub" if payload.nil?
+          raise ApiError, "resposta inválida da API do GitHub" unless payload.is_a?(Hash)
 
           comments = fetch_comments(owner, repo, number, headers) if payload["comments"].to_i.positive?
           comments ||= []

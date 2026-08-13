@@ -100,4 +100,48 @@ class Fetcher::PageFetcherTest < ActiveSupport::TestCase
     assert_equal primeira[:fetched_at], segunda[:fetched_at],
                  "acerto de cache devolve a MESMA entrada — o fetch não pode ter rodado de novo"
   end
+
+  test "falha ao gravar cache não descarta fetch bem-sucedido" do
+    Fetcher::PageFetcher.any_instance.stubs(:fetch_via_ferrum).returns(raw_result)
+    # FileStore implementa `increment` via `write` internamente — sem stubar
+    # o increment, o rate limiter (que roda ANTES do fetch) quebra com o
+    # mesmo "cache caiu" e o teste erra o alvo (13/08, medido).
+    Rails.cache.stubs(:increment).returns(1)
+    Rails.cache.stubs(:write).raises(StandardError, "cache caiu")
+    Rails.logger.expects(:warn).with { |msg| msg.to_s.include?("falha ao gravar cache") }
+
+    result = Fetcher::PageFetcher.call("https://example.com/cache-fail")
+    assert_includes result[:content], "Sample readability"
+  end
+
+  test "Timeout::Error no fallback Python vira PythonFetchError" do
+    Fetcher::PageFetcher.stubs(:hard_domains).returns(["blocked-site.example"])
+    ScrapingServices::NodriverRunner.stubs(:fetch_page).raises(Timeout::Error)
+
+    erro = assert_raises(Fetcher::PageFetcher::PythonFetchError) do
+      Fetcher::PageFetcher.call("https://blocked-site.example/")
+    end
+    assert_includes erro.message, "Timeout::Error"
+    assert_kind_of Fetcher::PageFetcher::FetchError, erro
+  end
+
+  test "ScrapingServices::RateLimitError no fallback Python vira PythonFetchError" do
+    Fetcher::PageFetcher.stubs(:hard_domains).returns(["blocked-site.example"])
+    ScrapingServices::NodriverRunner.stubs(:fetch_page).raises(ScrapingServices::RateLimitError.new("429"))
+
+    erro = assert_raises(Fetcher::PageFetcher::PythonFetchError) do
+      Fetcher::PageFetcher.call("https://blocked-site.example/")
+    end
+    assert_includes erro.message, "RateLimitError"
+    assert_kind_of Fetcher::PageFetcher::FetchError, erro
+  end
+
+  test "fallback Python retorna vazio ainda vira FetchError" do
+    Fetcher::PageFetcher.stubs(:hard_domains).returns(["blocked-site.example"])
+    ScrapingServices::NodriverRunner.stubs(:fetch_page).returns(nil)
+
+    assert_raises(Fetcher::PageFetcher::FetchError) do
+      Fetcher::PageFetcher.call("https://blocked-site.example/")
+    end
+  end
 end
