@@ -36,9 +36,10 @@ jobs:
 
       - name: Create writable dirs for test container
         # tmp/ e log/ são gitignored e não existem no checkout; o service test
-        # monta tmpfs por cima deles (e o checkout é :ro), mas o mountpoint
-        # precisa existir antes (runc não cria dentro de bind read-only).
-        run: mkdir -p tmp log
+        # monta bind por cima deles (checkout é :ro) — o container roda como
+        # user rails (uid 1000) e o runner cria os dirs com uid 1001, então
+        # chmod 777 garante escrita (CI 13/08).
+        run: mkdir -p tmp log && chmod 777 tmp log
 
       - name: Build images
         run: docker compose -f docker/docker-compose.yml build test chrome

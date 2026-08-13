@@ -444,11 +444,14 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_empty writable_non_ro,
                  "nenhum volume do checkout deve ser gravável sem :ro"
 
-    # tmpfs gravável sobre tmp e log (não bind-mount: no CI o checkout não tem
-    # tmp/ e o docker criaria o dir como root, inacessível ao user rails).
-    tmpfs_targets = volumes.select { |v| v.is_a?(Hash) && v["type"] == "tmpfs" }.map { |v| v["target"] }
-    assert_includes tmpfs_targets, "/rails/tmp", "tmp deve ser montado gravável (tmpfs)"
-    assert_includes tmpfs_targets, "/rails/log", "log deve ser montado gravável (tmpfs)"
+    # tmp e log graváveis via bind relativo (../tmp:/rails/tmp) — o daemon
+    # root do CI não monta tmpfs aninhado dentro do bind :ro de /rails
+    # (13/08, medido); o workflow cria tmp/ log/ com chmod 777.
+    writable_paths = volumes.select { |v| v.is_a?(String) && v =~ %r{:/rails/(tmp|log)$} }
+    assert writable_paths.any? { |v| v.end_with?("/rails/tmp") },
+           "tmp deve ser montado gravável"
+    assert writable_paths.any? { |v| v.end_with?("/rails/log") },
+           "log deve ser montado gravável"
 
     # O SQLite de teste deve viver em tmpfs, NÃO em bind-mount de arquivo no
     # host — um bind-mount cria um arquivo vazio (0 bytes) no host antes do
