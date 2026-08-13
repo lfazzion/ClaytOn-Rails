@@ -444,13 +444,11 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_empty writable_non_ro,
                  "nenhum volume do checkout deve ser gravável sem :ro"
 
-    # tmpfs gravável sobre tmp e log — o compose usa bind relativo
-    # (../tmp:/rails/tmp), não absoluto; verificar o lado do container.
-    writable_paths = volumes.select { |v| v.is_a?(String) && v =~ %r{:/rails/(tmp|log)$} }
-    assert writable_paths.any? { |v| v.end_with?("/rails/tmp") },
-           "tmp deve ser montado gravável"
-    assert writable_paths.any? { |v| v.end_with?("/rails/log") },
-           "log deve ser montado gravável"
+    # tmpfs gravável sobre tmp e log (não bind-mount: no CI o checkout não tem
+    # tmp/ e o docker criaria o dir como root, inacessível ao user rails).
+    tmpfs_targets = volumes.select { |v| v.is_a?(Hash) && v["type"] == "tmpfs" }.map { |v| v["target"] }
+    assert_includes tmpfs_targets, "/rails/tmp", "tmp deve ser montado gravável (tmpfs)"
+    assert_includes tmpfs_targets, "/rails/log", "log deve ser montado gravável (tmpfs)"
 
     # O SQLite de teste deve viver em tmpfs, NÃO em bind-mount de arquivo no
     # host — um bind-mount cria um arquivo vazio (0 bytes) no host antes do
