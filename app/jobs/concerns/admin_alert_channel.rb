@@ -67,13 +67,23 @@ module AdminAlertChannel
   end
 
   def start_lock_heartbeat(token)
-    state = { running: true }
+    state = { running: true, error: nil }
     thread = Thread.new do
       while state[:running]
         sleep lock_renew_interval
         break unless state[:running]
 
-        renew_lock(token)
+        begin
+          renew_lock(token)
+        rescue => e
+          # ACHADO C: falha de renovação NÃO pode ser engolida na thread do
+          # heartbeat. Capturamos e propagamos à thread principal — se o lease
+          # expirou/d foi perdido, o caller deve decidir (e não criar o canal
+          # como se ainda fosse o dono).
+          state[:error] = e
+          state[:running] = false
+          break
+        end
       end
     end
     [thread, state]
@@ -83,14 +93,41 @@ module AdminAlertChannel
     return unless heartbeat
 
     thread, state = heartbeat
+
+    # Verifica antes de tocar na thread: se o heartbeat falhou, propaga a
+    # exceção original à thread principal (ACHADO C). O wakeup/join abaixo é
+    # protegido para não substituir essa exceção por um ThreadError.
+    if state[:error]
+      raise state[:error]
+    end
+
     state[:running] = false
     thread.wakeup if thread.alive?
-    thread.join(1) rescue nil
+    # Protege contra ThreadError (thread já morta) — não deve mascarar a
+    # exceção original do heartbeat.
+    thread.join(1) rescue ThreadError
   end
 
   def renew_lock(token)
     LOCK_MUTEX.synchronize do
-      if Rails.cache.read(LOCK_KEY) == token
+      if Rails.cache.is_a?(SolidCache::Store)
+        # ACHADO B: renovação read-modify-write NÃO atômica. Substituímos por
+        # CAS atômico via lock_and_write (FOR UPDATE + verificação do dono sob
+        # lock). Se o lease já expirou e outro worker assumiu, a verificação
+        # falha e NÃO sobrescrevemos o token novo. Se ainda somos dono,
+        # reescrevemos com novo TTL (a expiração é embutida no blob do
+        # SolidCache, e Rails.cache.write com expires_in atualiza o TTL).
+        key = Rails.cache.send(:normalize_key, LOCK_KEY, nil)
+        SolidCache::Entry.lock_and_write(key) do |raw|
+          current = raw ? Rails.cache.send(:deserialize_entry, raw)&.value : nil
+          if current.to_s == token.to_s
+            Rails.cache.send(
+              :serialize_entry,
+              ActiveSupport::Cache::Entry.new(token, expires_in: lock_ttl)
+            )
+          end
+        end
+      elsif Rails.cache.read(LOCK_KEY) == token
         Rails.cache.write(LOCK_KEY, token, expires_in: lock_ttl)
       end
     end
@@ -100,16 +137,26 @@ module AdminAlertChannel
     return unless token.present?
 
     LOCK_MUTEX.synchronize do
-      if defined?(SolidCache::Entry) && Rails.cache.is_a?(SolidCache::Store)
-        # Compare-and-delete pela API pública do Solid Cache: lê o entry e só
-        # remove pela chave quando o token ainda é o dono. ACHADO 1 P1 do r9:
-        # `SolidCache::Entry.hash_key` NÃO existe no Solid Cache 1.0.10 (só
-        # key_hash_for, privado) — acessar internals quebrava o release no
-        # ensure e o primeiro alerta nunca era enviado.
-        entry = SolidCache::Entry.read(LOCK_KEY)
-        SolidCache::Entry.delete_by_key(LOCK_KEY) if entry.to_s.include?(token.to_s)
+      if Rails.cache.is_a?(SolidCache::Store)
+        # ACHADO A + F: release atômico compare-and-delete.
+        # - Usa a API real do SolidCache 1.0.10: lock_and_write trava a linha
+        #   (FOR UPDATE) e entrega o valor sob lock; dentro dele verificamos
+        #   igualdade EXATA do token e só então delete_by_key. Isso elimina a
+        #   janela read→delete não-atômica do código anterior.
+        # - A chave é namespaced via normalize_key (o código antigo lia
+        #   Entry.read(LOCK_KEY) SEM namespace, o que nunca achava a linha em
+        #   produção, onde Rails.cache tem namespace).
+        # - Igualdade exata (==), não include?, para o token não casar por
+        #   substring.
+        key = Rails.cache.send(:normalize_key, LOCK_KEY, nil)
+        SolidCache::Entry.lock_and_write(key) do |raw|
+          current = raw ? Rails.cache.send(:deserialize_entry, raw)&.value : nil
+          SolidCache::Entry.delete_by_key(key) if current.to_s == token.to_s
+          nil
+        end
       else
-        Rails.cache.delete(LOCK_KEY) if Rails.cache.read(LOCK_KEY) == token
+        current = Rails.cache.read(LOCK_KEY)
+        Rails.cache.delete(LOCK_KEY) if current.to_s == token.to_s
       end
     end
   end

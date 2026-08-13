@@ -124,12 +124,15 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
     Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
     Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    # Erro de parser/rede RECUPERÁVEL (entra em RECOVERABLE_SCRAPER_ERRORS) ainda
+    # justifica o fallback sem cookies (achado D: só estes, não qualquer
+    # StandardError genérico).
     ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
       'https://www.youtube.com/@test_channel',
       limit: 30,
       proxy: nil,
       cookies_path: '/tmp/fake_cookies.txt'
-    ).raises(StandardError.new('yt-dlp parse failure'))
+    ).raises(Errno::ECONNRESET.new('connection reset by peer'))
     # Fallback call must use cookies_path: nil (achado R3-6)
     ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
       'https://www.youtube.com/@test_channel',
@@ -221,6 +224,39 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_equal first_snapshot.id, second_snapshot.id
     assert_equal 75_000, second_snapshot.followers_count
     assert_equal 200, second_snapshot.posts_count
+  end
+
+  # ACHADO D: o rescue interno de extract_videos_with_cookies engolia QUALQUER
+  # StandardError — inclusive NoMethodError/contrato (bug de programação) — e
+  # caía num fallback "sucesso" silencioso sem cookies. Erros de programação
+  # DEVEM propagar. Aqui injetamos um NoMethodError DENTRO do bloco de cookies
+  # e exigimos que suba (e que o fallback sem cookies NÃO seja chamado).
+  test 'extract_videos_with_cookies propaga erro de programacao em vez de fallback silencioso' do
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
+    # Erro de programação (contrato quebrado), não de rede/parser/timeout:
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: '/tmp/fake_cookies.txt'
+    ).raises(NoMethodError.new('undefined method `parse\' for nil'))
+    # O fallback sem cookies NÃO deve ocorrer:
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: nil
+    ).never
+
+    assert_raises(NoMethodError) do
+      ScrapeYoutubeJob.new.send(
+        :extract_videos_with_cookies,
+        'https://www.youtube.com/@test_channel',
+        limit: 30,
+        proxy: nil
+      )
+    end
   end
 
   test 'should set degraded status and enqueue ScrapingFailureAlertJob on StandardError' do
@@ -372,7 +408,13 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_not_nil @profile.blocked_until
   end
 
-  test 'create_snapshot e seguro contra concorrencia e trata RecordNotUnique com upsert' do
+  # ACHADO G: o teste antigo pré-criava o snapshot e chamava create_snapshot
+  # com update normal — sem disparar RecordNotUnique nem concorrência. Aqui
+  # forçamos o RecordNotUnique REAL: induzimos um INSERT que colide com o
+  # registro já existente (simulando a corrida de upsert/concorrência). A
+  # rotina deve resgatar o RecordNotUnique, reler o registro e atualizá-lo —
+  # resultado final = 1 linha com os valores novos, sem duplicar nem perder.
+  test 'create_snapshot trata RecordNotUnique real e atualiza o registro existente' do
     recorded_at = Time.current.beginning_of_hour
 
     s1 = ProfileSnapshot.create!(
@@ -382,11 +424,19 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
       posts_count: 100
     )
 
+    # Fazemos o find_or_initialize_by retornar um objeto NOVO (não salvo) para
+    # forçar o INSERT. Como s1 já ocupa a unique (social_profile_id,
+    # recorded_at), esse INSERT colide de verdade e levanta
+    # ActiveRecord::RecordNotUnique — exatamente a condição de corrida.
+    ProfileSnapshot.stubs(:find_or_initialize_by).returns(
+      ProfileSnapshot.new(social_profile: @profile, recorded_at: recorded_at)
+    )
+
     ScrapeYoutubeJob.new.send(:create_snapshot, @profile, { subscriber_count: 60_000, video_count: 110 })
 
     snapshots = ProfileSnapshot.where(social_profile: @profile, recorded_at: recorded_at)
-    assert_equal 1, snapshots.count
-    assert_equal s1.id, snapshots.first.id
+    assert_equal 1, snapshots.count, 'não deve duplicar o snapshot sob RecordNotUnique'
+    assert_equal s1.id, snapshots.first.id, 'deve manter o mesmo registro'
     assert_equal 60_000, snapshots.first.followers_count
     assert_equal 110, snapshots.first.posts_count
   end

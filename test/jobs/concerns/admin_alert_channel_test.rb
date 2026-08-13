@@ -146,6 +146,58 @@ class AdminAlertChannelTest < ActiveSupport::TestCase
     end
   end
 
+  # ACHADO C: falhas do renew_lock na thread do heartbeat devem ser capturadas
+  # e propagadas à thread principal — a renovação NÃO deve falhar silenciosamente
+  # (o que permitiria que o canal continuasse sendo criado após perder o lease).
+  # Aqui injetamos uma falha no renew_lock e exigimos que ela suba até o caller.
+  test 'heartbeat propaga falha de renew_lock para a thread principal em vez de falhar silenciosamente' do
+    ENV.delete('DISCORD_ADMIN_CHANNEL_ID')
+    DiscordApiClient.stubs(:get_bot_guilds).returns([{ 'id' => 'guild789' }])
+    # Retarda a criação do canal para garantir que o heartbeat (intervalo
+    # reduzido) dispare e falhe ANTES do ensure do caller.
+    DiscordApiClient.stubs(:create_text_channel).with { sleep 0.1; true }.returns({ 'id' => 'channel456' })
+
+    job = DummyJob.new
+    # Injeta uma falha determinística no renew_lock.
+    job.singleton_class.send(:define_method, :renew_lock) do |_token|
+      raise 'falha simulada no heartbeat/renew_lock'
+    end
+
+    AdminAlertChannel.send(:remove_const, :LOCK_RENEW_INTERVAL) rescue nil
+    AdminAlertChannel.const_set(:LOCK_RENEW_INTERVAL, 0.01)
+    begin
+      error = assert_raises(RuntimeError) { job.send(:ensure_admin_channel) }
+      assert_match(/falha simulada no heartbeat/, error.message)
+    ensure
+      AdminAlertChannel.send(:remove_const, :LOCK_RENEW_INTERVAL) rescue nil
+      AdminAlertChannel.const_set(:LOCK_RENEW_INTERVAL, 3)
+    end
+  end
+
+  # ACHADO C (parte 2): o wakeup/join da parada do heartbeat não deve mascarar
+  # a exceção original com um ThreadError. A exceção do heartbeat deve chegar
+  # ao caller em vez de ser substituída por erro de join sobre thread morta.
+  test 'stop_lock_heartbeat nao mascara excecao original do heartbeat com ThreadError' do
+    ENV.delete('DISCORD_ADMIN_CHANNEL_ID')
+    DiscordApiClient.stubs(:get_bot_guilds).returns([{ 'id' => 'guild789' }])
+    DiscordApiClient.stubs(:create_text_channel).with { sleep 0.1; true }.returns({ 'id' => 'channel456' })
+
+    job = DummyJob.new
+    job.singleton_class.send(:define_method, :renew_lock) do |_token|
+      raise 'erro unico do heartbeat'
+    end
+
+    AdminAlertChannel.send(:remove_const, :LOCK_RENEW_INTERVAL) rescue nil
+    AdminAlertChannel.const_set(:LOCK_RENEW_INTERVAL, 0.01)
+    begin
+      error = assert_raises(RuntimeError) { job.send(:ensure_admin_channel) }
+      assert_match(/erro unico do heartbeat/, error.message)
+    ensure
+      AdminAlertChannel.send(:remove_const, :LOCK_RENEW_INTERVAL) rescue nil
+      AdminAlertChannel.const_set(:LOCK_RENEW_INTERVAL, 3)
+    end
+  end
+
   test 'release_lock atômico previne exclusao da chave quando token no cache muda durante a liberacao' do
     job = DummyJob.new
     token1 = 'token_worker_1'

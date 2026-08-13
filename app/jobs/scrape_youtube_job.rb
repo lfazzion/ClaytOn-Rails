@@ -11,6 +11,18 @@ class ScrapeYoutubeJob < ApplicationJob
 
   SNAPSHOT_DEDUP_WINDOW = 20.hours
 
+  # ACHADO D: só estas exceções (erros de rede/timeout/parser do scraper)
+  # são recuperáveis via fallback sem cookies. Bugs de programação
+  # (NoMethodError, ArgumentError, quebra de contrato) NÃO entram aqui e
+  # propagam para o handler externo do job.
+  # `const_get` com rescue evita NameError no boot caso alguma classe de
+  # stdlib (ex.: OpenURI) não esteja carregada no ambiente.
+  RECOVERABLE_SCRAPER_ERRORS = %w[
+    Errno::ECONNRESET Errno::ECONNREFUSED Errno::ETIMEDOUT
+    Net::ReadTimeout Net::OpenTimeout SocketError
+    OpenURI::HTTPError URI::InvalidURIError
+  ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
+
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
     raise ArgumentError, "Perfil #{profile_id} não é YouTube" unless profile.platform == "youtube"
@@ -101,13 +113,12 @@ class ScrapeYoutubeJob < ApplicationJob
     )
   rescue ScrapingServices::RateLimitError
     raise
-  rescue StandardError => e
-    # Any non-CookieJar failure inside the cookies block (parse errors, network
-    # errors from the scraper, etc.) should not abort the whole collection —
-    # fall back to a no-cookies extraction so we still collect degraded data
-    # (achado R3-6). The cookie-jar-specific path above still takes precedence
-    # for Expired, which is a recoverable, expected condition.
-    Rails.logger.warn "[ScrapeYoutubeJob] Erro inesperado coletando vídeos com cookies: #{e.class}: #{e.message}. Coletando sem cookies."
+  rescue *RECOVERABLE_SCRAPER_ERRORS => e
+    # ACHADO D: só erros RECUPERÁVEIS conhecidos (rede/timeout/parser do
+    # scraper) justificam o fallback sem cookies. Qualquer outra exceção —
+    # inclusive NoMethodError ou quebra de contrato (bug de programação) —
+    # DEVE propagar, e não virar um "sucesso" silencioso sem cookies.
+    Rails.logger.warn "[ScrapeYoutubeJob] Erro recuperável coletando vídeos com cookies (#{e.class}): #{e.message}. Coletando sem cookies."
     ScrapingServices::YoutubeScraperService.extract_videos_detailed(
       channel_url,
       limit: limit,
