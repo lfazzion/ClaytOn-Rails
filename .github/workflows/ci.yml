@@ -34,6 +34,12 @@ jobs:
           DISCORD_DIGEST_CHANNEL_ID=
           EOF
 
+      - name: Create writable dirs for test container
+        # tmp/ e log/ são gitignored e não existem no checkout; o service test
+        # monta tmpfs por cima deles (e o checkout é :ro), mas o mountpoint
+        # precisa existir antes (runc não cria dentro de bind read-only).
+        run: mkdir -p tmp log
+
       - name: Build images
         run: docker compose -f docker/docker-compose.yml build test chrome
 
