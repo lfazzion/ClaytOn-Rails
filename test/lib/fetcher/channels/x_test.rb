@@ -456,9 +456,31 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     assert_match /empty\s*:/, js
     assert_match /empty_state_header_text/, js
     # Um seletor que mudou tem de virar campo nulo, não exceção que derruba a
-    # chamada inteira — é o que o Reddit já faz.
-    assert_operator js.scan("catch").size, :>=, 4
+    # chamada inteira — é o que o Reddit já faz. Cada helper tem seu próprio
+    # try/catch, verificado individualmente em vez de por contagem global.
+    %w[txt permalink quando autor reserva contador].each do |helper|
+      bloco = extract_timeline_js_function(js, helper)
+      refute_nil bloco, "helper #{helper} não declarado em TIMELINE_JS"
+      assert_match(/try/, bloco, "helper #{helper} não protege com try")
+      assert_match(/catch/, bloco, "helper #{helper} não tem catch")
+    end
     refute_match(/querySelector\(\s*['"]\s*>/, js)
+  end
+
+  test "extract_timeline_js_function isola o último helper (contador) sem vazar o try/catch do IIFE externo" do
+    js = Fetcher::Channels::X::TIMELINE_JS
+    bloco = extract_timeline_js_function(js, "contador")
+    refute_nil bloco
+    assert_match(/try/, bloco)
+    assert_match(/catch/, bloco)
+    # O IIFE externo tem `var out = []` — se contador vazar, isto aparece:
+    refute_match(/var out = \[\]/, bloco)
+  end
+
+  test "extract_timeline_js_function devolve nil e refute_nil falha quando o helper não existe" do
+    js = Fetcher::Channels::X::TIMELINE_JS
+    bloco = extract_timeline_js_function(js, "nao_existe")
+    assert_nil bloco, "helper inexistente deveria devolver nil"
   end
 
   # O JS de produção devolve {items, empty} (hash). Este teste usa FakePage
@@ -483,6 +505,45 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
 
   def from_search(lotes, limit: 10)
     Fetcher::Channels::X.from_search_page(page: FakePage.new(lotes), limit: limit)
+  end
+
+  # Extrai o corpo de uma função JS nomeada de TIMELINE_JS, delimitando a
+  # declaração para in-specie. Usado para validar try/catch por helper, e não
+  # por contagem global de "catch" no arquivo inteiro. Cada helper é extraído
+  # do ponto da declaração `function NAME(` até o fechamento do bloco de chaves
+  # da própria função — contagem de profundidade, não busca do próximo
+  # `function`, para que o último helper (contador) não inclua o try/catch do
+  # IIFE externo.
+  def extract_timeline_js_function(js, name)
+    marker = "function #{name}"
+    start_idx = js.index(marker)
+    return nil unless start_idx
+
+    after = js[(start_idx + marker.length)..-1]
+
+    # Encontre o início do bloco da função: o primeiro `{` após os parâmetros.
+    # Os helpers têm todos a forma `function NAME(arg) {` ou `function NAME {`
+    # com o `{` na mesma linha — `index("{")` pega o abre-chave da assinatura.
+    body_start = after.index("{")
+    return nil unless body_start
+
+    # Conta profundidade de chaves para isolar exclusivamente o bloco desta
+    # função. Strings e comentários não contam — os helpers não contêm `{`
+    # dentro de string nem template literals, de onde o `{}` da chave é o único
+    # abre-chave no início da linha.
+    depth = 0
+    body_start.upto(after.length - 1) do |i|
+      ch = after[i]
+      if ch == "{"
+        depth += 1
+      elsif ch == "}"
+        depth -= 1
+        return after[0..i] if depth.zero?
+      end
+    end
+    # Nunca deveria chegar aqui (JS bem formado sempre fecha), mas se o
+    # heredoc estiver truncado devolve nil para falhar explícito:
+    nil
   end
 
   test "from_search_page com busca com resultados devolve hash de chaves string" do

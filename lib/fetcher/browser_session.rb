@@ -76,11 +76,19 @@ module Fetcher
       # (CDN multi-registro, dual-stack A/AAAA) — exigir igualdade com
       # `resolution.ip` (= `ips.first`) derrubava tráfego legítimo. O que
       # importa: o documento principal não pode ter vindo de IP
-      # privado/loopback/metadata (rebinding de verdade).
+      # privado/loopback/metadata (rebinding de verdade). Sem o campo (CDP
+      # antigo, caminho Python) o cheque desliga com log, melhor que derrubar
+      # o caminho.
       def assert_document_ip!(remote_ip, url)
-        return if remote_ip.to_s.empty?
+        if remote_ip.to_s.empty?
+          Rails.logger.warn "[Fetcher::BrowserSession] remoteIPAddress ausente — " \
+                            "validação pós-navegação desativada (fail-open) em #{url}"
+          return
+        end
         return unless SsrfGuard.ip_blocked?(remote_ip)
 
+        Rails.logger.warn "[Fetcher::BrowserSession] rebinding em #{url}: " \
+                          "Chrome conectou em IP bloqueado/privado #{remote_ip}"
         raise SsrfGuard::Blocked.new(
           "DNS rebinding detectado em #{url}: Chrome conectou em IP bloqueado/privado #{remote_ip}"
         )
@@ -96,17 +104,33 @@ module Fetcher
           next unless CookieJar.allowed_domain?(host, cdom)
 
           name = cookie["name"].to_s
-          opts = {
-            name:   name,
-            value:  cookie["value"].to_s,
-            domain: cdom.to_s,
-            path:   cookie.fetch("path", "/").to_s
-          }
-          opts[:secure] = true if name.start_with?("__Secure-")
-          # Nota sobre __Host-*: cookies __Host-* exigem secure: true, path: "/" e ausência de Domain no CDP/browser.
-          # Não inferimos/reescrevemos __Host-* aqui automaticamente (dívida técnica).
+          if name.start_with?("__Host-")
+            # Prefixo __Host- exige três condições no Chrome/Chromium:
+            # Secure=true, Path=/ (exato), e AUSÊNCIA de Domain. Passar
+            # `domain` (mesmo nil) faz o Chrome/CDP rejeitar o cookie.
+            # `Ferrum::Cookies#set` reinsere `domain: default_domain` (que é nil
+            # antes da navegação), gerando `domain: null` no CDP.
+            # Por isso chamamos `Network.setCookie` diretamente via `page.command`,
+            # passando `url:` e omitindo `domain`.
+            page.command(
+              "Network.setCookie",
+              name:   name,
+              value:  cookie["value"].to_s,
+              url:    "https://#{host}/",
+              path:   "/",
+              secure: true
+            )
+          else
+            opts = {
+              name:   name,
+              value:  cookie["value"].to_s,
+              domain: cdom.to_s,
+              path:   cookie.fetch("path", "/").to_s
+            }
+            opts[:secure] = true if name.start_with?("__Secure-")
 
-          page.cookies.set(opts)
+            page.cookies.set(opts)
+          end
         end
       end
 
@@ -117,7 +141,7 @@ module Fetcher
             "domain" => cookie.domain.to_s, "path" => cookie.path.to_s.presence || "/"
           }
         end
-        CookieJar.refresh_for!(host, atuais)
+        CookieJar.refresh_for!(host, atuais, expires_at: 7.days.from_now)
       rescue StandardError => e
         Rails.logger.warn "[Fetcher::BrowserSession] rotação não persistida: #{e.class}: #{e.message}"
       end

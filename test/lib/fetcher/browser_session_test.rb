@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
 require_relative "../../../lib/fetcher/browser_session"
 
 class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
@@ -21,13 +22,19 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   end
 
   class FakePage
-    attr_reader :cookies, :visitado, :fechada
+    attr_reader :cookies, :visitado, :fechada, :commands
 
     def initialize(document_remote_ip: nil)
       @cookies = FakeCookies.new
       @fechada = false
       @document_remote_ip = document_remote_ip
       @listeners = {}
+      @commands = []
+    end
+
+    def command(name, **params)
+      @commands << [name, params]
+      true
     end
 
     def go_to(url)
@@ -207,5 +214,37 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     posto = @page.cookies.postos.find { |c| c[:name] == "__Secure-3PSID" }
     assert_not_nil posto
     assert_equal true, posto[:secure]
+  end
+
+  test "inject_cookies força secure, path=/ e ausência de domain para cookies __Host-*" do
+    host_cookie = { "name" => "__Host-3PSID", "value" => "host_val", "domain" => ".youtube.com", "path" => "/safebrowse" }
+    Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[host_cookie], :jar])
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    cmd = @page.commands.find { |c| c[0] == "Network.setCookie" && c[1][:name] == "__Host-3PSID" }
+    assert_not_nil cmd, "cookie __Host- deve chamar Network.setCookie no CDP diretamente"
+    params = cmd[1]
+    assert_equal true, params[:secure], "cookie __Host- precisa de Secure"
+    assert_equal "/", params[:path], "cookie __Host- precisa de Path=/ exato"
+    assert_equal "https://www.youtube.com/", params[:url], "cookie __Host- precisa de url de origem"
+    assert_not params.key?(:domain), "cookie __Host- não pode ter atributo Domain (Chrome/Ferrum rejeita se domain for passado)"
+  end
+
+  test "sem remoteIPAddress no CDP o canal segue (fail-open com log), não derruba" do
+    log = StringIO.new
+    original_logger = Rails.logger
+    Rails.logger = Logger.new(log)
+    Rails.logger.level = Logger::WARN
+    begin
+      result = Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    ensure
+      Rails.logger = original_logger
+    end
+
+    assert_equal :ok, result
+    assert_match(/remoteIPAddress ausente/i, log.string)
+    assert_match(/validação pós-navegação desativada/i, log.string)
+    assert_match(/youtube\.com/, log.string)
   end
 end

@@ -264,7 +264,11 @@ module Fetcher
     # antigo, caminho Python) o cheque desliga com log, melhor que derrubar o
     # caminho.
     def assert_document_ip!(remote_ip, final_url)
-      return if remote_ip.to_s.empty?
+      if remote_ip.to_s.empty?
+        Rails.logger.warn "[Fetcher::PageFetcher] remoteIPAddress ausente — " \
+                          "validação pós-navegação desativada (fail-open) em #{final_url}"
+        return
+      end
       return unless SsrfGuard.ip_blocked?(remote_ip)
 
       Rails.logger.warn "[Fetcher::PageFetcher] rebinding em #{final_url}: " \
@@ -322,9 +326,11 @@ module Fetcher
       {
         title: result[:title].to_s,
         final_url: result[:url].to_s.presence || uri.to_s,
-        # O nodriver não expõe o IP do documento — o cheque de rebinding
-        # desliga neste caminho (assert_document_ip! sai cedo com nil).
-        document_ip: nil,
+        # O nodriver captura o remoteIPAddress do documento principal via CDP
+        # (Network.responseReceived). Quando o campo vem ausente/falha no CDP,
+        # nil fail-open no assert_document_ip! com log — melhor derrubar o
+        # caminho do que perder a proteção de rebinding quando o IP existe.
+        document_ip: result[:document_ip],
         readability_text: nil,
         readability_html: nil,
         body_text: result[:content].to_s,
