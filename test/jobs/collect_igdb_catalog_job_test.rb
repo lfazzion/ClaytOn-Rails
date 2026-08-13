@@ -65,12 +65,61 @@ class CollectIgdbCatalogJobTest < ActiveJob::TestCase
     assert_equal "Old Game", catalog.title
   end
 
-  test "should not crash when client returns nil" do
-    ScrapingServices::IgdbClient.stubs(:fetch_popular_games).returns(nil)
-    ScrapingServices::IgdbClient.stubs(:fetch_upcoming_games).returns(nil)
+  test "should classify as released when status is explicitly zero" do
+    ScrapingServices::IgdbClient.stubs(:fetch_popular_games).returns([
+      {
+        "id" => 9001,
+        "name" => "Released Game",
+        "first_release_date" => 1700000000, # past date
+        "rating" => 80,
+        "rating_count" => 100,
+        "status" => 0
+      }
+    ])
+    ScrapingServices::IgdbClient.stubs(:fetch_upcoming_games).returns([])
 
-    assert_no_difference 'ExternalCatalog.count' do
-      CollectIgdbCatalogJob.perform_now
-    end
+    CollectIgdbCatalogJob.perform_now
+
+    catalog = ExternalCatalog.find_by(source: "igdb", external_id: "9001")
+    assert_not_nil catalog
+    assert_equal "released", catalog.status
+  end
+
+  test "should classify future item without status as upcoming" do
+    ScrapingServices::IgdbClient.stubs(:fetch_popular_games).returns([
+      {
+        "id" => 9002,
+        "name" => "Future Game",
+        "first_release_date" => 1.year.from_now.to_i,
+        "rating" => 70,
+        "rating_count" => 50
+      }
+    ])
+    ScrapingServices::IgdbClient.stubs(:fetch_upcoming_games).returns([])
+
+    CollectIgdbCatalogJob.perform_now
+
+    catalog = ExternalCatalog.find_by(source: "igdb", external_id: "9002")
+    assert_not_nil catalog
+    assert_equal "upcoming", catalog.status
+  end
+
+  test "should classify past item without status as released" do
+    ScrapingServices::IgdbClient.stubs(:fetch_popular_games).returns([
+      {
+        "id" => 9003,
+        "name" => "Past Game",
+        "first_release_date" => 1.year.ago.to_i,
+        "rating" => 70,
+        "rating_count" => 50
+      }
+    ])
+    ScrapingServices::IgdbClient.stubs(:fetch_upcoming_games).returns([])
+
+    CollectIgdbCatalogJob.perform_now
+
+    catalog = ExternalCatalog.find_by(source: "igdb", external_id: "9003")
+    assert_not_nil catalog
+    assert_equal "released", catalog.status
   end
 end

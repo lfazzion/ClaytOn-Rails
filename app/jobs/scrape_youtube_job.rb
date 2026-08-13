@@ -7,6 +7,8 @@ require Rails.root.join("lib/fetcher/channels/youtube")
 class ScrapeYoutubeJob < ApplicationJob
   queue_as :scraping
 
+  limits_concurrency key: ->(profile_id, _options = {}) { "scrape_youtube/#{profile_id}" }, to: 1
+
   SNAPSHOT_DEDUP_WINDOW = 20.hours
 
   def perform(profile_id, options = {})
@@ -21,7 +23,16 @@ class ScrapeYoutubeJob < ApplicationJob
     channel_url = build_channel_url(profile)
 
     metadata = ScrapingServices::YoutubeScraperService.extract_channel_metadata(channel_url, proxy: proxy)
-    return if metadata.nil?
+    if metadata.nil?
+      profile.update!(collection_status: "degraded")
+      ScrapingFailureAlertJob.perform_later(
+        "youtube",
+        profile.id,
+        "extract_channel_metadata returned nil",
+        "metadata_failure"
+      )
+      return
+    end
 
     limit = options.fetch(:limit, 30)
     videos, fallback_used = extract_videos_with_cookies(channel_url, limit: limit, proxy: proxy)
@@ -66,12 +77,7 @@ class ScrapeYoutubeJob < ApplicationJob
   def extract_videos_with_cookies(channel_url, limit:, proxy:)
     cookies, = Fetcher::SessionCookies.for("youtube.com")
     Fetcher::CookieJar.with_netscape_file("youtube.com", cookies: cookies) do |cookies_path|
-      result = ScrapingServices::YoutubeScraperService.extract_videos_detailed(
-        channel_url,
-        limit: limit,
-        proxy: proxy,
-        cookies_path: cookies_path
-      )
+      result = collect_with_cookies(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path)
       Fetcher::CookieJar.refresh_from_netscape!(
         domain: "youtube.com",
         path: cookies_path,
@@ -82,6 +88,34 @@ class ScrapeYoutubeJob < ApplicationJob
     end
   rescue Fetcher::CookieJar::Expired
     Rails.logger.warn "[ScrapeYoutubeJob] Sessão de youtube.com ausente ou expirada. Coletando sem cookies."
+    ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+      channel_url,
+      limit: limit,
+      proxy: proxy,
+      cookies_path: nil
+    )
+  end
+
+  # Apenas a EXTRação com cookies tem fallback sem cookies. O refresh do jar
+  # (persistência) NÃO está coberto: falha de banco/integração deve propagar
+  # para o retry do job, não ser reinterpretada como problema de sessão
+  # (achado P2 do sol, 13/08).
+  def collect_with_cookies(channel_url, limit:, proxy:, cookies_path:)
+    ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+      channel_url,
+      limit: limit,
+      proxy: proxy,
+      cookies_path: cookies_path
+    )
+  rescue ScrapingServices::RateLimitError
+    raise
+  rescue StandardError => e
+    # Non-CookieJar failures inside the cookies block (parse errors, network
+    # errors from the scraper, etc.) should not abort the whole collection —
+    # fall back to a no-cookies extraction so we still collect degraded data
+    # (achado R3-6). The cookie-jar-specific path above still takes precedence
+    # for Expired, which is a recoverable, expected condition.
+    Rails.logger.warn "[ScrapeYoutubeJob] Erro inesperado coletando vídeos com cookies: #{e.class}: #{e.message}. Coletando sem cookies."
     ScrapingServices::YoutubeScraperService.extract_videos_detailed(
       channel_url,
       limit: limit,
@@ -163,13 +197,21 @@ class ScrapeYoutubeJob < ApplicationJob
   end
 
   def create_snapshot(profile, metadata)
-
-    ProfileSnapshot.find_or_create_by(
+    recorded_at = Time.current.beginning_of_hour
+    snapshot = ProfileSnapshot.find_or_initialize_by(
       social_profile: profile,
-      recorded_at: Time.current.beginning_of_hour
-    ) do |snapshot|
-      snapshot.followers_count = metadata[:subscriber_count]
-      snapshot.posts_count = metadata[:video_count]
-    end
+      recorded_at: recorded_at
+    )
+    snapshot.followers_count = metadata[:subscriber_count]
+    snapshot.posts_count = metadata[:video_count]
+    snapshot.save!
+  rescue ActiveRecord::RecordNotUnique
+    snapshot = ProfileSnapshot.find_by!(
+      social_profile: profile,
+      recorded_at: recorded_at
+    )
+    snapshot.followers_count = metadata[:subscriber_count]
+    snapshot.posts_count = metadata[:video_count]
+    snapshot.save! if snapshot.changed?
   end
 end

@@ -96,6 +96,29 @@ class DiscoveryJobTest < ActiveJob::TestCase
     end
   end
 
+  test 'should propagate NoMethodError from process_profile' do
+    create(:social_post, social_profile: @profile, content: '@someone', posted_at: 1.day.ago)
+
+    Discovery::SocialGraphAnalyzer.expects(:extract_handles).with(@profile, anything).raises(NoMethodError.new('undefined method'))
+
+    assert_raises(NoMethodError) do
+      DiscoveryJob.perform_now
+    end
+  end
+
+  test 'should propagate persistence error from process_profile' do
+    create(:social_post, social_profile: @profile, content: '@someone', posted_at: 1.day.ago)
+
+    mock_response = stub(content: '[{"handle":"@someone","platform":"twitter","categoria":"IGNORAR","razao":"bot"}]')
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    DiscoveryJob.any_instance.stubs(:save_discovered_profile).raises(ActiveRecord::StatementInvalid, 'DB error')
+
+    assert_raises(ActiveRecord::StatementInvalid) do
+      DiscoveryJob.perform_now
+    end
+  end
+
   test 'should not create DiscoveredProfile for blank handles' do
     job = DiscoveryJob.new
 

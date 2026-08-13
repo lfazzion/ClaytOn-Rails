@@ -10,7 +10,9 @@ class FridayIdeationJob < ApplicationJob
     return unless channel_id
 
     message = build_ideation_digest
-    DiscordApiClient.send_message(channel_id, message)
+    DiscordMessageChunker.chunk(message).each do |chunk|
+      DiscordApiClient.send_message(channel_id, chunk)
+    end
 
     Rails.logger.info "[FridayIdeationJob] Digest de ideias enviado para canal #{channel_id}"
   end

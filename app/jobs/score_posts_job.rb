@@ -9,7 +9,9 @@ class ScorePostsJob < ApplicationJob
     SocialProfile.monitored.find_each do |profile|
       Analytics::PostScorer.score_posts(profile: profile)
     rescue StandardError => e
-      Rails.logger.error "[ScorePostsJob] Erro ao pontuar posts do perfil #{profile.id}: #{e.message}"
+      Rails.logger.error "[ScorePostsJob] Erro ao pontuar perfil #{profile.id} " \
+                          "(#{profile.platform}): #{e.class}: #{e.message}"
+      raise
     end
   end
 end
