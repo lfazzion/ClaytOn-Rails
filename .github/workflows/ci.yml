@@ -50,7 +50,12 @@ jobs:
           sleep 3
 
       - name: Run tests
-        run: docker compose -f docker/docker-compose.yml run --rm test
+        # OPENROUTER_API_KEY passada explicitamente: o service test NÃO lê
+        # ../.env (hardening da campanha) e o RubyLLM exige a chave mesmo em
+        # teste (medido 13/08).
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || 'ci_test_key' }}
+        run: docker compose -f docker/docker-compose.yml run --rm -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" test
 
       - name: Cleanup
         if: always()

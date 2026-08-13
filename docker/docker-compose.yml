@@ -193,11 +193,6 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     user: rails
-    env_file:
-      # O CI cria .env com as chaves de teste (incl. OPENROUTER_API_KEY —
-      # RubyLLM exige config do provedor mesmo em teste; medido 13/08).
-      # O environment inline abaixo tem prioridade sobre o env_file.
-      - ../.env
     environment:
       RAILS_ENV: test
       CHROME_HOST: chrome
