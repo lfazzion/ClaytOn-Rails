@@ -16,15 +16,11 @@ class AlertThrottler
     # Tenta reservar atomicamente uma cota de alerta para o tipo informado.
     # Inicializa a chave com write(until_exist) quando necessário, repete o
     # increment se outro processo venceu a inicialização, permite apenas
-    # valores até ALERT_LIMIT. Retorna true se a reserva foi aceita, false se
-    # o limite foi excedido.
-    #
-    # Quando o throttling está desabilitado (ENV["ALERT_THROTTLE_ENABLED"] !=
-    # "true"), retorna true — a ausência de throttling significa que todas as
-    # reservas são aceitas (sem controle de cota). Isso evita que o chamador
-    # confunda "throttling desabilitado" com "cota excedida".
+    # valores até ALERT_LIMIT. Retorna a CHAVE da janela reservada (String
+    # truthy) se a reserva foi aceita, false se o limite foi excedido, ou nil
+    # quando o throttling está desabilitado (sem reserva a liberar).
     def reserve(alert_type)
-      return true if ENV["ALERT_THROTTLE_ENABLED"] != "true"
+      return nil if ENV["ALERT_THROTTLE_ENABLED"] != "true"
 
       key = current_key(alert_type)
 
@@ -48,10 +44,16 @@ class AlertThrottler
 
     # Libera uma reserva já aceita (usado quando o envio falha). Recebe a chave
     # devolvida por reserve; sem chave, recalcula (compatibilidade).
+    # ACHADO B (13/08): só decrementa se a chave existe e o valor é > 0,
+    # evitando recriar a chave com -1 (ex.: release duplicado num retry após já
+    # ter liberado).
     def release(alert_type, key: nil)
       return if ENV["ALERT_THROTTLE_ENABLED"] != "true"
 
       chave = key || current_key(alert_type)
+      current = Rails.cache.read(chave)
+      return if current.nil? || current.to_i <= 0
+
       Rails.cache.decrement(chave, 1)
     end
 
@@ -66,10 +68,16 @@ class AlertThrottler
       Rails.cache.decrement(key, 1, expires_in: WINDOW)
     end
 
+    # ACHADO C (13/08): o increment+write quando nil NÃO é atômico (dois
+    # processos podem ler nil e ambos escrever 1, perdendo uma contagem).
+    # Correção: inicializar com write(unless_exist) ANTES do increment, como
+    # reserva da chave, para garantir que o increment sempre atue sobre uma
+    # chave existente.
     def record(alert_type)
       return if ENV["ALERT_THROTTLE_ENABLED"] != "true"
 
       key = current_key(alert_type)
+      Rails.cache.write(key, 0, unless_exist: true, expires_in: WINDOW)
       count = Rails.cache.increment(key, 1, expires_in: WINDOW)
       Rails.cache.write(key, 1, expires_in: WINDOW) if count.nil?
     end

@@ -90,10 +90,11 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     assert_equal 10, Rails.cache.read(current_key('test_type')).to_i
   end
 
-  test 'reserve aceita (retorna true) quando throttling desabilitado' do
+  # ACHADO E (13/08): quando desabilitado, reserve retorna nil (não chave),
+  # para que o job trate como "sem reserva" e NÃO tente liberar em falha.
+  test 'reserve retorna nil (sem reserva) quando throttling desabilitado' do
     ENV['ALERT_THROTTLE_ENABLED'] = nil
-
-    assert_equal true, AlertThrottler.reserve('test_type')
+    assert_nil AlertThrottler.reserve('test_type')
   end
 
   test 'release decrementa uma reserva aceita' do
@@ -102,6 +103,22 @@ class AlertThrottlerTest < ActiveSupport::TestCase
 
     AlertThrottler.release('test_type')
     assert_equal 0, Rails.cache.read(current_key('test_type')).to_i
+  end
+
+  # --- ACHADO B (13/08): release incondicional pode deixar contador negativo ---
+  # Um release chamado quando não há reserva pendente (ex.: retry do job após
+  # já ter liberado) não deve decrementar de 0 para -1 (o que recriaria/estragaria
+  # a chave). A correção só decrementa se a chave existe e valor > 0.
+  test 'release não deixa contador negativo quando chamado sem reserva pendente' do
+    AlertThrottler.reserve('test_type')        # 1
+    AlertThrottler.release('test_type')        # 0
+    assert_equal 0, Rails.cache.read(current_key('test_type')).to_i
+
+    # Libera de novo (retry após já ter liberado).
+    AlertThrottler.release('test_type')
+    valor = Rails.cache.read(current_key('test_type')).to_i
+    assert valor >= 0, "release idempotente não deve deixar contador negativo (obteve #{valor})"
+    assert_equal 0, valor
   end
 
   test 'reserve concorrente a partir do contador 9 aceita apenas uma reserva' do
@@ -128,34 +145,51 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     assert_equal 10, Rails.cache.read(current_key('concurrent_type')).to_i
   end
 
-  # --- Bug: rollback pode decrementar a janela seguinte ---
-  # Cenário: contador em 10; requisição A incrementa para 11 e pausa;
-  # a chave expira; B cria a nova janela e reserva a 1ª cota;
-  # o rollback de A decrementa a janela nova de 1 para 0,
-  # permitindo 11 envios naquela janela.
-  test 'rollback nao afeta janela seguinte quando chave expira entre increment e rollback' do
-    # Preenche a janela atual até o limite
-    10.times { AlertThrottler.reserve('expiry_type') }
-    assert_equal 10, Rails.cache.read(current_key('expiry_type')).to_i
+  # --- ACHADO C (13/08): record não é atômico na inicialização ---
+  # O increment+write quando nil NÃO é atômico: em concorrência dois processos
+  # podem ler nil e ambos escrever 1, perdendo uma contagem. A correção
+  # inicializa com write(unless_exist: true, expires_in: WINDOW) ANTES do
+  # increment (como reserve). Como o bug é uma corrida entre processos, testamos
+  # o INVARIANTE de ordem: record deve chamar write(unless_exist: true) e só
+  # então increment — exatamente a ordem prescrita. O código antigo chamava
+  # increment primeiro (sem write unless_exist), violando o contrato.
+  test 'record inicializa com write(unless_exist) antes do increment (achado C)' do
+    key = current_key('test_type')
+    Rails.cache.delete(key)
 
-    # Simula expiração da chave deletando-a manualmente (como se o TTL tivesse expirado)
-    Rails.cache.delete(current_key('expiry_type'))
+    # Contrato: write(unless_exist) vem ANTES do increment. Valores canônicos
+    # (não executam I/O real) impõem a ordem e a assinatura exatas.
+    seq = sequence('record_init')
+    Rails.cache.expects(:write)
+      .with(key, 0, unless_exist: true, expires_in: 1.hour)
+      .in_sequence(seq)
+      .once
+      .returns(true)
+    Rails.cache.expects(:increment)
+      .with(key, 1, expires_in: 1.hour)
+      .in_sequence(seq)
+      .once
+      .returns(1)
 
-    # Requisição B chega na janela nova e reserva a primeira cota
-    assert AlertThrottler.reserve('expiry_type'), "reserve deve retornar truthy"
-    assert_equal 1, Rails.cache.read(current_key('expiry_type')).to_i
+    AlertThrottler.record('test_type')
+  end
 
-    # Agora simulamos o rollback da requisição A (que tinha incrementado para 11
-    # antes da expiração). O bug: esse decrement atinge a janela NOVA de B.
-    # Com a implementação atual, isso zera o contador da janela nova.
-    # Com a correção, o rollback usa a chave da janela ANTIGA (que já expirou),
-    # então é no-op ou cria uma chave na janela antiga que não afeta a nova.
-    old_bucket = (Time.current.to_i - 1.hour.to_i) / 1.hour.to_i
-    old_key = "alert_throttle:expiry_type:#{old_bucket}"
-    Rails.cache.decrement(old_key, 1)
+  # --- ACHADO D (13/08): teste REAL de release entre buckets ---
+  # Reserva no bucket atual, "vira" o bucket (próxima janela temporal) e reserva
+  # no novo; libera usando a chave da PRIMEIRA reserva. A liberação deve afetar
+  # APENAS a janela antiga — recalcular a chave (current_key) corromperia a nova.
+  test 'release libera a reserva da janela antiga sem afetar a nova apos virada de bucket' do
+    bucket_atual = Time.current.to_i / 1.hour.to_i
+    key_antiga = "alert_throttle:expiry_type:#{bucket_atual}"
+    key_nova   = "alert_throttle:expiry_type:#{bucket_atual + 1}"
 
-    # CORRETO: rollback não deve afetar a janela seguinte
-    count_after_rollback = Rails.cache.read(current_key('expiry_type')).to_i
-    assert_equal 1, count_after_rollback, "rollback não deve afetar a janela seguinte (esperado 1, obteve #{count_after_rollback})"
+    Rails.cache.write(key_antiga, 1, expires_in: 1.hour)
+    Rails.cache.write(key_nova, 1, expires_in: 1.hour)
+
+    # Libera usando a chave da PRIMEIRA reserva (bucket antigo)
+    AlertThrottler.release('expiry_type', key: key_antiga)
+
+    assert_equal 0, Rails.cache.read(key_antiga).to_i, "janela antiga deve ser liberada"
+    assert_equal 1, Rails.cache.read(key_nova).to_i, "janela nova não deve ser afetada"
   end
 end

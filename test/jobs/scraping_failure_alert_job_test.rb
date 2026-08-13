@@ -158,6 +158,26 @@ class ScrapingFailureAlertJobTest < ActiveSupport::TestCase
     assert_equal 0, Rails.cache.read(current_key("error")).to_i
   end
 
+  # --- ACHADO A (13/08): o rescue cobre também o log pós-envio ---
+  # Se o envio foi bem-sucedido mas algo APÓS ele falha (ex.: Rails.logger.info),
+  # a reserva NÃO deve ser liberada — caso contrário um retry reenviaria o alerta.
+  test 'perform não libera reserva quando a falha ocorre após o envio' do
+    ENV['DISCORD_ADMIN_CHANNEL_ID'] = '987654'
+    ENV['ALERT_THROTTLE_ENABLED'] = 'true'
+
+    # Envio OK; o logger.info pós-envio levanta para simular a falha pós-envio.
+    DiscordApiClient.stubs(:send_message).returns(true)
+    Rails.logger.stubs(:info).raises(StandardError, 'logger failure')
+
+    job = ScrapingFailureAlertJob.new
+    assert_raises(StandardError, 'logger failure') do
+      job.perform('twitter', 42, 'fail', 'error')
+    end
+
+    # A reserva deve permanecer (1): o alerta já foi entregue.
+    assert_equal 1, Rails.cache.read(current_key('error')).to_i
+  end
+
   test 'perform em mesma instancia nao libera cota de execucao anterior se falhar antes de reservar' do
     ENV['DISCORD_ADMIN_CHANNEL_ID'] = '987654'
     ENV['ALERT_THROTTLE_ENABLED'] = 'true'
@@ -178,5 +198,24 @@ class ScrapingFailureAlertJobTest < ActiveSupport::TestCase
     end
 
     assert_equal 1, Rails.cache.read(current_key("error")).to_i
+  end
+
+  # --- ACHADO E (13/08): reserve desabilitado retorna truthy e é tratado como chave ---
+  # Quando o throttling está desabilitado, o job nunca deve tentar liberar
+  # reserva (chamar release com uma chave inventada). O job deve tratar o
+  # retorno "sem reserva" (nil) e prosseguir sem liberar em falha.
+  test 'perform não chama release quando o throttling está desabilitado' do
+    ENV['DISCORD_ADMIN_CHANNEL_ID'] = '987654'
+    ENV['ALERT_THROTTLE_ENABLED'] = nil
+
+    # Envio falha, mas como não há reserva, o job não deve tentar liberar nada.
+    DiscordApiClient.stubs(:send_message).raises(StandardError, 'boom')
+
+    AlertThrottler.expects(:release).never
+
+    job = ScrapingFailureAlertJob.new
+    assert_raises(StandardError, 'boom') do
+      job.perform('twitter', 42, 'fail', 'error')
+    end
   end
 end
