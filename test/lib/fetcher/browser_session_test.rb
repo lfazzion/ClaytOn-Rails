@@ -23,6 +23,7 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
 
   class FakePage
     attr_reader :cookies, :visitado, :fechada, :commands
+    attr_accessor :reject_setcookie
 
     def initialize(document_remote_ip: nil)
       @cookies = FakeCookies.new
@@ -30,11 +31,21 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
       @document_remote_ip = document_remote_ip
       @listeners = {}
       @commands = []
+      @reject_setcookie = false
     end
 
     def command(name, **params)
       @commands << [name, params]
-      true
+      # Achado D: modela a resposta REAL do CDP Network.setCookie. Em falha o
+      # Chrome devolve success=false com errorText; o fake antigo retornava
+      # `true` sempre, mascarando a rejeicao. Quando @reject_setcookie esta
+      # ligado, devolvemos a falha para o teste validar que a producao NAO a
+      # ignora.
+      if name == "Network.setCookie" && @reject_setcookie
+        { "success" => false, "errorText" => "cookie rejected by Chrome" }
+      else
+        { "success" => true }
+      end
     end
 
     def go_to(url)
@@ -214,6 +225,18 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     posto = @page.cookies.postos.find { |c| c[:name] == "__Secure-3PSID" }
     assert_not_nil posto
     assert_equal true, posto[:secure]
+  end
+
+  test "cookie __Host- recusado pelo CDP (success=false) levanta CookieRejected, nao passa silencioso" do
+    host_cookie = { "name" => "__Host-3PSID", "value" => "host_val", "domain" => ".youtube.com", "path" => "/safebrowse" }
+    Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[host_cookie], :jar])
+    @page.reject_setcookie = true
+
+    erro = assert_raises(Fetcher::BrowserSession::CookieRejected) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+
+    assert_match(/recusou|rejected/i, erro.message)
   end
 
   test "inject_cookies força secure, path=/ e ausência de domain para cookies __Host-*" do

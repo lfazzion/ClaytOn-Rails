@@ -9,6 +9,17 @@ require "fileutils"
 class NodriverFetchScriptTest < ActiveSupport::TestCase
   SCRIPT_PATH = Rails.root.join("scripts/python/nodriver_fetch.py").to_s
 
+  # Achado F: imports `time`/`os` e a constante STABILITY_POLL eram mortos.
+  # Um teste estatico garante que nao voltam a poluir o topo do modulo.
+  test "sem imports mortos (time/os) nem STABILITY_POLL no script" do
+    src = File.read(SCRIPT_PATH)
+    refute_match(/^\s*import\s+time\s*$/, src, "import time morto nao deve existir")
+    refute_match(/^\s*import\s+os\s*$/, src, "import os morto nao deve existir")
+    refute_match(/STABILITY_POLL\s*=/, src, "constante STABILITY_POLL morta nao deve existir")
+    refute_match(/\bos\./, src, "sem uso de os.* no script")
+    refute_match(/\btime\./, src, "sem uso de time.* no script")
+  end
+
   # Fake do módulo `nodriver` usado pelo script em ambiente de teste.
   #
   # Contratos do fake (exigidos pelo merge laguna-fix):
@@ -39,12 +50,18 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     class ResponseReceived:
         pass
 
+    class FakeFrameNavigated:
+        def __init__(self, frame_id, parent_id=None):
+            self.frame_id = frame_id
+            self.parent_id = parent_id
+
     def _network_enable():
         return NetworkEnableCommand()
 
     class Network:
         ResourceType = ResourceType
         ResponseReceived = ResponseReceived
+        FrameNavigated = FakeFrameNavigated
         enable = staticmethod(_network_enable)
 
     class cdp:
@@ -55,22 +72,31 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
             self.remote_ip_address = ip
 
     class FakeParams:
-        def __init__(self, ip):
+        def __init__(self, ip, frame_id="MAIN_FRAME"):
             self.type_ = ResourceType.DOCUMENT
             self.response = FakeResponse(ip)
+            self.frame_id = frame_id
 
     class FakePage:
         def __init__(self):
-            self.handlers = []
+            self.resp_handlers = []
+            self.frame_handlers = []
             self.network_enabled = False
             self.enable_called = False
 
         def add_handler(self, event, handler):
-            self.handlers.append(handler)
+            if event is ResponseReceived:
+                self.resp_handlers.append(handler)
+            else:
+                self.frame_handlers.append(handler)
 
         def remove_handler(self, event, handler):
-            if handler in self.handlers:
-                self.handlers.remove(handler)
+            if event is ResponseReceived:
+                if handler in self.resp_handlers:
+                    self.resp_handlers.remove(handler)
+            else:
+                if handler in self.frame_handlers:
+                    self.frame_handlers.remove(handler)
 
         async def send(self, command):
             # Requisito 1: registra quando Network.enable é chamado.
@@ -83,20 +109,50 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
         async def get(self, url):
             # Requisito 2: emite eventos ResponseReceived SÓ se enable foi chamado.
             if self.network_enabled:
+                # Simula a navegacao do frame principal ANTES dos documentos,
+                # para que o listener fixe main_frame_id (Achado B). Sem isso o
+                # script desligaria o filtro de subframe.
+                for handler in list(self.frame_handlers):
+                    handler(FakeFrameNavigated(frame_id="MAIN_FRAME", parent_id=None))
                 seq = os.environ.get("DOC_IP_SEQUENCE", "public_first")
                 if seq == "private_first":
-                    ips = ["10.0.0.1", "1.2.3.4"]
+                    docs = [("MAIN_FRAME", "10.0.0.1"), ("MAIN_FRAME", "1.2.3.4")]
+                elif seq == "cgnat_first":
+                    # RFC6598 CGNAT (100.64.0.0/10): NAO e IP privado no
+                    # sentido ipaddress.is_private, mas e nao-global. O script
+                    # deve trata-lo como bloqueado e preserva-lo contra um
+                    # documento publico posterior (senao o Ruby valida so o
+                    # final e o IP bloqueado vaza -> bypass SSRF).
+                    docs = [("MAIN_FRAME", "100.64.0.1"), ("MAIN_FRAME", "1.2.3.4")]
+                elif seq == "main_public_sub_private":
+                    # Achado B: documento do frame PRINCIPAL e publico, mas um
+                    # iframe/subframe carrega de IP privado. Antes da correcao o
+                    # script aceitava QUALQUER DOCUMENT e capturava o IP do
+                    # subframe -> bloqueio falso no Ruby. Apos a correcao o
+                    # subframe (frame_id diferente) deve ser ignorado.
+                    docs = [("MAIN_FRAME", "1.2.3.4"), ("SUB_FRAME", "10.0.0.1")]
                 else:
-                    ips = ["1.2.3.4", "10.0.0.1"]
-                for ip in ips:
-                    for handler in list(self.handlers):
-                        handler(FakeParams(ip))
+                    docs = [("MAIN_FRAME", "1.2.3.4"), ("MAIN_FRAME", "10.0.0.1")]
+                for frame_id, ip in docs:
+                    for handler in list(self.resp_handlers):
+                        handler(FakeParams(ip, frame_id=frame_id))
             return self
 
         async def get_content(self):
             return "<html>body</html>"
 
         async def evaluate(self, expr):
+            if os.environ.get("DOC_RAISE_CANCELLED") == "1" and "document.readyState" in expr:
+                # Achado C: simula o cancelamento do chamador CHEGANDO durante o
+                # polling de prontidao. Agendamos o cancelamento da tarefa atual
+                # para que o CancelledError SURJA no `await asyncio.sleep` do
+                # wait_for_content_ready (e seja engolido pelo `except
+                # asyncio.CancelledError: break`), nao na propria chamada de
+                # evaluate. Antes da correcao o script terminava como sucesso —
+                # rompendo o cancelamento. Apos a correcao o CancelledError
+                # deve propagar (exit != 0).
+                asyncio.current_task().cancel()
+                return "complete"
             if "document.readyState" in expr:
                 return "complete"
             if "innerText.length" in expr:
@@ -110,14 +166,33 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     class FakeBrowser:
         def __init__(self):
             self.main_tab = FakePage()
+            self.stop_called = False
+            self.stop_awaited = False
 
         async def get(self, url):
             # Delega à aba principal (onde o listener foi registrado) para que
             # os eventos ResponseReceived sejam emitidos no handler correto.
             return await self.main_tab.get(url)
 
-        def stop(self):
-            pass
+        async def stop(self):
+            # Achado G: a API real do nodriver e ASSINCRONA (`await
+            # browser.stop()`). O fake antigo implementava stop SINCRONO, o que
+            # fazia o `except Exception` da producao engolir qualquer TypeError
+            # de `await` sobre corotina/callable. O fake agora modela a API
+            # real (stop eh coroutine) e registra que foi de fato aguardado.
+            # Escrevemos um sentinela em arquivo para o teste comprovar que o
+            # stop assincrono foi DE FATO aguardado (nao apenas referenciado).
+            self.stop_called = True
+            self.stop_awaited = True
+            sentinel = os.environ.get("DOC_STOP_SENTINEL")
+            if sentinel:
+                with open(sentinel, "w") as fh:
+                    fh.write("awaited")
+            # Modo de injecao de erro: simula um erro de limpeza REAL que a
+            # producao nao deve mascarar com `except Exception: pass` amplo.
+            if os.environ.get("DOC_STOP_RAISE") == "1":
+                raise RuntimeError("erro real de stop no fake")
+            return None
 
     async def start(**kwargs):
         return FakeBrowser()
@@ -164,6 +239,89 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     # publico posterior (1.2.3.4) — senao o IP bloqueado deixa de ser detectado.
     assert_equal "10.0.0.1", json["document_ip"],
       "privado(10.0.0.1) -> publico(1.2.3.4): deve PRESERVAR o bloqueado 10.0.0.1"
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "trata CGNAT (100.64.0.1, RFC6598 nao-global) como bloqueado e preserva contra publico posterior" do
+    # Achado A: _is_private_ip soh cobria is_private/loopback/link-local/etc.
+    # 100.64.0.1 (CGNAT) NAO bate nenhum desses, entao o IP bloqueado seria
+    # sobrescrito por um documento publico e o Ruby (que valida so o final)
+    # nao bloqueava -> bypass SSRF. O script deve tratar nao-global como
+    # bloqueado e preservar o IP ja capturado.
+    dir, env = build_fake_env("DOC_IP_SEQUENCE" => "cgnat_first")
+    stdout, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    assert status.success?, "script falhou com status #{status.exitstatus}: #{stderr}"
+    json = JSON.parse(stdout)
+    assert_equal "100.64.0.1", json["document_ip"],
+      "CGNAT 100.64.0.1 (nao-global) deve ser preservado como bloqueado; se vazar 1.2.3.4 o Ruby nao bloqueia (SSRF)"
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "ignora documento de subframe/iframe (frame_id diferente) e mantem o IP do frame principal" do
+    # Achado B: o listener aceitava QUALQUER ResponseReceived do tipo DOCUMENT,
+    # inclusive de iframes/subframes. Se o iframe viesse de IP privado, o
+    # document_ip ficaria com o IP do subframe -> bloqueio falso no Ruby (a
+    # validacao posterior acha que o documento principal veio de IP privado).
+    # O script deve ignorar documentos que nao sejam do frame principal.
+    dir, env = build_fake_env("DOC_IP_SEQUENCE" => "main_public_sub_private")
+    stdout, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    assert status.success?, "script falhou com status #{status.exitstatus}: #{stderr}"
+    json = JSON.parse(stdout)
+    assert_equal "1.2.3.4", json["document_ip"],
+      "iframe privado (10.0.0.1) NAO deve sobrescrever o IP do frame principal (1.2.3.4): vazaria bloqueio falso"
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "CancelledError nao e engolido: o script aborta (exit != 0) em vez de sair como sucesso" do
+    # Achado C: o codigo consumia asyncio.CancelledError e convertia em saida
+    # normal (sleep do wait_for_content_ready). Isso rompe o cancelamento do
+    # chamador (asyncio.run propaga cancelamento). O script deve relancar o
+    # CancelledError para que a cancellacao seja honrada.
+    dir, env = build_fake_env("DOC_RAISE_CANCELLED" => "1")
+    _, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    refute status.success?, "CancelledError nao deve ser engolido; o processo deve abortar, nao sair com sucesso (stderr: #{stderr})"
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "browser.stop() assincrono e de fato aguardado (nao mascarado por except amplo)" do
+    # Achado G: producao faz `await browser.stop()`; o fake antigo tinha stop
+    # SINCRONO, entao o `except Exception` da producao engolia o TypeError de
+    # `await` sobre um metodo que nao e coroutine. O fake agora modela a API
+    # real (stop assincrono) e o teste confere que o stop foi AGUARDADO de
+    # verdade: um sentinela so e escrito quando a coroutine roda. Se a producao
+    # chamasse `browser.stop()` sem `await` (ou causasse TypeError engolido), a
+    # coroutine nunca executaria e o sentinela nao existiria.
+    sentinel = File.join(Dir.tmpdir, "nodriver_stop_sentinel_#{Process.pid}.txt")
+    FileUtils.rm_f(sentinel)
+    dir, env = build_fake_env("DOC_STOP_SENTINEL" => sentinel)
+    _, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    assert status.success?, "script falhou com status #{status.exitstatus}: #{stderr}"
+    assert File.exist?(sentinel), "browser.stop() assincrono nao foi aguardado: sentinela ausente (TypeError de await engolido?)"
+    assert_equal "awaited", File.read(sentinel).strip
+  ensure
+    FileUtils.rm_f(sentinel) if sentinel
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "erro real em browser.stop() NAO e mascarado pelo except amplo da producao" do
+    # Achado G (parte 2): o `finally` da producao envolve `await browser.stop()`
+    # num `try/except Exception: pass` que engole QUALQUER erro de limpeza. Um
+    # erro de stop de verdade (ex.: recurso nao liberado, leak de browser) deve
+    # propagar, nao ser silenciado. O teste injeta um erro no stop do fake e
+    # exige que o script aborte (exit != 0) com a mensagem visivel.
+    dir, env = build_fake_env("DOC_STOP_RAISE" => "1")
+    _, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    refute status.success?, "erro em browser.stop() nao deve ser mascarado pelo except amplo (stderr: #{stderr})"
+    assert_match(/erro real de stop no fake/, stderr, "a causa real do erro de stop deve aparecer no stderr")
   ensure
     FileUtils.remove_entry(dir) if dir
   end

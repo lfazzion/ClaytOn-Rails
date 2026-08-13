@@ -527,10 +527,13 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     body_start = after.index("{")
     return nil unless body_start
 
-    # Conta profundidade de chaves para isolar exclusivamente o bloco desta
-    # função. Strings e comentários não contam — os helpers não contêm `{`
-    # dentro de string nem template literals, de onde o `{}` da chave é o único
-    # abre-chave no início da linha.
+    # Conta profundidade de chaves para isolar o bloco desta função. AVISO
+    # (Achado E): o extrator NAO exclui strings nem comentários — ele conta
+    # qualquer `{`/`}` que apareça no texto, inclusive dentro de string literal
+    # ou de um comentário `//`. Os helpers de produção por acaso não contêm
+    # `{`/`}` dentro de strings, mas isso é coincidência, não garantia do
+    # extrator. Não tratar como robustez: uma chave dentro de string trunca a
+    # extração (ver teste que documenta essa limitação).
     depth = 0
     body_start.upto(after.length - 1) do |i|
       ch = after[i]
@@ -544,6 +547,29 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     # Nunca deveria chegar aqui (JS bem formado sempre fecha), mas se o
     # heredoc estiver truncado devolve nil para falhar explícito:
     nil
+  end
+
+  # Achado E (GREEN): o extrator so conta profundidade de chaves e NAO exclui
+  # strings/comentarios. Uma chave de fechamento dentro de string literal
+  # trunca a extracao. Registramos esse comportamento REAL como contrato
+  # explicito (para nao reintroduzir a falsa afirmacao de robustez): o bloco
+  # extraido e interrompido pela `}` da string e nao contem o try/catch.
+  test "extractor e cego a chaves dentro de string: documenta a limitacao real (sem enganar)" do
+    js = <<~JS
+      (function () {
+        function demo(el) {
+          var s = "chave}dentro";
+          try { return el; } catch (e) { return null; }
+        }
+        var out = [];
+      })();
+    JS
+    bloco = extract_timeline_js_function(js, "demo")
+    refute_nil bloco
+    # Comportamento REAL: a `}` dentro de "chave}dentro" decrementa a
+    # profundidade e trunca o bloco ANTES do try/catch. O teste afirma essa
+    # limitacao de forma honesta (reflete o que o extrator faz de verdade).
+    refute_match(/try/, bloco, "extrator e cego a strings: a `}` na string trunca e o try/catch some do bloco")
   end
 
   test "from_search_page com busca com resultados devolve hash de chaves string" do

@@ -7,8 +7,6 @@ import asyncio
 import json
 import argparse
 import sys
-import time
-import os
 import ipaddress
 
 try:
@@ -25,22 +23,23 @@ READY_POLL = 0.2
 # Estabilização do tamanho do body.innerText: exige pelo menos esta
 # duração de inércia antes de considerar o conteúdo pronto.
 STABILITY_WINDOW = 0.6
-STABILITY_POLL = 0.15
 
 
 def _is_private_ip(ip):
-    """Retorna True se o IP é privado/reservado (RFC1918, loopback, link-local)."""
+    """Retorna True se o IP NAO e global/roteavel publicamente.
+
+    O criterio e `addr.is_global is False`, que cobre TODAS as faixas
+    nao-globais de uma vez — inclusive CGNAT (100.64.0.0/10, RFC6598), que o
+    `ipaddress.is_private` NAO marca como privado mas que tambem nao e um IP
+    publico valido. Tratar nao-global como bloqueado fecha o bypass SSRF em que
+    uma sequencia 100.64.0.1 -> 1.2.3.4 sobrescrevia o IP bloqueado e a
+    validacao Ruby (que confere so o final observado) deixava passar.
+    """
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_multicast
-    )
+    return not addr.is_global
 
 
 async def wait_for_content_ready(page, timeout=READY_TIMEOUT):
@@ -86,7 +85,12 @@ async def wait_for_content_ready(page, timeout=READY_TIMEOUT):
         try:
             await asyncio.sleep(READY_POLL)
         except asyncio.CancelledError:
-            break
+            # Achado C: o cancelamento do chamador (asyncio.run propaga
+            # CancelledError) NAO pode ser engolido aqui. Se o chamador
+            # cancela, relancamos para honrar o cancelamento — caso
+            # contrario o script terminaria como sucesso e romperia a
+            # semantica de cancelamento do chamador.
+            raise
 
     return last_ready, last_len
 
@@ -110,6 +114,14 @@ async def fetch(url, proxy=None):
 
         def on_response_received(params, *args, **kwargs):
             if params is None:
+                return
+            # Achado B: ignorar documentos de subframes/iframes. O evento
+            # ResponseReceived traz o frame_id do emissor; so o DOCUMENT do
+            # frame PRINCIPAL interessa ao cheque de rebinding — um iframe que
+            # carrega de IP privado nao representa o documento que o Ruby va
+            # validar, e captura-lo geraria bloqueio falso.
+            frame_id = getattr(params, "frame_id", None)
+            if frame_id is not None and main_frame_id is not None and frame_id != main_frame_id:
                 return
             if params.type_ == uc.cdp.network.ResourceType.DOCUMENT:
                 ip = params.response.remote_ip_address
@@ -138,6 +150,18 @@ async def fetch(url, proxy=None):
         await page.send(uc.cdp.network.enable())
         page.add_handler(uc.cdp.network.ResponseReceived, on_response_received)
 
+        # Captura o frame_id da navegacao principal para que o listener so
+        # aceite documentos desse frame (ignora subframes/iframes — Achado B).
+        main_frame_id = None
+
+        def on_frame_navigated(params, *args, **kwargs):
+            nonlocal main_frame_id
+            # O evento FrameNavigated do frame principal traz `parent_id` nulo.
+            if getattr(params, "parent_id", None) is None:
+                main_frame_id = getattr(params, "frame_id", None)
+
+        page.add_handler(uc.cdp.network.FrameNavigated, on_frame_navigated)
+
         try:
             # browser.get navega o primeiro tab usando cdp.page.navigate;
             # o listener já está ativo e captura o evento do documento.
@@ -154,6 +178,9 @@ async def fetch(url, proxy=None):
         finally:
             page.remove_handler(
                 uc.cdp.network.ResponseReceived, on_response_received
+            )
+            page.remove_handler(
+                uc.cdp.network.FrameNavigated, on_frame_navigated
             )
 
         html = await page.get_content()
@@ -173,8 +200,21 @@ async def fetch(url, proxy=None):
     finally:
         try:
             await browser.stop()
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            # CancelledError ja foi relancado no polling; se chegou aqui durante
+            # o teardown, deixamos propagar (nao engolimos cancelamento).
+            raise
+        except Exception as exc:
+            # Achado G: o `except Exception: pass` anterior engolia QUALQUER
+            # erro de limpeza, mascarando falhas reais (ex.: browser nao
+            # liberado, leak). So suprimir erros de encerramento ja esperados
+            # do nodriver/CDP — conexao fechada ou browser ja encerrado
+            # (TargetClosedError / mensagem com "closed"). Qualquer OUTRO erro
+            # de stop deve propagar e virar falha visivel do script.
+            if "closed" in str(exc).lower() or "TargetClosed" in type(exc).__name__:
+                pass
+            else:
+                raise
 
 
 def main():

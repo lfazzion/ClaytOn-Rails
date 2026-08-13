@@ -22,6 +22,11 @@ module Fetcher
   # isso, logar no perfil da VM não teria efeito nenhum aqui — o contexto isolado
   # nasce limpo e não herda os cookies do contexto padrão.
   module BrowserSession
+    # Erro levantado quando o Chrome rejeita o cookie __Host-/* via CDP
+    # Network.setCookie (success=false). Antigamente a resposta era ignorada e
+    # a sessao seguia sem o cookie — login mudo falhava no site.
+    class CookieRejected < StandardError; end
+
     # Fica DENTRO de `ExtractService::CHANNEL_TIMEOUT` (40s), que por sua vez fica
     # abaixo dos 90s do plugin do reader. Mexer num exige manter a ordem.
     OVERALL_TIMEOUT = 35
@@ -112,7 +117,7 @@ module Fetcher
             # antes da navegação), gerando `domain: null` no CDP.
             # Por isso chamamos `Network.setCookie` diretamente via `page.command`,
             # passando `url:` e omitindo `domain`.
-            page.command(
+            resposta = page.command(
               "Network.setCookie",
               name:   name,
               value:  cookie["value"].to_s,
@@ -120,6 +125,16 @@ module Fetcher
               path:   "/",
               secure: true
             )
+            # Achado D: a resposta do CDP NAO era conferida — o fake retorna
+            # `true` sempre e a rejeicao do Chrome passava despercebida, com a
+            # sessao seguindo sem o cookie. Validamos o `success` e reagimos:
+            # cookie __Host- recusado quebra o login silenciosamente.
+            sucesso = resposta.respond_to?(:key?) && resposta["success"]
+            unless sucesso
+              erro = resposta.respond_to?(:[]) ? resposta["errorText"].to_s : "resposta sem success"
+              Rails.logger.warn "[Fetcher::BrowserSession] Network.setCookie recusou cookie __Host- #{name} em #{host}: #{erro}"
+              raise CookieRejected, "Network.setCookie recusou cookie __Host- #{name} (#{erro})"
+            end
           else
             opts = {
               name:   name,
