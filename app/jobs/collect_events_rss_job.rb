@@ -14,7 +14,6 @@ class CollectEventsRssJob < ApplicationJob
         title: item[:title],
         description: item[:description],
         source: "rss",
-        start_date: item[:start_date],
         event_type: item[:event_type]
       )
 

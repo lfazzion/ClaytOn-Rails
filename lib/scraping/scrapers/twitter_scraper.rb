@@ -2,7 +2,9 @@
 
 module ScrapingServices
   class TwitterScraper < FerrumScraperBase
-    TWITTER_BASE_URL = 'https://twitter.com'
+    class ScrapingError < StandardError; end
+
+    TWITTER_BASE_URL = 'https://x.com'
     X_BASE_URL = 'https://x.com'
 
     USER_SCRIPT = <<~JS
@@ -83,14 +85,13 @@ module ScrapingServices
     JS
 
     def scrape_profile(username)
-      base = username.start_with?('x_') ? X_BASE_URL : TWITTER_BASE_URL
-      visit("#{base}/#{username}", wait_for: "[data-testid='UserName']")
-
+      raise ArgumentError, "Invalid Twitter handle: #{username.inspect}" unless valid_twitter_handle?(username)
+      visit("#{TWITTER_BASE_URL}/#{username}", wait_for: "[data-testid='UserName']")
       result = execute_script(USER_SCRIPT)
       return nil if result.nil?
 
       parsed = JSON.parse(result)
-      raise ScrapingServices::RateLimitError, 'Perfil bloqueado ou suspenso' if parsed['error']
+      raise ScrapingError, parsed['error'] if parsed['error']
 
       parsed.deep_symbolize_keys
     rescue JSON::ParserError => e
@@ -99,8 +100,8 @@ module ScrapingServices
     end
 
     def scrape_tweets(username, limit: 20)
-      base = username.start_with?('x_') ? X_BASE_URL : TWITTER_BASE_URL
-      visit("#{base}/#{username}", wait_for: "[data-testid='tweet']")
+      raise ArgumentError, "Invalid Twitter handle: #{username.inspect}" unless valid_twitter_handle?(username)
+      visit("#{TWITTER_BASE_URL}/#{username}", wait_for: "[data-testid='tweet']")
 
       all_tweets = []
       scroll_attempts = 0
@@ -130,6 +131,13 @@ module ScrapingServices
     end
 
     private
+
+    TWITTER_HANDLE_PATTERN = /\A[A-Za-z0-9_]{1,15}\z/
+
+    def valid_twitter_handle?(username)
+      return false if username.nil? || username.to_s.empty?
+      username.to_s.match?(TWITTER_HANDLE_PATTERN)
+    end
 
     def parse_tweet(tweet)
       {

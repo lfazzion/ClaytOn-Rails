@@ -155,4 +155,36 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     assert_equal 'rate_limited', @profile.collection_status
     assert_not_nil @profile.blocked_until
   end
+
+  test 'scraping error from DOM change goes to degraded, not rate_limited' do
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).raises(ScrapingServices::TwitterScraper::ScrapingError.new('DOM changed'))
+    mock_scraper.stubs(:close)
+    ScrapingServices::TwitterScraper.stubs(:new).returns(mock_scraper)
+    ScrapingFailureAlertJob.expects(:perform_later).with('twitter', @profile.id, 'DOM changed', 'scrape_error')
+
+    assert_nothing_raised do
+      ScrapeTwitterJob.perform_now(@profile.id)
+    end
+
+    @profile.reload
+    assert_equal 'degraded', @profile.collection_status
+    assert_nil @profile.blocked_until
+    refute_equal 'rate_limited', @profile.collection_status
+  end
+
+  test 'argument error from invalid handle is rescued and marked degraded' do
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).raises(ArgumentError.new('Invalid Twitter handle'))
+    mock_scraper.stubs(:close)
+    ScrapingServices::TwitterScraper.stubs(:new).returns(mock_scraper)
+
+    assert_nothing_raised do
+      ScrapeTwitterJob.perform_now(@profile.id)
+    end
+
+    @profile.reload
+    assert_equal 'degraded', @profile.collection_status
+    assert_nil @profile.blocked_until
+  end
 end

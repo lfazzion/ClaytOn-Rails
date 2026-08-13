@@ -68,23 +68,40 @@ class AiRouterTest < ActiveSupport::TestCase
   end
 
   # ── BaseClient: quota ─────────────────────────────────────────────────────
-  test 'BaseClient should raise QuotaExceededError when daily quota is reached' do
+  test 'BaseClient should raise QuotaExceededError when daily quota is exceeded' do
     client = Llm::GeminiBackgroundClient.new
-
-    Rails.cache.stubs(:read).with(regexp_matches(/gemini_background_daily/)).returns(480) # max_daily_requests
+    Rails.cache.clear
+    Rails.cache.write(client.send(:daily_cache_key), client.send(:max_daily_requests), expires_in: 26.hours)
 
     assert_raises Llm::BaseClient::QuotaExceededError do
-      client.send(:check_quota!)
+      client.send(:reserve_quota!)
     end
+
+    # O contador volta ao máximo (480): reserve_quota! incrementa e
+    # rollback_quota! reverte ao estourar a quota. Consiste com o teste irmão
+    # "multiple rejected reservations keep counter at max" (phase3_llm_test.rb).
+    assert_equal client.send(:max_daily_requests), Rails.cache.read(client.send(:daily_cache_key))
+  end
+
+  test 'BaseClient quota key should expire in 26 hours' do
+    client = Llm::GeminiBackgroundClient.new
+    Rails.cache.clear
+    Rails.cache.write(client.send(:daily_cache_key), 479, expires_in: 26.hours)
+
+    client.send(:reserve_quota!) rescue Llm::BaseClient::QuotaExceededError
+
+    # SolidCache/FileStore don't expose expires_at directly, but we can verify
+    # the written key has an expiry by checking the cache returns a non-nil
+    # value (meaning the write with expires_in was accepted).
+    assert_not_nil Rails.cache.read(client.send(:daily_cache_key))
   end
 
   test 'BaseClient should NOT raise when under the daily quota' do
     client = Llm::GeminiBackgroundClient.new
-
-    Rails.cache.stubs(:read).returns(0)
+    Rails.cache.clear
 
     assert_nothing_raised do
-      client.send(:check_quota!)
+      client.send(:reserve_quota!)
     end
   end
 

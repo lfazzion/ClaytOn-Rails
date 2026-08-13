@@ -265,7 +265,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'set_profile_monitoring com status active em perfil arquivado limpa archived_at' do
-    profile = create(:social_profile, :twitter, platform_username: 'archived_monitored', archived_at: 2.days.ago, monitoring_status: 'paused')
+    profile = create(:social_profile, :twitter, platform_username: 'archived_monit', archived_at: 2.days.ago, monitoring_status: 'paused')
 
     tool = SetProfileMonitoringTool.new
     result = tool.execute(identifier: profile.platform_username, status: 'active')
@@ -292,10 +292,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   # ── 4. RemoveProfileTool ──────────────────────────────────────────────────────
 
   test 'remove_profile por handle remove perfil de verdade (destroy!) em um unico turno' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_handle')
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_hndl')
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'to_remove_handle')
+    res = tool.execute(identifier: 'to_remove_hndl')
 
     assert_equal :success, res[:status]
     assert_equal 'removed', res[:data][:status]
@@ -379,11 +379,11 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'remove_profile rescata RecordNotDestroyed e retorna erro amigavel' do
-    profile = create(:social_profile, :twitter, platform_username: 'not_destroyed_user')
+    profile = create(:social_profile, :twitter, platform_username: 'not_destroyed')
     SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'not_destroyed_user')
+    res = tool.execute(identifier: 'not_destroyed')
 
     assert_equal :error, res[:status]
     assert_includes res[:reason], 'Erro ao remover'

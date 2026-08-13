@@ -13,7 +13,6 @@ class CollectEventsRssJobTest < ActiveJob::TestCase
         title: "BGS 2026: Brasil Game Show",
         source_url: "https://example.com/bgs2026",
         description: "Evento de games",
-        start_date: Date.new(2026, 10, 15),
         event_type: "bgs"
       }
     ])
@@ -27,6 +26,32 @@ class CollectEventsRssJobTest < ActiveJob::TestCase
     assert_equal "BGS 2026: Brasil Game Show", event.title
     assert_equal "rss", event.source
     assert_equal "bgs", event.event_type
+    # pubDate must not be written as start_date for RSS-sourced events
+    assert_nil event.start_date
+  end
+
+  test "should not overwrite previously corrected start_date on RSS update" do
+    ScrapingServices::EventsRssParser.stubs(:fetch_events).returns([
+      {
+        title: "Updated Title",
+        source_url: "https://example.com/bgs2026",
+        description: "Updated",
+        event_type: "bgs"
+      }
+    ])
+
+    existing = create(:event,
+      source_url: "https://example.com/bgs2026",
+      title: "Old Title",
+      start_date: Date.new(2026, 10, 15),
+      updated_at: 13.hours.ago
+    )
+
+    CollectEventsRssJob.perform_now
+
+    existing.reload
+    assert_equal "Updated Title", existing.title
+    assert_equal Date.new(2026, 10, 15), existing.start_date
   end
 
   test "should be idempotent by source_url" do
