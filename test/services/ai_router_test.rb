@@ -83,17 +83,31 @@ class AiRouterTest < ActiveSupport::TestCase
     assert_equal client.send(:max_daily_requests), Rails.cache.read(client.send(:daily_cache_key))
   end
 
-  test 'BaseClient quota key should expire in 26 hours' do
+  test 'BaseClient reserve_quota! writes quota key with expires_in of 26 hours' do
     client = Llm::GeminiBackgroundClient.new
     Rails.cache.clear
+    # Partida em 479 para que o increment suba para 480 (= MAX_DAILY) sem estourar
     Rails.cache.write(client.send(:daily_cache_key), 479, expires_in: 26.hours)
 
-    client.send(:reserve_quota!) rescue Llm::BaseClient::QuotaExceededError
+    # ACHADO F (P2, sol 13/08): o teste antigo só verificava leitura imediata.
+    # Instrumentamos o increment para capturar o `expires_in` que reserve_quota!
+    # de fato propaga — provando que a chave de quota expira em 26 horas.
+    # Mocha 3.1.0 NÃO executa bloco de stub (stubs(:increment).returns { } →
+    # nil, disparando o raise do ACHADO B) — usa singleton override real.
+    captured = {}
+    original_increment = Rails.cache.method(:increment)
+    Rails.cache.define_singleton_method(:increment) do |*args, **kwargs|
+      captured[:expires_in] = kwargs[:expires_in]
+      original_increment.call(*args, **kwargs)
+    end
 
-    # SolidCache/FileStore don't expose expires_at directly, but we can verify
-    # the written key has an expiry by checking the cache returns a non-nil
-    # value (meaning the write with expires_in was accepted).
-    assert_not_nil Rails.cache.read(client.send(:daily_cache_key))
+    client.send(:reserve_quota!)
+
+    assert_equal 26.hours, captured[:expires_in],
+                 'reserve_quota! deve propagar expires_in: 26.hours para o increment'
+  ensure
+    Rails.cache.singleton_class.send(:remove_method, :increment)
+    Rails.cache.define_singleton_method(:increment, original_increment)
   end
 
   test 'BaseClient should NOT raise when under the daily quota' do

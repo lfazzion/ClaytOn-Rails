@@ -48,4 +48,46 @@ class FetchPacerLockTtlTest < ActiveSupport::TestCase
 
     assert_operator captured[:expires_in], :>=, 20
   end
+
+  # ── ACHADO G (P3, sol 13/08): LOCK_TTL = 30 ficou sem uso. Usá-lo como PISO
+  # do TTL do lock, garantindo que nunca caia abaixo de 30s independentemente
+  # de range.max. ──
+  test 'lock TTL uses LOCK_TTL (30) as a floor even for empty range' do
+    captured = {}
+    Rails.cache.stubs(:write)
+                  .with { |*args, **kwargs| captured[:expires_in] = kwargs[:expires_in] if args[0] == @lock_key; true }
+                  .returns(true)
+    Rails.cache.stubs(:read).with(@lock_key).returns(@token)
+    Rails.cache.stubs(:read).with(@cache_key).returns(nil)
+    Rails.cache.stubs(:delete).with(@lock_key)
+
+    # range vazio (max = 0) => TTL deve respeitar o piso LOCK_TTL, não 0+margin
+    Scraping::FetchPacer.wait(@host, range: 0..0)
+
+    assert_operator captured[:expires_in], :>=, Scraping::FetchPacer::LOCK_TTL,
+                    "TTL do lock (#{captured[:expires_in]}) deve respeitar o piso LOCK_TTL (#{Scraping::FetchPacer::LOCK_TTL})"
+  end
+
+  # ── ACHADO D (P2, sol 13/08): os testes só verificavam TTL e stubavam
+  # read/delete, sem exercitar a disputa de token no unlock. Este teste é
+  # determinístico: simula que, entre a aquisição e a liberação, um worker
+  # concorrente assumiu o lock (token diferente). O unlock NÃO deve apagar o
+  # lock novo — ele deve permanecer com o token do novo dono. ──
+  test 'lock is NOT released when token changed between acquire and release' do
+    other_token = 'newownert0'
+    delete_called = false
+    Rails.cache.stubs(:write)
+                  .with { |*args, **kwargs| args[0] == @lock_key; true }
+                  .returns(true) # aquisição bem-sucedida com @token
+    # No ensure, o read do lock retorna o token do NOVO dono (concorrência):
+    Rails.cache.stubs(:read).with(@lock_key).returns(other_token)
+    Rails.cache.stubs(:read).with(@cache_key).returns(nil) # sem last_fetch => sem sleep
+    Rails.cache.stubs(:delete).with(@lock_key) { delete_called = true }
+
+    Scraping::FetchPacer.wait(@host, range: 8..20)
+
+    refute delete_called,
+           'o unlock não deve apagar o lock quando o token mudou — o lock do ' \
+           'novo dono deve permanecer intacto'
+  end
 end

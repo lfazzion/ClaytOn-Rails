@@ -45,7 +45,7 @@ class Phase3LlmTest < ActiveSupport::TestCase
     end
   end
 
-  test 'concurrent reservations: between N attempts for quota M, only M reach RubyLLM.chat' do
+  test 'concurrent reserves: between N attempts for quota M, exactly M succeed (reservations only)' do
     max = 5
     # Override max_daily_requests on the instance to a small number for
     # a deterministic concurrency test.
@@ -162,6 +162,18 @@ class Phase3LlmTest < ActiveSupport::TestCase
     end
 
     assert_equal max, Rails.cache.read(cache_key)
+  end
+
+  # ── ACHADO B (P1, sol 13/08): se AMBAS as chamadas a Rails.cache.increment
+  # retornarem nil, reserve_quota! retornava nil e o provedor era chamado SEM
+  # reserva (bypass silencioso da quota). Deve levantar erro explícito ANTES
+  # de criar qualquer chat. ──
+  test 'reserve_quota! raises when both increment attempts return nil (no silent quota bypass)' do
+    # Simula o backend de cache respondendo nil em AMBAS as tentativas de
+    # increment (ex.: backend sem CAS/sem suporte a increment).
+    Rails.cache.stubs(:increment).returns(nil)
+
+    assert_raises(RuntimeError) { client.send(:reserve_quota!) }
   end
 end
 require 'test_helper'

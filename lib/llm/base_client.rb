@@ -56,6 +56,15 @@ module Llm
       count = Rails.cache.increment(cache_key, 1, expires_in: 26.hours, unless_exist: true)
       count = Rails.cache.increment(cache_key, 1, expires_in: 26.hours) if count.nil?
 
+      # ACHADO B (P1, sol 13/08): se AMBAS as tentativas de increment retornarem
+      # nil (backend de cache sem suporte a increment/CAS), `count` fica nil e o
+      # método retornaria nil, fazendo com que o provedor fosse chamado SEM
+      # qualquer reserva de quota — um bypass silencioso. Levantamos erro
+      # explícito ANTES de criar o chat (complete() chama reserve_quota! antes de
+      # RubyLLM.chat). Não há fallback seguro: sem increment atômico não podemos
+      # garantir a contagem, então recusamos a chamada em vez de contorná-la.
+      raise RuntimeError, "#{self.class.name}: não foi possível reservar quota — Rails.cache.increment retornou nil nas duas tentativas (backend sem suporte a increment atômico?)" if count.nil?
+
       if count && count > max
         rollback_quota!
         Rails.logger.warn "[#{self.class.name}] Quota diária atingida: #{count}/#{max}"

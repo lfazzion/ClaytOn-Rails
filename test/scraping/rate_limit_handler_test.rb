@@ -68,6 +68,27 @@ class RateLimitHandlerTest < ActiveSupport::TestCase
     assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: '120')
   end
 
+  # ── ACHADO C (P2, sol 13/08): retry_after não vazio era classificado como
+  # rate limit mesmo quando inválido ("0", "garbage"). Parse inválido NÃO deve
+  # virar RateLimitError. ──
+  test 'rate_limited? does NOT match a non-numeric retry_after context' do
+    error = StandardError.new('Connection refused')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 'garbage')
+  end
+
+  test 'rate_limited? does NOT match a zero retry_after context' do
+    error = StandardError.new('Connection refused')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: '0')
+  end
+
+  test 'handle_error re-raises (not RateLimitError) for invalid retry_after' do
+    error = StandardError.new('Connection refused')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 'garbage')
+    assert_raises(StandardError) do
+      ScrapingServices::RateLimitHandler.handle_error(error, retry_after: 'garbage')
+    end
+  end
+
   test 'rate_limited? returns false for unrelated errors' do
     error = StandardError.new('Connection refused')
     refute ScrapingServices::RateLimitHandler.rate_limited?(error)

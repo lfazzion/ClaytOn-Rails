@@ -45,7 +45,12 @@ module ScrapingServices
       def rate_limited?(error, context = {})
         message = error.message.to_s
         return true if message.match?(/429/i)
-        return true if (context[:retry_after] && !context[:retry_after].to_s.empty?)
+        # ACHADO C (P2, sol 13/08): só classifica como rate limit quando o
+        # header Retry-After é *válido e positivo*. Antes, qualquer valor não
+        # vazio (inclusive "0" ou "garbage") virava RateLimitError, aplicando
+        # 6h de bloqueio em parse inválido. Agora exigimos parse_retry_after
+        # retornar um valor numérico > 0.
+        return true if (context[:retry_after].present? && parse_retry_after(context[:retry_after]))
         return true if EXPLICIT_RATE_LIMIT_TEXT_PATTERNS.any? { |pattern| message.match?(pattern) }
         false
       end
