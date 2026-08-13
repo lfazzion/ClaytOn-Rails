@@ -16,6 +16,7 @@ Rails.application.config.after_initialize do
   require Rails.root.join('lib/scraping/services/anilist_client')
   require Rails.root.join('lib/scraping/services/rawg_client')
   require Rails.root.join('lib/scraping/services/events_rss_parser')
+  require Rails.root.join('lib/scraping/fetch_pacer')
   require Rails.root.join('lib/scraping/scrapers/ferrum_scraper_base')
   require Rails.root.join('lib/scraping/scrapers/instagram_scraper')
   require Rails.root.join('lib/scraping/scrapers/twitter_scraper')

@@ -11,6 +11,11 @@ except ImportError:
     print(json.dumps({"error": "camoufox not installed"}), file=sys.stderr)
     sys.exit(1)
 
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+except (ImportError, AttributeError):
+    PlaywrightTimeoutError = TimeoutError
+
 ENGINE = "camoufox"
 
 # Teto de segurança do HTML devolvido. O `server.py` corta o stdout em 8 MB
@@ -56,7 +61,7 @@ def scrape_page(url, proxy=None):
         # dizendo onde paramos.
         try:
             page.wait_for_load_state("load", timeout=LOAD_WAIT_MS)
-        except Exception:
+        except (PlaywrightTimeoutError, TimeoutError):
             pass
 
         content = page.content() or ""

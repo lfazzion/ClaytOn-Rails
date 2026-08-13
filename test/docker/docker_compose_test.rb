@@ -45,6 +45,46 @@ class DockerComposeTest < ActiveSupport::TestCase
     end
   end
 
+  test "python-scraper healthcheck validates full readiness (HTTP status)" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    sidecar = config["services"]["python-scraper"]
+
+    assert sidecar, "python-scraper service not found"
+    assert sidecar["healthcheck"], "sidecar precisa de healthcheck do /health"
+
+    # O healthcheck deve não apenas tocar /health, mas validar o STATUS HTTP.
+    # urllib.request.urlopen levanta HTTPError em 4xx/5xx — um 503 (dependência
+    # ausente) faz o healthcheck falhar, garantindo que o container não fique
+    # "healthy" com scraping engine quebrado.
+    healthcheck_cmd = sidecar["healthcheck"]["test"].join(" ")
+    assert_includes healthcheck_cmd, "/health"
+    assert_match(/urllib/, healthcheck_cmd,
+                 "healthcheck deve usar urllib (levanta HTTPError em 503)")
+  end
+
+  test "python-scraper healthcheck covers dependency-absent scenario" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    sidecar = config["services"]["python-scraper"]
+
+    assert sidecar, "python-scraper service not found"
+    healthcheck = sidecar["healthcheck"]
+    assert healthcheck, "sidecar precisa de healthcheck do /health"
+
+    # O server.py valida scripts e imports na inicialização; o /health responde
+    # 503 quando algo falta. O healthcheck do docker-compose deve propagar essa
+    # falha (não a mascarar). Opcionalmente, pode usar --fail-with-body ou
+    # equivalente para assertar 200; aqui garantimos que o teste não usa
+    # `--fail` sem validação de status, que aceitaria 503.
+    cmd_str = healthcheck["test"].join(" ")
+    # Não deve usar `|| exit 0` ou equivalente que mascare 503.
+    refute_includes cmd_str, "|| exit 0",
+                    "healthcheck não deve mascara 503 com '|| exit 0'"
+    refute_includes cmd_str, "|| true",
+                    "healthcheck não deve mascara 503 com '|| true'"
+    # A URL /health deve aparecer integralmente.
+    assert_match(%r{/health}, cmd_str)
+  end
+
   test "python-scraper should serve the HTTP API and stay off the host network" do
     config = YAML.load_file(DOCKER_COMPOSE_PATH)
     sidecar = config["services"]["python-scraper"]
@@ -197,6 +237,22 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert jobs_deps.key?("chrome"), "jobs should depend on chrome"
   end
 
+  test "jobs deve subir só após o app estar healthy (db:prepare da fila antes do worker)" do
+    # Regressão do achado r9 (rodada 9 do sol): a fila usa SQLite dedicado
+    # (storage/production_queue.sqlite3) e o `bin/jobs start` NÃO roda
+    # `db:prepare`. Sem ordenação, no primeiro deploy o worker abre o arquivo
+    # vazio e reinicia com erro de tabela inexistente. O `app` roda `db:prepare`
+    # no entrypoint e expõe healthcheck de `/up`; exigir que `jobs` dependa da
+    # saúde do `app` garante que o banco de fila foi criado/migrado antes.
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    jobs_deps = config["services"]["jobs"]["depends_on"] || {}
+
+    assert jobs_deps.key?("app"), "jobs deve depender do app (db:prepare antes da fila)"
+    app_dep = jobs_deps["app"]
+    assert_equal "service_healthy", app_dep["condition"],
+                 "jobs sobe só após app healthy (condition: service_healthy)"
+  end
+
   test "services should sit on a declared network, and only chrome leaves the bus" do
     config = YAML.load_file(DOCKER_COMPOSE_PATH)
 
@@ -277,7 +333,6 @@ class DockerComposeTest < ActiveSupport::TestCase
     assert_equal "${DISCORD_EFFORT_NOUS:-none}", env["DISCORD_EFFORT_NOUS"]
     assert_equal "${DISCORD_POOLSIDE_THINKING:-}", env["DISCORD_POOLSIDE_THINKING"]
   end
-
   test "as chaves de API NÃO aparecem no bloco environment de nenhum serviço" do
     # `environment:` tem precedência sobre `env_file:`. Uma chave listada ali é
     # resolvida contra docker/.env, onde ela não existe, e chega VAZIA ao
@@ -300,5 +355,124 @@ class DockerComposeTest < ActiveSupport::TestCase
                             "#{nome} declara #{chave} em environment: — chegaria vazia"
       end
     end
+  end
+
+  test "chrome healthcheck envia GET /json/version com Host: localhost e valida webSocketDebuggerUrl" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    chrome = config["services"]["chrome"]
+
+    healthcheck = chrome["healthcheck"]
+    assert healthcheck, "chrome deve ter healthcheck"
+
+    test_cmd = healthcheck["test"].join(" ")
+    assert_match(/CMD-SHELL/, test_cmd)
+    # Deve fazer GET /json/version — não mais TCP aberto
+    assert_match(%r{/json/version}, test_cmd,
+                 "healthcheck deve consultar /json/version, não apenas abrir a porta")
+    # Deve enviar o header Host: localhost
+    assert_match(/Host: localhost/, test_cmd,
+                 "healthcheck deve enviar o header Host: localhost")
+    # Deve validar a presença de webSocketDebuggerUrl na resposta
+    assert_match(/webSocketDebuggerUrl/, test_cmd,
+                 "healthcheck deve validar webSocketDebuggerUrl na resposta")
+    # NÃO deve usar `echo -e` — é não-portátil no dash (Debian base images).
+    # Deve usar `printf` (POSIX), que interpreta \r\n de forma confiável.
+    assert_match(/printf/, test_cmd,
+                 "healthcheck deve usar printf (portátil), não echo -e")
+    assert_no_match(/echo\s+-e/, test_cmd,
+                    "healthcheck NÃO deve usar `echo -e` — não é portátil no dash")
+  end
+
+  test "chrome deve ter limites explícitos de recursos compatíveis com a VM de 24GB/4OCPUs" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    chrome = config["services"]["chrome"]
+
+    # mem_limit: 4g — numérico, superior ao shm_size (2gb), dentro do teto da VM
+    assert chrome["mem_limit"], "chrome deve ter mem_limit explícito"
+    assert_match(/\d+[gmb]/i, chrome["mem_limit"].to_s,
+                 "mem_limit deve ser um valor numérico")
+    assert_operator chrome["mem_limit"].to_i, :>, 0, "mem_limit deve ser positivo"
+
+    # cpus: 2.0 — numérico, dentro dos 4 OCPUs disponíveis
+    assert chrome["cpus"], "chrome deve ter cpus explícito"
+    cpus = chrome["cpus"].to_s.to_f
+    assert_operator cpus, :>, 0, "cpus deve ser positivo"
+    assert_operator cpus, :<=, 4.0, "cpus não deve exceder os 4 OCPUs da VM"
+
+    # pids_limit conservador — numérico positivo
+    assert chrome["pids_limit"], "chrome deve ter pids_limit explícito"
+    assert_operator chrome["pids_limit"].to_i, :>, 0, "pids_limit deve ser positivo"
+
+    # shm_size mantido em 2gb
+    assert_equal "2gb", chrome["shm_size"], "shm_size deve ser mantido em 2gb"
+
+    # restart mantido
+    assert_equal "unless-stopped", chrome["restart"],
+                 "chrome deve manter restart: unless-stopped"
+  end
+
+  test "container de teste não roda como root e não compartilha o .env de produção" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    test_service = config["services"]["test"]
+
+    assert test_service, "test service not found"
+
+    # Usuário não-root
+    assert_not_equal "root", test_service["user"],
+                     "container de teste não deve rodar como root"
+    assert test_service["user"], "container de teste deve declarar um usuário não-root"
+
+    # Ausência do .env compartilhado
+    env_files = Array(test_service["env_file"]).compact
+    assert_empty env_files,
+                 "container de teste não deve carregar env_file (nem ../.env)"
+
+    # Checkout read-only
+    volumes = Array(test_service["volumes"]) || []
+    ro_volumes = volumes.select { |v| v.is_a?(String) && v.end_with?(":ro") }
+    assert ro_volumes.any? { |v| v.match?(/\.\.\/:\/rails:ro/) },
+           "checkout deve ser montado read-only (../:/rails:ro)"
+  end
+
+  test "container de teste expõe apenas diretórios temporários explicitamente graváveis" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    test_service = config["services"]["test"]
+
+    volumes = Array(test_service["volumes"]) || []
+    # O checkout read-only não deve aparecer sem :ro
+    writable_non_ro = volumes.select { |v| v.is_a?(String) && v.end_with?(":/rails") && !v.end_with?(":ro") }
+    assert_empty writable_non_ro,
+                 "nenhum volume do checkout deve ser gravável sem :ro"
+
+    # tmpfs gravável sobre tmp e log — o compose usa bind relativo
+    # (../tmp:/rails/tmp), não absoluto; verificar o lado do container.
+    writable_paths = volumes.select { |v| v.is_a?(String) && v =~ %r{:/rails/(tmp|log)$} }
+    assert writable_paths.any? { |v| v.end_with?("/rails/tmp") },
+           "tmp deve ser montado gravável"
+    assert writable_paths.any? { |v| v.end_with?("/rails/log") },
+           "log deve ser montado gravável"
+
+    # O SQLite de teste deve viver em tmpfs, NÃO em bind-mount de arquivo no
+    # host — um bind-mount cria um arquivo vazio (0 bytes) no host antes do
+    # Rails subir, o que pode disparar SQLite3::CorruptException. O tmpfs vive
+    # só na memória do container e é descartado a cada restart (correto para
+    # testes).
+    tmpfs_volume = volumes.find { |v| v.is_a?(Hash) && v["type"] == "tmpfs" && v["target"] == "/tmp" }
+    assert tmpfs_volume, "test service deve montar tmpfs em /tmp (não bind-mount de sqlite)"
+    refute volumes.any? { |v| v.to_s =~ %r{clayton_test\.sqlite3} },
+           "não deve haver bind-mount de /tmp/clayton_test.sqlite3 (cria arquivo vazio no host)"
+  end
+
+  test "container de teste aponta o banco para SQLite em /tmp via ambiente inline" do
+    config = YAML.load_file(DOCKER_COMPOSE_PATH)
+    test_service = config["services"]["test"]
+
+    env = test_service["environment"] || {}
+    env_str = env.is_a?(Hash) ? env.map { |k, v| "#{k}=#{v}" }.join(" ") : Array(env).join(" ")
+
+    # DATABASE_URL inline apontando para /tmp — não vem do .env
+    assert_match(/DATABASE_URL/, env_str, "test deve declarar DATABASE_URL inline")
+    assert_match(%r{/tmp/}, env_str, "banco de teste deve viver em /tmp")
+    assert_match(/sqlite3/, env_str, "banco de teste deve ser SQLite")
   end
 end

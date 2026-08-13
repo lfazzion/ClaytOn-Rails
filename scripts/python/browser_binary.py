@@ -10,6 +10,7 @@ por glob e não fixado no código.
 """
 
 import glob
+import re
 import os
 import shutil
 
@@ -20,6 +21,18 @@ CANDIDATE_GLOBS = (
 )
 
 NAMES_IN_PATH = ("chrome", "chromium", "chromium-browser", "google-chrome")
+
+VERSION_RE = re.compile(r"(?:chromium_headless_shell|chromium)-(\d+)")
+
+
+def _version_key(path):
+    """Extrai o número do build após `chromium-` ou `chromium_headless_shell-`
+    e devolve uma tupla numérica para ordenação correta (não lexicográfica).
+    Caminhos sem número recebem tupla (0,) como fallback determinístico."""
+    match = VERSION_RE.search(path)
+    if match:
+        return (int(match.group(1)),)
+    return (0,)
 
 
 def find_chrome():
@@ -34,9 +47,9 @@ def find_chrome():
             return found
 
     for pattern in CANDIDATE_GLOBS:
-        matches = sorted(glob.glob(pattern))
+        matches = glob.glob(pattern)
         if matches:
-            return matches[-1]
+            return max(matches, key=_version_key)
 
     return None
 

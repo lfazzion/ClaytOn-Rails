@@ -53,12 +53,15 @@ module ScrapingServices
     def execute(script, args)
       stdout, stderr, status = SidecarClient.capture(script: script, args: args, timeout: TIMEOUT)
 
-      if rate_limit?(stdout, stderr)
-        raise RateLimitHandler.handle_error(
-          StandardError.new(stderr.presence || stdout),
-          retry_count: 0
-        )
-      end
+      # 429/503/403 com exit 0 vêm como JSON no stdout — o script os classifica
+      # explicitamente. Rate-limit (429) é o único que dispara RateLimitError;
+      # 403 (blocked) e 503 (unavailable) não são retryable, mas não devem
+      # sumir silenciosamente — loga o motivo real antes de retornar nil.
+      error_kind = classify_exit(stdout, stderr)
+      raise RateLimitHandler.handle_error(
+        StandardError.new(stderr.presence || stdout),
+        retry_count: 0
+      ) if error_kind == :rate_limit
 
       unless status.success?
         Rails.logger.error "[CurlImpersonateClient] Falha (exit #{status.exitstatus}): #{stderr}"
@@ -68,25 +71,44 @@ module ScrapingServices
       return nil if stdout.strip.empty?
 
       parsed = JSON.parse(stdout.strip)
-      return nil unless parsed['success']
-
+      log_non_rate_limit_error(error_kind, parsed)
+      return nil unless parsed["success"]
       parsed
     rescue JSON::ParserError => e
       Rails.logger.error "[CurlImpersonateClient] JSON inválido: #{e.message}"
       nil
     end
 
-    def rate_limit?(stdout, stderr)
-      return true if ['429', 'Blocked', 'Captcha', 'rate limit', '403 Forbidden'].any? { |p| stderr.include?(p) }
+    # Classifica a saída do script Python: :rate_limit, :blocked, :unavailable,
+    # :error (não-HTTP) ou nil. Lê stderr primeiro (o script grava erros de
+    # processo lá), depois o JSON do stdout para erros HTTP conhecidos.
+    def classify_exit(stdout, stderr)
+      # Texto explícito de bloqueio no stderr = rate limit (mesmos padrões do
+      # RateLimitHandler: captcha/blocked/cloudflare). 403/503 como STATUS no
+      # stdout JSON são :blocked/:unavailable (não rate limit, DECISÃO 5).
+      return :rate_limit if ["429", "rate_limit", "captcha", "blocked", "cloudflare"].any? { |p| stderr.downcase.include?(p) }
 
       begin
         parsed = JSON.parse(stdout.strip)
-        return true if parsed['error']&.include?('rate_limit')
+        error = parsed["error"]
+        return :rate_limit if error.to_s.start_with?("rate_limit_")
+        return :blocked if error.to_s == "blocked_403"
+        return :unavailable if error.to_s == "unavailable_503"
+        return :error if error.present? && !parsed["success"]
       rescue JSON::ParserError
-        # stdout não é JSON, ignorar
+        # stdout não é JSON — ignora, deixa o caller decidir.
       end
 
-      false
+      nil
+    end
+
+    def rate_limit?(stdout, stderr)
+      classify_exit(stdout, stderr) == :rate_limit
+    end
+
+    def log_non_rate_limit_error(kind, parsed)
+      return if kind.nil?
+      Rails.logger.error "[CurlImpersonateClient] #{kind} (status #{parsed['status_code']}): #{parsed['error']}"
     end
   end
 end

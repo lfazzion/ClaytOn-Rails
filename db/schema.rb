@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_10_000002) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_12_000001) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false

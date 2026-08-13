@@ -79,14 +79,38 @@ class CurlImpersonateClientTest < ActiveSupport::TestCase
     assert_nil result
   end
 
-  test 'get returns nil when success is false' do
+  test '403 blocked_403 is not classified as rate limit and returns nil' do
     client = ScrapingServices::CurlImpersonateClient.new
-    json_output = '{"success": false, "status_code": 403, "error": "blocked"}'
+    json_output = '{"success": false, "status_code": 403, "error": "blocked_403"}'
 
     ScrapingServices::SidecarClient.expects(:capture).returns([json_output, '', stub(success?: true, exitstatus: 0)])
 
     result = client.get('https://example.com')
     assert_nil result
+  end
+
+  test '403 logs blocked error with status_code and error before returning nil' do
+    client = ScrapingServices::CurlImpersonateClient.new
+    json_output = '{"success": false, "status_code": 403, "error": "blocked_403"}'
+
+    ScrapingServices::SidecarClient.expects(:capture).returns([json_output, '', stub(success?: true, exitstatus: 0)])
+
+    # Garante que o erro é logado em vez de sumir silenciosamente.
+    # Matcher de bloco (regex .with(/.../) não casa no Mocha 3.1.0 — 13/08).
+    Rails.logger.expects(:error).with { |m| m.to_s =~ /blocked.*403/ }
+
+    client.get('https://example.com')
+  end
+
+  test '503 unavailable_503 logs unavailable error with status_code before returning nil' do
+    client = ScrapingServices::CurlImpersonateClient.new
+    json_output = '{"success": false, "status_code": 503, "error": "unavailable_503"}'
+
+    ScrapingServices::SidecarClient.expects(:capture).returns([json_output, '', stub(success?: true, exitstatus: 0)])
+
+    Rails.logger.expects(:error).with { |m| m.to_s =~ /unavailable.*503/ }
+
+    client.get('https://example.com')
   end
 
   test 'raises RateLimitError when rate_limit in output' do

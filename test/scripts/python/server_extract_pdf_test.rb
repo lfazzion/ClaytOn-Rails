@@ -50,11 +50,25 @@ class ServerExtractPdfTest < ActiveSupport::TestCase
       FileUtils.mkdir_p(package)
       File.write(File.join(package, "__init__.py"), FAKE_PYPDF)
 
+      # check_startup_health (DECISÃO 17 do sol) valida TODOS os imports
+      # essenciais no boot — sem eles o /health responde 503 e o teste do
+      # baseline (que fakeava só pypdf) falhava "servidor não subiu". Fakes
+      # vazios para os outros 3 módulos: o server só usa find_spec neles.
+      %w[nodriver camoufox curl_cffi].each do |mod|
+        mod_dir = File.join(dir, mod)
+        FileUtils.mkdir_p(mod_dir)
+        File.write(File.join(mod_dir, "__init__.py"), "")
+      end
+
       env = {
         "PYTHONPATH" => dir,
         "PYTHON_SCRAPER_TOKEN" => TEST_TOKEN,
         "SCRAPER_PORT" => port.to_s,
-        "SCRAPER_BIND" => "127.0.0.1"
+        "SCRAPER_BIND" => "127.0.0.1",
+        # check_startup_health (DECISÃO 17) valida os scripts no boot; o
+        # default /app/scripts não existe no container de teste (o mount é
+        # /rails). Apontar para o diretório real do worktree.
+        "SCRAPER_SCRIPTS_DIR" => Rails.root.join("scripts/python").to_s
       }
 
       # out:/err: :close FECHA os fds do filho: o server.py escreve o banner de
