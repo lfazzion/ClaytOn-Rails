@@ -144,4 +144,22 @@ class Fetcher::MarkdownConverterTest < ActiveSupport::TestCase
     assert_includes markdown, "## Título"
     assert_includes markdown, "- um"
   end
+
+  # ACHADO E (13/08, P2): a denylist de 3 esquemas deixava passar file:, esquemas
+  # desconhecidos e protocol-relative em imagens. A correção usa allowlist http/https.
+  test "imagem com esquema file: é descartada (allowlist http/https)" do
+    assert_equal "", convert('<img src="file:///etc/passwd" alt="x">')
+  end
+
+  test "imagem com esquema desconhecido (ftp) é descartada" do
+    assert_equal "", convert('<img src="ftp://exemplo.com/x.png" alt="x">')
+  end
+
+  test "imagem com esquema protocol-relative (//host) é descartada" do
+    assert_equal "", convert('<img src="//exemplo.com/x.png" alt="x">')
+  end
+
+  test "imagem com caminho relativo (sem esquema) continua preservada" do
+    assert_equal "![ok](images/x.png)", convert('<img src="images/x.png" alt="ok">')
+  end
 end

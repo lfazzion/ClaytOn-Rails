@@ -183,6 +183,19 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
     assert_kind_of Fetcher::Channels::Error, err
   end
 
+  # ACHADO D (13/08, P2): a API pode responder 200 com um Hash vazio ({}), que
+  # passava no `is_a?(Hash)` e gerava um resultado com título vazio. Campos
+  # estruturais indispensáveis (ex: title) devem ser validados.
+  test "11. API responde 200 com Hash vazio ({}) é rejeitado como issue inválida" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 200, body: JSON.generate({}), headers: { "Content-Type" => "application/json" })
+
+    erro = assert_raises(Fetcher::Channels::Github::ApiError) do
+      Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+    end
+    assert_kind_of Fetcher::Channels::Error, erro
+  end
+
   private
 
   def capture_log

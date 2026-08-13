@@ -88,7 +88,10 @@ module Fetcher
         alt = node["alt"].to_s.strip
         src = node["src"].to_s.strip
         return "" if alt.empty? || src.empty?
-        return "" if dangerous_scheme?(src)
+        # Allowlist explícita http/https (ACHADO E, revisão do sol, 13/08): a
+        # denylist de 3 esquemas deixava passar file:, esquemas desconhecidos e
+        # protocol-relative. Caminhos relativos (sem esquema) são seguros.
+        return "" unless safe_image_src?(src)
         "![#{alt}](#{src})"
       end
 
@@ -145,6 +148,25 @@ module Fetcher
       # deixava passar `JavaScript:` e `Data:`.
       DANGEROUS_SCHEMES = %w[javascript: data: vbscript:].freeze
       private_constant :DANGEROUS_SCHEMES
+
+      # Allowlist de esquemas para imagens (ACHADO E, 13/08): só http/https
+      # explícitos passam. Caminhos relativos (sem "://", ex: "images/x.png",
+      # "/img.png") são considerados seguros e preservados. Tudo que tiver um
+      # esquema que não seja http/https — file:, ftp:, javascript:, data:,
+      # vbscript:, protocol-relative (//host) — é bloqueado.
+      def safe_image_src?(src)
+        # Protocol-relative (//host) ou esquema desconhecido (javascript:, data:).
+        scheme_sep = src.index("://")
+        # Protocol-relative: começa com "//" e não tem esquema http/https → rejeita.
+        return false if src.start_with?("//")
+        # Esquema sem "://" (ex: "javascript:alert(1)", "mailto:x") → não é http/https.
+        return false if src.include?(":") && scheme_sep.nil?
+        # Sem ":", é caminho relativo (ex: "images/x.png", "/img.png") → seguro.
+        return true unless scheme_sep
+
+        scheme = src[0, scheme_sep].gsub(/\s+/, "").downcase
+        %w[http https].include?(scheme)
+      end
 
       def dangerous_scheme?(src)
         # Normaliza espaçamento interno do scheme (tabs/newlines) como fazem

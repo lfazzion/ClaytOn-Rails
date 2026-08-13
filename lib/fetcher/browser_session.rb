@@ -112,7 +112,7 @@ module Fetcher
             # antes da navegação), gerando `domain: null` no CDP.
             # Por isso chamamos `Network.setCookie` diretamente via `page.command`,
             # passando `url:` e omitindo `domain`.
-            page.command(
+            resposta = page.command(
               "Network.setCookie",
               name:   name,
               value:  cookie["value"].to_s,
@@ -120,6 +120,18 @@ module Fetcher
               path:   "/",
               secure: true
             )
+            # O CDP responde `{ "success": false, "errorText": "..." }` sem
+            # lançar exceção quando recusa o cookie (ex: prefixo __Host- com
+            # atributo incompatível). Ignorar o retorno deixava a sessão seguir
+            # anônima em silêncio — o bug do ACHADO A (revisão do sol, 13/08).
+            if resposta.is_a?(Hash) && resposta["success"] == false
+              erro = resposta["errorText"].to_s
+              Rails.logger.warn "[Fetcher::BrowserSession] Network.setCookie " \
+                                "recusou cookie #{name} em #{host}" \
+                                "#{erro.present? ? " (CDP: #{erro})" : ''}"
+              raise "Falha ao definir cookie __Host- #{name} via Network.setCookie " \
+                    "(CDP success:false#{erro.present? ? " — #{erro}" : ''})"
+            end
           else
             opts = {
               name:   name,
@@ -142,7 +154,11 @@ module Fetcher
           }
         end
         CookieJar.refresh_for!(host, atuais, expires_at: 7.days.from_now)
-      rescue StandardError => e
+      # Só erros operacionais esperados da serialização/persistência são
+      # engolidos e logados — não errar de programação. O `rescue StandardError`
+      # original engolia NoMethodError/NameError (o bug desta PR, ACHADO B da
+      # revisão do sol, 13/08); agora esses propagam e quebram o teste/ciclo.
+      rescue JSON::GeneratorError, ArgumentError => e
         Rails.logger.warn "[Fetcher::BrowserSession] rotação não persistida: #{e.class}: #{e.message}"
       end
 

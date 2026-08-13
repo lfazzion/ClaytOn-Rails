@@ -180,7 +180,12 @@ module Fetcher
         return false if record.nil?
 
         if expires_at
-          record.update!(payload: JSON.generate(filtered), expires_at: expires_at)
+          # ACHADO C (revisão do sol, 13/08): não FORÇAR o prazo para o valor
+          # solicitado — isso encurtava sessões válidas por 30 dias para 7. O
+          # prazo solicitado é um PISO (max), preservando o que já existia de
+          # mais longo. `record.expires_at` vem de um registro vivo, então não é nil.
+          piso = [record.expires_at, expires_at].compact.max
+          record.update!(payload: JSON.generate(filtered), expires_at: piso)
         else
           record.update!(payload: JSON.generate(filtered))
         end

@@ -477,6 +477,22 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
 
     lidos = Fetcher::CookieJar.for("reddit.com")
     assert_equal 2, lidos.size
-    assert_equal "abc123", lidos.find { |c| c["name"] == "reddit_session" }&.dig("value")
+    assert_equal "abc123", Fetcher::CookieJar.for("reddit.com").find { |c| c["name"] == "reddit_session" }&.dig("value")
+  end
+
+  # ACHADO C (13/08, P2): a rotação FORÇAVA expires_at para 7 dias, encurtando
+  # uma sessão válida por 30. O prazo solicitado deve ser um PISO (max), não um teto.
+  test "refresh_for! nao encurta prazo maior (trata expires_at solicitado como piso)" do
+    longo = 30.days.from_now.change(usec: 0)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: longo)
+    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
+    sete_dias = 7.days.from_now.change(usec: 0)
+
+    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos, expires_at: sete_dias)
+
+    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_operator registro.expires_at, :>, 25.days.from_now,
+                    "prazo de 30 dias não deve ser reduzido para 7"
+    assert_in_delta longo.to_f, registro.expires_at.to_f, 60
   end
 end

@@ -81,6 +81,11 @@ module Fetcher
 
           payload = parse_json(http_resp.body)
           raise ApiError, "resposta inválida da API do GitHub" unless payload.is_a?(Hash)
+          # ACHADO D (revisão do sol, 13/08): a API pode responder 200 com um
+          # Hash vazio ({}). `is_a?(Hash)` sozinho o aceitava e gerava um
+          # resultado com título/autor vazios. Rejeitar o caso vazio força o
+          # `rescue`/tratamento correto em vez de um issue fantasma.
+          raise ApiError, "resposta da API do GitHub veio sem campos (Hash vazio)" if payload.empty?
 
           comments = fetch_comments(owner, repo, number, headers) if payload["comments"].to_i.positive?
           comments ||= []
