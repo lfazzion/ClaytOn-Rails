@@ -6,21 +6,35 @@ class ScrapingFailureAlertJob < ApplicationJob
   include AdminAlertChannel
 
   queue_as :critical
-
   def perform(scraper_name, profile_id, error_message, error_type)
+    reserved = false
+
     if AlertThrottler.throttle?(error_type)
       Rails.logger.warn "[ScrapingFailureAlertJob] Throttled: #{error_type}"
       return
     end
 
     channel_id = ensure_admin_channel
-    return Rails.logger.warn "[ScrapingFailureAlertJob] Canal admin não configurado" unless channel_id
+    if channel_id.nil?
+      Rails.logger.warn "[ScrapingFailureAlertJob] Canal admin não configurado"
+      return
+    end
+
+    if AlertThrottler.reserve(error_type)
+      reserved = true
+    else
+      Rails.logger.warn "[ScrapingFailureAlertJob] Quota excedida: #{error_type}"
+      return
+    end
 
     message = build_alert_message(scraper_name, profile_id, error_message, error_type)
     DiscordApiClient.send_message(channel_id, message)
-    AlertThrottler.record(error_type)
 
     Rails.logger.info "[ScrapingFailureAlertJob] Alerta enviado para #{scraper_name}/#{profile_id}"
+  rescue StandardError
+    # Em caso de falha no envio, libera a reserva somente se ela foi efetivamente aceita.
+    AlertThrottler.release(error_type) if reserved
+    raise
   end
 
   private

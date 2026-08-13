@@ -17,6 +17,14 @@ class MetricsToolsTest < ActiveSupport::TestCase
     assert_nil result[:data][:engagement_rate]
   end
 
+  test 'engagement_rate retorna 0.0 quando posts existentes têm engajamento zero' do
+    create(:social_post, social_profile: @profile, post_type: 'image', likes_count: 0, comments_count: 0, shares_count: 0, posted_at: 1.day.ago)
+    tool = EngagementRateTool.new
+    result = tool.execute(username: 'testuser', platform: 'twitter')
+    assert_equal :success, result[:status]
+    assert_equal 0.0, result[:data][:engagement_rate]
+  end
+
   test 'engagement_rate calcula quando há posts' do
     create_list(:social_post, 5, social_profile: @profile, post_type: 'image', likes_count: 50, comments_count: 5,
                                  shares_count: 2, posted_at: 1.day.ago)

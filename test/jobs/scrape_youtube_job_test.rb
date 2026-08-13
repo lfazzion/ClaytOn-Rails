@@ -119,8 +119,43 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_equal 'partial', @profile.collection_status
   end
 
-  test 'should skip when metadata is nil' do
+  test 'should fallback to no cookies when extract_videos_detailed raises non-CookieJar error' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: '/tmp/fake_cookies.txt'
+    ).raises(StandardError.new('yt-dlp parse failure'))
+    # Fallback call must use cookies_path: nil (achado R3-6)
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: nil
+    ).returns([@videos, false])
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal 'success', @profile.collection_status
+  end
+
+  # DECISÃO 5 do sol — metadata nil NÃO é return silencioso: marca o perfil como
+  # "degraded" e enfileira ScrapingFailureAlertJob("youtube", id, msg, "metadata_failure"),
+  # preservando last_collected_at nil (não houve coleta). Atualizado da expectativa
+  # antiga (return silencioso) para o comportamento canônico da fusão.
+  test 'should mark profile degraded, enqueue metadata_failure alert and preserve last_collected_at when metadata is nil' do
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(nil)
+    ScrapingFailureAlertJob.expects(:perform_later).with(
+      'youtube',
+      @profile.id,
+      'extract_channel_metadata returned nil',
+      'metadata_failure'
+    )
 
     assert_no_difference 'ProfileSnapshot.count' do
       assert_no_difference 'SocialPost.count' do
@@ -129,6 +164,7 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     end
 
     @profile.reload
+    assert_equal 'degraded', @profile.collection_status
     assert_nil @profile.last_collected_at
   end
 
@@ -163,11 +199,28 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, false])
 
     ScrapeYoutubeJob.perform_now(@profile.id)
-    first_count = ProfileSnapshot.where(social_profile: @profile).count
+    first_snapshot = ProfileSnapshot.where(social_profile: @profile).last
+    assert_equal 50_000, first_snapshot.followers_count
+    assert_equal 100, first_snapshot.posts_count
+
+    # Reset last_collected_at so the second run is not blocked by rate-limit,
+    # but keep within the same hour so create_snapshot reuses the same record.
+    # update_all (não update!) é obrigatório: o objeto @profile em memória já
+    # tem last_collected_at nil (do factory), então update! seria no-op e o
+    # banco manteria o valor setado pela primeira execução do job.
+    SocialProfile.where(id: @profile.id).update_all(last_collected_at: nil)
+
+    # Second run with DIFFERENT metadata to prove snapshot is actually updated
+    updated_metadata = @metadata.merge(subscriber_count: 75_000, video_count: 200)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(updated_metadata)
 
     ScrapeYoutubeJob.perform_now(@profile.id)
 
-    assert_equal first_count, ProfileSnapshot.where(social_profile: @profile).count
+    assert_equal 1, ProfileSnapshot.where(social_profile: @profile).count
+    second_snapshot = ProfileSnapshot.where(social_profile: @profile).last
+    assert_equal first_snapshot.id, second_snapshot.id
+    assert_equal 75_000, second_snapshot.followers_count
+    assert_equal 200, second_snapshot.posts_count
   end
 
   test 'should set degraded status and enqueue ScrapingFailureAlertJob on StandardError' do
@@ -290,6 +343,52 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
 
     assert_equal 'https://www.youtube.com/channel/abc123',
                  ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
+  test 'should raise RateLimitError and not fallback to no cookies when extract_videos_with_cookies raises RateLimitError' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: '/tmp/fake_cookies.txt'
+    ).raises(ScrapingServices::RateLimitError.new('429 Too Many Requests'))
+
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: nil
+    ).never
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal 'rate_limited', @profile.collection_status
+    assert_not_nil @profile.blocked_until
+  end
+
+  test 'create_snapshot e seguro contra concorrencia e trata RecordNotUnique com upsert' do
+    recorded_at = Time.current.beginning_of_hour
+
+    s1 = ProfileSnapshot.create!(
+      social_profile: @profile,
+      recorded_at: recorded_at,
+      followers_count: 50_000,
+      posts_count: 100
+    )
+
+    ScrapeYoutubeJob.new.send(:create_snapshot, @profile, { subscriber_count: 60_000, video_count: 110 })
+
+    snapshots = ProfileSnapshot.where(social_profile: @profile, recorded_at: recorded_at)
+    assert_equal 1, snapshots.count
+    assert_equal s1.id, snapshots.first.id
+    assert_equal 60_000, snapshots.first.followers_count
+    assert_equal 110, snapshots.first.posts_count
   end
 end
 

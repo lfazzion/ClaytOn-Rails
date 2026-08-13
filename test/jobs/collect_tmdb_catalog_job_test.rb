@@ -79,12 +79,17 @@ class CollectTmdbCatalogJobTest < ActiveJob::TestCase
     })
     ScrapingServices::TmdbClient.stubs(:fetch_on_the_air_tv).returns({ "results" => [] })
 
+    catalog = ExternalCatalog.find_by(source: "tmdb", external_id: "1001")
+    assert_not_nil catalog
+
     assert_no_difference 'ExternalCatalog.count' do
       CollectTmdbCatalogJob.perform_now
     end
 
-    catalog = ExternalCatalog.find_by(source: "tmdb", external_id: "1001")
+    catalog.reload
     assert_equal "Updated Title", catalog.title
+    assert_equal 8.0, catalog.vote_average
+    assert_equal 100, catalog.vote_count
   end
 
   test "should skip records updated within 24 hours" do

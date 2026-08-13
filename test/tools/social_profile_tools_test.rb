@@ -57,8 +57,12 @@ class SocialProfileToolsTest < ActiveSupport::TestCase
       username_b: 'otheruser', platform_b: 'instagram'
     )
     assert_equal :success, result[:status]
-    assert result[:data].key?(:profile_a)
-    assert result[:data].key?(:profile_b)
+    assert_kind_of Hash, result[:data][:profile_a]
+    assert_kind_of Hash, result[:data][:profile_b]
+    assert_equal 'testuser', result[:data][:profile_a][:username]
+    assert_equal 'twitter', result[:data][:profile_a][:platform]
+    assert_equal 'otheruser', result[:data][:profile_b][:username]
+    assert_equal 'instagram', result[:data][:profile_b][:platform]
   end
 
   test 'compare retorna error se perfil não encontrado' do

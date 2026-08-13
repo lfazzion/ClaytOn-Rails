@@ -6,12 +6,22 @@ require_relative '../../app/services/discord_message_chunker'
 require_relative '../../app/jobs/weekly_digest_job'
 
 class WeeklyDigestJobTest < ActiveSupport::TestCase
+  setup do
+    @original_digest_channel = ENV['DISCORD_DIGEST_CHANNEL_ID']
+  end
+
+  teardown do
+    if @original_digest_channel
+      ENV['DISCORD_DIGEST_CHANNEL_ID'] = @original_digest_channel
+    else
+      ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+    end
+  end
+
   test 'perform monta mensagem com delta de seguidores, top/bottom por scored_at e alertas' do
     ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
-
     p1 = create(:social_profile, platform: 'youtube', platform_username: 'user1', display_name: 'User One', followers_count: 10_000, last_collected_at: 1.hour.ago)
     create(:profile_snapshot, social_profile: p1, followers_count: 9_500, recorded_at: 7.days.ago)
-
     p2 = create(:social_profile, platform: 'twitter', platform_username: 'user2', display_name: 'User Two', followers_count: 500, last_collected_at: 3.days.ago)
 
     create(:social_post, social_profile: p1, post_type: 'video', views_count: 100_000, performance_score: 2.5, performance_band: 'excelente', scored_at: 2.days.ago, posted_at: 10.days.ago)
@@ -30,10 +40,7 @@ class WeeklyDigestJobTest < ActiveSupport::TestCase
     msg = sent_messages.first
     assert_includes msg, 'Digest Semanal'
     assert_includes msg, '+500'
-
-    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end
-
 
   # Achado 5 (PR #36): o job DELEGA o chunking ao DiscordMessageChunker
   # (helper único). O algoritmo migrou para o unit test do chunker
@@ -58,17 +65,16 @@ class WeeklyDigestJobTest < ActiveSupport::TestCase
     assert_equal ['chunk_um', 'chunk_dois'], sent_messages,
                  'job deve enviar 1 mensagem por chunk devolvido pelo helper'
     assert sent_messages.size > 1, 'mensagem longa deve gerar multiplos envios'
-
-    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end
 
   test 'perform cria canal se não existir' do
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+    DiscordApiClient.expects(:get_bot_guilds).returns([{ 'id' => 'guild123' }])
+    DiscordApiClient.expects(:create_text_channel).with('guild123', 'digest-updates').once.returns({ 'id' => 'channel456' })
 
-    DiscordApiClient.stubs(:get_bot_guilds).returns([{ 'id' => 'guild123' }])
-    DiscordApiClient.stubs(:create_text_channel).returns({ 'id' => 'channel456' })
     sent_messages = []
-    DiscordApiClient.stubs(:send_message).with do |_channel_id, msg|
+    DiscordApiClient.expects(:send_message).with do |channel_id, msg|
+      assert_equal 'channel456', channel_id
       sent_messages << msg
       true
     end
@@ -154,6 +160,4 @@ class WeeklyDigestJobTest < ActiveSupport::TestCase
     assert_includes msg, ': — (atual)'
     refute_includes msg, ': 0 (atual)'
   end
-
 end
-

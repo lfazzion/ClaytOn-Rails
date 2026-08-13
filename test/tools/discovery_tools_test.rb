@@ -32,6 +32,22 @@ class DiscoveryToolsTest < ActiveSupport::TestCase
     tool = ProspectsTool.new
     result = tool.execute(limit: 2)
     assert_equal :success, result[:status]
-    assert_operator result[:data].size, :<=, 2
+    assert_equal 2, result[:data].size
+  end
+
+  test 'prospects aplica clamp minimo para limit 0' do
+    create_list(:discovered_profile, 3, platform: 'twitter', classification: 'PATROCINADOR_PROSPECTO')
+    tool = ProspectsTool.new
+    result = tool.execute(limit: 0)
+    assert_equal :success, result[:status]
+    assert_equal 1, result[:data].size
+  end
+
+  test 'prospects aplica clamp maximo para limit 51' do
+    create_list(:discovered_profile, 55, platform: 'twitter', classification: 'PATROCINADOR_PROSPECTO')
+    tool = ProspectsTool.new
+    result = tool.execute(limit: 51)
+    assert_equal :success, result[:status]
+    assert_equal 50, result[:data].size
   end
 end

@@ -54,6 +54,13 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     assert_equal false, AlertThrottler.throttle?('test_type')
   end
 
+  test 'decrement reduz contador' do
+    5.times { AlertThrottler.record('test_type') }
+    AlertThrottler.decrement('test_type')
+
+    assert_equal false, AlertThrottler.throttle?('test_type')
+  end
+
   test 'tipos diferentes não interferem' do
     10.times { AlertThrottler.record('rate_limit') }
 

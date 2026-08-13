@@ -66,7 +66,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalx', timeout: 8)
                                            .returns(metadata)
-    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)).returns(true)
+    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
+      @captured_profile_id = profile_id
+      true
+    end.returns(true)
 
     tool = AddProfileTool.new
     result = tool.execute(platform: 'youtube', handle: 'canalx')
@@ -79,6 +82,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert_equal 'UC_REAL_CHANNEL_ID', profile.platform_user_id
     assert_equal 'active', profile.monitoring_status
     assert_equal 'Canal Real YouTube', profile.display_name
+    assert_equal profile.id, @captured_profile_id
   end
 
   test 'add_profile em youtube com URL colada extrai handle e cria' do
@@ -91,13 +95,20 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalurl', timeout: 8)
                                            .returns(metadata)
-    ScrapeYoutubeJob.stubs(:perform_later)
+    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
+      @captured_profile_id = profile_id
+      true
+    end.returns(true)
 
     tool = AddProfileTool.new
     result = tool.execute(platform: 'youtube', handle: 'https://www.youtube.com/@CanalUrl')
 
     assert_equal :success, result[:status]
     assert_equal 'canalurl', result[:data][:username]
+
+    profile = SocialProfile.find_by(platform: 'youtube', platform_username: 'canalurl')
+    assert_not_nil profile
+    assert_equal profile.id, @captured_profile_id
   end
 
   test 'add_profile em youtube com metadata nil retorna error e não cria' do
@@ -265,7 +276,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'set_profile_monitoring com status active em perfil arquivado limpa archived_at' do
-    profile = create(:social_profile, :twitter, platform_username: 'archived_monitored', archived_at: 2.days.ago, monitoring_status: 'paused')
+    profile = create(:social_profile, :twitter, platform_username: 'archived_monit', archived_at: 2.days.ago, monitoring_status: 'paused')
 
     tool = SetProfileMonitoringTool.new
     result = tool.execute(identifier: profile.platform_username, status: 'active')
@@ -292,10 +303,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   # ── 4. RemoveProfileTool ──────────────────────────────────────────────────────
 
   test 'remove_profile por handle remove perfil de verdade (destroy!) em um unico turno' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_handle')
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_hndl')
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'to_remove_handle')
+    res = tool.execute(identifier: 'to_remove_hndl')
 
     assert_equal :success, res[:status]
     assert_equal 'removed', res[:data][:status]
@@ -379,11 +390,11 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'remove_profile rescata RecordNotDestroyed e retorna erro amigavel' do
-    profile = create(:social_profile, :twitter, platform_username: 'not_destroyed_user')
+    profile = create(:social_profile, :twitter, platform_username: 'not_destroyed')
     SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'not_destroyed_user')
+    res = tool.execute(identifier: 'not_destroyed')
 
     assert_equal :error, res[:status]
     assert_includes res[:reason], 'Erro ao remover'
