@@ -175,12 +175,14 @@ services:
     networks:
       - browser
     healthcheck:
-      # printf é portátil (POSIX) — `echo -e` não é suportado pelo dash usado
-      # pelo /bin/sh do CMD-SHELL em imagens Debian (chromedp/headless-shell).
-      # Usa formato longo para evitar escaping de aspas dentro do flow seq.
+      # Healthcheck REAL do CDP (sol, 14/08 — valida o achado #107 SEM derrubar):
+      # o GET /json/version com printf+pipe simples fechava o stdin antes da
+      # resposta (EOF precoce — socat encerrava cedo). `{ printf ...; sleep 2; }`
+      # mantém o stdin aberto até a resposta voltar; testa a porta REAL do
+      # headless (9223) e o campo semântico webSocketDebuggerUrl.
       test:
         - "CMD-SHELL"
-        - "printf 'GET /json/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | socat -T3 - TCP:localhost:9222 | grep -q webSocketDebuggerUrl"
+        - "{ printf 'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n'; sleep 2; } | socat -t3 -T3 - TCP4:127.0.0.1:9223 | grep -q '\"webSocketDebuggerUrl\"'"
       interval: 5s
       timeout: 3s
       retries: 3
