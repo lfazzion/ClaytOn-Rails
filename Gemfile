@@ -30,7 +30,7 @@ gem 'mcp', '~> 1.1'
 gem 'typhoeus', '~> 1.4' # HTTP client com proxy e SSL support
 gem 'ssrf_filter', '~> 1.5'  # SSRF + DNS rebinding protection (PageFetchTool)
 gem 'ruby-readability', '~> 0.7.3', require: 'readability'  # Fallback extractor (PageFetchTool)
-gem 'feedjira', '~> 3.2'  # RSS/Atom/RDF — canal de feed do /internal/extract
+gem 'feedjira', '~> 4.0'  # RSS/Atom/RDF — canal de feed do /internal/extract
 gem 'bootsnap', require: false
 gem 'ruby_llm', '~> 1.16'  # Unificada: Gemini + OpenRouter + Tool Calling + Imagen
 gem 'discordrb', '~> 3.8'
