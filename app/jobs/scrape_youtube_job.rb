@@ -11,6 +11,26 @@ class ScrapeYoutubeJob < ApplicationJob
 
   SNAPSHOT_DEDUP_WINDOW = 20.hours
 
+  # ACHADO D + unificação pós-revisão (13/08): só estas exceções (erros de
+  # rede/timeout/parser do scraper) são recuperáveis via fallback sem cookies.
+  # Bugs de programação (NoMethodError, ArgumentError, quebra de contrato) NÃO
+  # entram aqui e propagam para o handler externo do job.
+  # `const_get` com rescue evita NameError no boot caso alguma classe de
+  # stdlib (ex.: OpenURI) não esteja carregada no ambiente.
+  # União das listas das PRs #135 e #140 (COLLECT_WITH_COOKIES_FALLBACK_ERRORS
+  # ∪ RECOVERABLE_SCRAPER_ERRORS) — mesma semântica, cobertura completa.
+  RECOVERABLE_SCRAPER_ERRORS = %w[
+    Timeout::Error
+    Net::ReadTimeout Net::OpenTimeout Net::HTTPError
+    SocketError
+    OpenURI::HTTPError URI::InvalidURIError
+    Faraday::Error
+    JSON::ParserError
+    Errno::ECONNRESET Errno::ECONNREFUSED Errno::ETIMEDOUT
+    OpenSSL::SSL::SSLError
+    ScrapingServices::RateLimitError
+  ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
+
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
     raise ArgumentError, "Perfil #{profile_id} não é YouTube" unless profile.platform == "youtube"
@@ -77,7 +97,12 @@ class ScrapeYoutubeJob < ApplicationJob
   def extract_videos_with_cookies(channel_url, limit:, proxy:)
     cookies, = Fetcher::SessionCookies.for("youtube.com")
     Fetcher::CookieJar.with_netscape_file("youtube.com", cookies: cookies) do |cookies_path|
-      result = collect_with_cookies(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path)
+      result = ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+        channel_url,
+        limit: limit,
+        proxy: proxy,
+        cookies_path: cookies_path
+      )
       Fetcher::CookieJar.refresh_from_netscape!(
         domain: "youtube.com",
         path: cookies_path,
@@ -94,49 +119,14 @@ class ScrapeYoutubeJob < ApplicationJob
       proxy: proxy,
       cookies_path: nil
     )
-  end
-
-  # ACHADO C (P2, sol 13/08): o rescue era `StandardError`, portanto
-  # NoMethodError/ArgumentError (bugs de código) viravam fallback "degradado
-  # com sucesso", mascarando falhas. Limitamos o fallback às exceções
-  # CONHECIDAS de extração/rede/cookies — exatamente as que o
-  # YoutubeScraperService e o cliente HTTP levantam sob condições esperadas.
-  # Qualquer outra (NoMethodError, ArgumentError, etc.) PROPAGA para o rescue
-  # de StandardError do perform, que marca degraded + alerta (não finge sucesso).
-  COLLECT_WITH_COOKIES_FALLBACK_ERRORS = [
-    Timeout::Error,
-    Net::ReadTimeout,
-    Net::OpenTimeout,
-    Net::HTTPError,
-    Faraday::Error,
-    JSON::ParserError,
-    Errno::ECONNRESET,
-    Errno::ECONNREFUSED,
-    Errno::ETIMEDOUT,
-    OpenSSL::SSL::SSLError,
-    ScrapingServices::RateLimitError
-  ].freeze
-
-  # Apenas a EXTRação com cookies tem fallback sem cookies. O refresh do jar
-  # (persistência) NÃO está coberto: falha de banco/integração deve propagar
-  # para o retry do job, não ser reinterpretada como problema de sessão
-  # (achado P2 do sol, 13/08).
-  def collect_with_cookies(channel_url, limit:, proxy:, cookies_path:)
-    ScrapingServices::YoutubeScraperService.extract_videos_detailed(
-      channel_url,
-      limit: limit,
-      proxy: proxy,
-      cookies_path: cookies_path
-    )
   rescue ScrapingServices::RateLimitError
     raise
-  rescue *COLLECT_WITH_COOKIES_FALLBACK_ERRORS => e
-    # Non-CookieJar failures inside the cookies block (parse errors, network
-    # errors from the scraper, etc.) should not abort the whole collection —
-    # fall back to a no-cookies extraction so we still collect degraded data
-    # (achado R3-6). The cookie-jar-specific path above still takes precedence
-    # for Expired, which is a recoverable, expected condition.
-    Rails.logger.warn "[ScrapeYoutubeJob] Erro inesperado coletando vídeos com cookies: #{e.class}: #{e.message}. Coletando sem cookies."
+  rescue *RECOVERABLE_SCRAPER_ERRORS => e
+    # ACHADO D: só erros RECUPERÁVEIS conhecidos (rede/timeout/parser do
+    # scraper) justificam o fallback sem cookies. Qualquer outra exceção —
+    # inclusive NoMethodError ou quebra de contrato (bug de programação) —
+    # DEVE propagar, e não virar um "sucesso" silencioso sem cookies.
+    Rails.logger.warn "[ScrapeYoutubeJob] Erro recuperável coletando vídeos com cookies (#{e.class}): #{e.message}. Coletando sem cookies."
     ScrapingServices::YoutubeScraperService.extract_videos_detailed(
       channel_url,
       limit: limit,

@@ -313,38 +313,47 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
                  ScrapeYoutubeJob.new.send(:build_channel_url, profile)
   end
 
-  # ACHADO C (P2, sol 13/08): o rescue StandardError em collect_with_cookies é
-  # muito amplo — NoMethodError/ArgumentError viravam fallback degradado "com
-  # sucesso". Devemos limitar o fallback às exceções conhecidas de
-  # rede/extração (Timeout, erros de parsing) e PROPAGAR o resto.
-  # Testamos a unidade collect_with_cookies diretamente (o perform engole
-  # StandardError como "degraded", então a propagação até ele seria mascarada).
-  test 'collect_with_cookies propagates NoMethodError instead of falling back' do
+  # ACHADO C (P2, sol 13/08): o rescue StandardError é muito amplo —
+  # NoMethodError/ArgumentError viravam fallback degradado "com sucesso".
+  # Testamos pelo caminho PÚBLICO (extract_videos_with_cookies) — o contrato
+  # real — em vez da unidade interna collect_with_cookies (estrutura unificada
+  # com a PR #140).
+  test 'extract_videos_with_cookies propaga NoMethodError em vez de fallback' do
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
     ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
       .raises(NoMethodError.new('undefined method for nil'))
 
     assert_raises(NoMethodError) do
-      ScrapeYoutubeJob.new.send(:collect_with_cookies, 'https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      ScrapeYoutubeJob.new.send(:extract_videos_with_cookies, 'https://x', limit: 30, proxy: nil)
     end
   end
 
-  test 'collect_with_cookies propagates ArgumentError instead of falling back' do
+  test 'extract_videos_with_cookies propaga ArgumentError em vez de fallback' do
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
     ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
       .raises(ArgumentError.new('nil cipher'))
 
     assert_raises(ArgumentError) do
-      ScrapeYoutubeJob.new.send(:collect_with_cookies, 'https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      ScrapeYoutubeJob.new.send(:extract_videos_with_cookies, 'https://x', limit: 30, proxy: nil)
     end
   end
 
-  test 'collect_with_cookies still falls back to no-cookies on known network/parse errors' do
+  test 'extract_videos_with_cookies ainda cai no fallback sem cookies em erro conhecido de rede/parse' do
     # JSON::ParserError é erro de extração conhecido → continua elegível ao fallback.
-    # Primeira chamada (com cookies) levanta; segunda (sem cookies) retorna.
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
     ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
-      .then.raises(JSON::ParserError.new('unexpected token'))
-      .then.returns([@videos, true])
+      .with('https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      .raises(JSON::ParserError.new('unexpected token'))
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: nil)
+      .returns([@videos, true])
 
-    result = ScrapeYoutubeJob.new.send(:collect_with_cookies, 'https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+    result = ScrapeYoutubeJob.new.send(:extract_videos_with_cookies, 'https://x', limit: 30, proxy: nil)
 
     assert_equal [@videos, true], result
   end
