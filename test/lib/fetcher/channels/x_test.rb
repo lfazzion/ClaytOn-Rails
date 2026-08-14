@@ -476,9 +476,39 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     assert_match /empty\s*:/, js
     assert_match /empty_state_header_text/, js
     # Um seletor que mudou tem de virar campo nulo, não exceção que derruba a
-    # chamada inteira — é o que o Reddit já faz.
-    assert_operator js.scan("catch").size, :>=, 4
+    # chamada inteira — é o que o Reddit já faz. Cada helper tem seu próprio
+    # try/catch, verificado individualmente em vez de por contagem global.
+    %w[txt permalink quando autor reserva contador].each do |helper|
+      bloco = extract_timeline_js_function(js, helper)
+      refute_nil bloco, "helper #{helper} não declarado em TIMELINE_JS"
+      assert_match(/try/, bloco, "helper #{helper} não protege com try")
+      assert_match(/catch/, bloco, "helper #{helper} não tem catch")
+    end
+    # Rodada 3 (sol 13/08): o teste lexical acima pode ser enganado por try/catch
+    # que exista SÓ em comentário. O contrato real: o try de cada helper está em
+    # código executável (linha que não começa com //).
+    %w[txt permalink quando autor reserva contador].each do |helper|
+      bloco = extract_timeline_js_function(js, helper)
+      linha_try = bloco.to_s.lines.find { |l| l.include?("try") && !l.strip.start_with?("//") }
+      refute_nil linha_try, "helper #{helper}: try/catch deve estar em código executável (não só em comentário)"
+    end
     refute_match(/querySelector\(\s*['"]\s*>/, js)
+  end
+
+  test "extract_timeline_js_function isola o último helper (contador) sem vazar o try/catch do IIFE externo" do
+    js = Fetcher::Channels::X::TIMELINE_JS
+    bloco = extract_timeline_js_function(js, "contador")
+    refute_nil bloco
+    assert_match(/try/, bloco)
+    assert_match(/catch/, bloco)
+    # O IIFE externo tem `var out = []` — se contador vazar, isto aparece:
+    refute_match(/var out = \[\]/, bloco)
+  end
+
+  test "extract_timeline_js_function devolve nil e refute_nil falha quando o helper não existe" do
+    js = Fetcher::Channels::X::TIMELINE_JS
+    bloco = extract_timeline_js_function(js, "nao_existe")
+    assert_nil bloco, "helper inexistente deveria devolver nil"
   end
 
   # O JS de produção devolve {items, empty} (hash). Este teste usa FakePage
@@ -503,6 +533,71 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
 
   def from_search(lotes, limit: 10)
     Fetcher::Channels::X.from_search_page(page: FakePage.new(lotes), limit: limit)
+  end
+
+  # Extrai o corpo de uma função JS nomeada de TIMELINE_JS, delimitando a
+  # declaração para in-specie. Usado para validar try/catch por helper, e não
+  # por contagem global de "catch" no arquivo inteiro. Cada helper é extraído
+  # do ponto da declaração `function NAME(` até o fechamento do bloco de chaves
+  # da própria função — contagem de profundidade, não busca do próximo
+  # `function`, para que o último helper (contador) não inclua o try/catch do
+  # IIFE externo.
+  def extract_timeline_js_function(js, name)
+    marker = "function #{name}"
+    start_idx = js.index(marker)
+    return nil unless start_idx
+
+    after = js[(start_idx + marker.length)..-1]
+
+    # Encontre o início do bloco da função: o primeiro `{` após os parâmetros.
+    # Os helpers têm todos a forma `function NAME(arg) {` ou `function NAME {`
+    # com o `{` na mesma linha — `index("{")` pega o abre-chave da assinatura.
+    body_start = after.index("{")
+    return nil unless body_start
+
+    # Conta profundidade de chaves para isolar o bloco desta função. AVISO
+    # (Achado E): o extrator NAO exclui strings nem comentários — ele conta
+    # qualquer `{`/`}` que apareça no texto, inclusive dentro de string literal
+    # ou de um comentário `//`. Os helpers de produção por acaso não contêm
+    # `{`/`}` dentro de strings, mas isso é coincidência, não garantia do
+    # extrator. Não tratar como robustez: uma chave dentro de string trunca a
+    # extração (ver teste que documenta essa limitação).
+    depth = 0
+    body_start.upto(after.length - 1) do |i|
+      ch = after[i]
+      if ch == "{"
+        depth += 1
+      elsif ch == "}"
+        depth -= 1
+        return after[0..i] if depth.zero?
+      end
+    end
+    # Nunca deveria chegar aqui (JS bem formado sempre fecha), mas se o
+    # heredoc estiver truncado devolve nil para falhar explícito:
+    nil
+  end
+
+  # Achado E (GREEN): o extrator so conta profundidade de chaves e NAO exclui
+  # strings/comentarios. Uma chave de fechamento dentro de string literal
+  # trunca a extracao. Registramos esse comportamento REAL como contrato
+  # explicito (para nao reintroduzir a falsa afirmacao de robustez): o bloco
+  # extraido e interrompido pela `}` da string e nao contem o try/catch.
+  test "extractor e cego a chaves dentro de string: documenta a limitacao real (sem enganar)" do
+    js = <<~JS
+      (function () {
+        function demo(el) {
+          var s = "chave}dentro";
+          try { return el; } catch (e) { return null; }
+        }
+        var out = [];
+      })();
+    JS
+    bloco = extract_timeline_js_function(js, "demo")
+    refute_nil bloco
+    # Comportamento REAL: a `}` dentro de "chave}dentro" decrementa a
+    # profundidade e trunca o bloco ANTES do try/catch. O teste afirma essa
+    # limitacao de forma honesta (reflete o que o extrator faz de verdade).
+    refute_match(/try/, bloco, "extrator e cego a strings: a `}` na string trunca e o try/catch some do bloco")
   end
 
   test "from_search_page com busca com resultados devolve hash de chaves string" do
