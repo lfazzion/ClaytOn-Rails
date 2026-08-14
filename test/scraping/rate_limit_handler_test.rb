@@ -110,6 +110,24 @@ class RateLimitHandlerTest < ActiveSupport::TestCase
     assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: BigDecimal('120'))
   end
 
+  # Rodada 4 (sol 13/08): strings parcialmente numéricas e objetos arbitrários
+  # com to_f passavam pelo parse — agora são rejeitados (parse estrito).
+  test 'rate_limited? does NOT match partially-numeric string or arbitrary object' do
+    error = StandardError.new('HTTP 403 Forbidden')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: '120abc')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 'abc120')
+    objeto = Object.new
+    def objeto.to_f = 42.0
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: objeto)
+  end
+
+  test 'rate_limited? matches valid numeric strings only' do
+    error = StandardError.new('HTTP 403 Forbidden')
+    assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: '120')
+    assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: ' 30 ')
+    assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: '1.5')
+  end
+
   test 'handle_error re-raises (not RateLimitError) for invalid retry_after' do
     error = StandardError.new('Connection refused')
     refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 'garbage')

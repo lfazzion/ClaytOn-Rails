@@ -82,17 +82,29 @@ module ScrapingServices
       def parse_retry_after(val)
         return nil if val.nil?
 
-        # Rodada 3 (sol 13/08): BigDecimal(\"-1\")/NaN/Infinity passavam pelo
-        # branch Numeric (não são Float/Integer). Normalizar via to_f cobre
-        # todos os numéricos; se to_f não for finito ou <= 0, inválido.
-        num = begin
-          val.to_f
-        rescue StandardError
-          return nil
+        # Rodada 3/4 (sol): BigDecimal/NaN/Infinity passavam; strings
+        # parcialmente numéricas ("120abc") e objetos arbitrários com to_f
+        # também. Parse ESTRITO: só Numeric (não NaN/Infinity, não <= 0) e
+        # String com formato numérico completo (regex âncora).
+        if val.is_a?(Numeric)
+          num = begin
+            Float(val)
+          rescue StandardError
+            return nil
+          end
+          return nil if !num.finite? || num <= 0
+          return num.to_i == num ? num.to_i : num
         end
+
+        return nil unless val.is_a?(String)
+
+        # Regex âncora: "120abc" NÃO casa; "120", "1.5", " 30 " casam.
+        return nil unless val.strip.match?(/\A\d+(\.\d+)?\z/)
+
+        num = val.strip.to_f
         return nil if !num.finite? || num <= 0
 
-        val.is_a?(Numeric) && val.is_a?(Integer) ? val : (num.to_i == num ? num.to_i : num)
+        num.to_i == num ? num.to_i : num
       end
     end
   end
