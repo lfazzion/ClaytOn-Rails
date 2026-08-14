@@ -214,13 +214,14 @@ async def fetch(url, proxy=None):
             # o teardown, deixamos propagar (nao engolimos cancelamento).
             raise
         except Exception as exc:
-            # Achado G: o `except Exception: pass` anterior engolia QUALQUER
-            # erro de limpeza, mascarando falhas reais (ex.: browser nao
-            # liberado, leak). So suprimir erros de encerramento ja esperados
-            # do nodriver/CDP — conexao fechada ou browser ja encerrado
-            # (TargetClosedError / mensagem com "closed"). Qualquer OUTRO erro
-            # de stop deve propagar e virar falha visivel do script.
-            if "closed" in str(exc).lower() or "TargetClosed" in type(exc).__name__:
+            # Achado G (rodada 2) + rodada 3 (sol 13/08): o `except Exception:
+            # pass` anterior engolia QUALQUER erro de limpeza. Suprimir SÓ a
+            # exceção operacional CONCRETA de encerramento que o nodriver/CDP
+            # levanta quando o browser já foi fechado (TargetClosedError).
+            # Nada de heurística por substring ("closed" na mensagem): um
+            # RuntimeError("closed state invariant broken") é erro de
+            # programação e deve propagar (falso positivo apontado pelo sol).
+            if type(exc).__name__ == "TargetClosedError" or "cdp.target" in type(exc).__module__:
                 pass
             else:
                 raise
