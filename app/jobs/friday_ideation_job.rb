@@ -67,8 +67,11 @@ class FridayIdeationJob < ApplicationJob
     prompt = Llm::PromptLoader.load('ideation_digest', context: lines.join("\n"))
     response = AiRouter.complete(prompt, context: :background)
 
-    lines << '**Sugestões de conteúdo:**'
-    lines << response.content.to_s
+    formatted_suggestions = IdeationResponseFormatter.format(response.content)
+    if formatted_suggestions.present?
+      lines << '**Sugestões de conteúdo:**'
+      lines << formatted_suggestions
+    end
 
     lines.join("\n")
   end
