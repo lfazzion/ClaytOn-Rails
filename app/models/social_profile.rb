@@ -9,6 +9,8 @@ class SocialProfile < ApplicationRecord
   # e a coleta morre em silêncio (achado 1/3 do PR #36).
   CHANNEL_ID_PATTERN = /\AUC[A-Za-z0-9_-]{22}\z/
 
+  TWITTER_HANDLE_PATTERN = /\A[A-Za-z0-9_]{1,15}\z/
+
   has_many :social_posts, dependent: :destroy
   has_many :profile_snapshots, dependent: :destroy
   has_many :discovered_profiles, foreign_key: :source_profile_id, dependent: :nullify
@@ -17,6 +19,10 @@ class SocialProfile < ApplicationRecord
   validates :platform_username, presence: true
   validates :platform_user_id, presence: true
   validates :platform, uniqueness: { scope: :platform_user_id }
+  validates :platform_username,
+            format: { with: TWITTER_HANDLE_PATTERN,
+                      message: "must be a valid Twitter handle (letters, numbers, underscores only)" },
+            if: -> { platform == "twitter" }
 
   before_validation :normalize_platform_username
 
@@ -44,6 +50,7 @@ class SocialProfile < ApplicationRecord
   }
 
   def should_collect?(window = 2.hours)
+    return false if blocked_until.present? && blocked_until > Time.current
     return true if last_collected_at.nil?
 
     Time.current - last_collected_at > window

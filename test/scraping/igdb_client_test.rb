@@ -52,17 +52,47 @@ class IgdbClientTest < ActiveSupport::TestCase
     assert_equal [], result
   end
 
-  test "returns nil on HTTP error" do
-    ENV.stubs(:fetch).with('IGDB_CLIENT_ID').returns('bad_id')
-    ENV.stubs(:fetch).with('IGDB_CLIENT_SECRET').returns('bad_secret')
+  test "renews token on 401 and retries successfully" do
+    ENV.stubs(:fetch).with('IGDB_CLIENT_ID').returns('test_id')
+    ENV.stubs(:fetch).with('IGDB_CLIENT_SECRET').returns('test_secret')
     stub_request(:post, "https://id.twitch.tv/oauth2/token")
-      .to_return(status: 200, body: '{"access_token":"bad_token"}')
+      .to_return(status: 200, body: '{"access_token":"first_token"}')
+      .then
+      .to_return(status: 200, body: '{"access_token":"second_token"}')
     stub_request(:post, "https://api.igdb.com/v4/games")
+      .to_return(status: 401, body: '{"message":"Invalid token"}')
+      .then
+      .to_return(status: 200, body: '[{"id":1,"name":"Renewed Game"}]')
+
+    result = ScrapingServices::IgdbClient.fetch_popular_games
+
+    assert_not_nil result
+    assert_equal "Renewed Game", result.first["name"]
+    # Two token emissions (initial + after reset)
+    assert_requested(:post, "https://id.twitch.tv/oauth2/token", times: 2)
+    # Two requests to IGDB (initial 401 + retry 200)
+    assert_requested(:post, "https://api.igdb.com/v4/games", times: 2)
+  end
+
+  test "returns nil after exactly one retry on persistent 401" do
+    ENV.stubs(:fetch).with('IGDB_CLIENT_ID').returns('test_id')
+    ENV.stubs(:fetch).with('IGDB_CLIENT_SECRET').returns('test_secret')
+    stub_request(:post, "https://id.twitch.tv/oauth2/token")
+      .to_return(status: 200, body: '{"access_token":"first_token"}')
+      .then
+      .to_return(status: 200, body: '{"access_token":"second_token"}')
+    stub_request(:post, "https://api.igdb.com/v4/games")
+      .to_return(status: 401, body: '{"message":"Invalid token"}')
+      .then
       .to_return(status: 401, body: '{"message":"Invalid token"}')
 
     result = ScrapingServices::IgdbClient.fetch_popular_games
 
     assert_nil result
+    # Two token emissions (initial + after reset)
+    assert_requested(:post, "https://id.twitch.tv/oauth2/token", times: 2)
+    # Exactly one retry = two total requests to IGDB, then nil
+    assert_requested(:post, "https://api.igdb.com/v4/games", times: 2)
   end
 
   test "returns nil on timeout" do

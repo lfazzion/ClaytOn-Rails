@@ -113,10 +113,13 @@ class NodriverRunnerTest < ActiveSupport::TestCase
     end
   end
 
-  test 'raises RateLimitError on 403 Forbidden in stderr' do
+  test 'raises StandardError on 403 Forbidden in stderr (não é rate limit)' do
     stub_sidecar(stderr: '403 Forbidden', success: false)
 
-    assert_raises(ScrapingServices::RateLimitError) do
+    # DECISÃO 5: 403/503 isolados NÃO são mais rate limit — só quando
+    # acompanhados de texto explícito (blocked/captcha/etc). 403 puro sobe
+    # como StandardError (erro operacional), não RateLimitError.
+    assert_raises(StandardError) do
       ScrapingServices::NodriverRunner.scrape_instagram_profile('testuser')
     end
   end
