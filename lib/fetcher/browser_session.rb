@@ -22,11 +22,6 @@ module Fetcher
   # isso, logar no perfil da VM não teria efeito nenhum aqui — o contexto isolado
   # nasce limpo e não herda os cookies do contexto padrão.
   module BrowserSession
-    # Erro levantado quando o Chrome rejeita o cookie __Host-/* via CDP
-    # Network.setCookie (success=false). Antigamente a resposta era ignorada e
-    # a sessao seguia sem o cookie — login mudo falhava no site.
-    class CookieRejected < StandardError; end
-
     # Fica DENTRO de `ExtractService::CHANNEL_TIMEOUT` (40s), que por sua vez fica
     # abaixo dos 90s do plugin do reader. Mexer num exige manter a ordem.
     OVERALL_TIMEOUT = 35
@@ -125,15 +120,17 @@ module Fetcher
               path:   "/",
               secure: true
             )
-            # Achado D: a resposta do CDP NAO era conferida — o fake retorna
-            # `true` sempre e a rejeicao do Chrome passava despercebida, com a
-            # sessao seguindo sem o cookie. Validamos o `success` e reagimos:
-            # cookie __Host- recusado quebra o login silenciosamente.
-            sucesso = resposta.respond_to?(:key?) && resposta["success"]
-            unless sucesso
-              erro = resposta.respond_to?(:[]) ? resposta["errorText"].to_s : "resposta sem success"
-              Rails.logger.warn "[Fetcher::BrowserSession] Network.setCookie recusou cookie __Host- #{name} em #{host}: #{erro}"
-              raise CookieRejected, "Network.setCookie recusou cookie __Host- #{name} (#{erro})"
+            # O CDP responde `{ "success": false, "errorText": "..." }` sem
+            # lançar exceção quando recusa o cookie (ex: prefixo __Host- com
+            # atributo incompatível). Ignorar o retorno deixava a sessão seguir
+            # anônima em silêncio — o bug do ACHADO A (revisão do sol, 13/08).
+            if resposta.is_a?(Hash) && resposta["success"] == false
+              erro = resposta["errorText"].to_s
+              Rails.logger.warn "[Fetcher::BrowserSession] Network.setCookie " \
+                                "recusou cookie #{name} em #{host}" \
+                                "#{erro.present? ? " (CDP: #{erro})" : ''}"
+              raise "Falha ao definir cookie __Host- #{name} via Network.setCookie " \
+                    "(CDP success:false#{erro.present? ? " — #{erro}" : ''})"
             end
           else
             opts = {
@@ -157,7 +154,13 @@ module Fetcher
           }
         end
         CookieJar.refresh_for!(host, atuais, expires_at: 7.days.from_now)
-      rescue StandardError => e
+      # Só erros operacionais esperados da serialização são engolidos e
+      # logados — não erros de programação. O `rescue StandardError` original
+      # engolia NoMethodError/NameError (o bug desta PR, ACHADO B da revisão
+      # do sol, 13/08); o `ArgumentError` foi removido na rodada 2 porque o
+      # bug original desta PR ERA um ArgumentError de assinatura (refresh_for!
+      # sem `expires_at:`) — mantê-lo no rescue recriaria o mascaramento.
+      rescue JSON::GeneratorError => e
         Rails.logger.warn "[Fetcher::BrowserSession] rotação não persistida: #{e.class}: #{e.message}"
       end
 

@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "stringio"
 require_relative "../../../lib/fetcher/browser_session"
 
 class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
@@ -9,6 +8,11 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   # (ferrum-0.17.2/lib/ferrum/cookies.rb:118). O dublê copia a assinatura real:
   # um dublê com `set(**kwargs)` aceitaria chamadas que o Ferrum recusaria.
   class FakeCookies
+    # Modela o contrato real de `Ferrum::Cookies`, incluindo `all` (usado por
+    # `persist_rotation`). Antes o `rescue StandardError` engolia o
+    # NoMethodError de `all` ausente; com o rescue estreitado (ACHADO B) o fake
+    # precisa implementar o método de verdade.
+    FakeCookie = Struct.new(:name, :value, :domain, :path)
     attr_reader :postos
 
     def initialize
@@ -19,11 +23,25 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
       @postos << options
       true
     end
+
+    def all
+      @postos.each_with_object({}) do |opts, acc|
+        nome = (opts[:name] || opts["name"]).to_s
+        path_val = (opts[:path] || opts["path"]).to_s
+        path_val = "/" if path_val.empty?
+
+        acc[nome] = FakeCookie.new(
+          (opts[:name] || opts["name"]).to_s,
+          (opts[:value] || opts["value"]).to_s,
+          (opts[:domain] || opts["domain"]).to_s,
+          path_val
+        )
+      end
+    end
   end
 
   class FakePage
     attr_reader :cookies, :visitado, :fechada, :commands
-    attr_accessor :reject_setcookie
 
     def initialize(document_remote_ip: nil)
       @cookies = FakeCookies.new
@@ -31,21 +49,14 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
       @document_remote_ip = document_remote_ip
       @listeners = {}
       @commands = []
-      @reject_setcookie = false
+      @command_result = true
     end
 
-    def command(name, **params)
+    attr_accessor :command_result
+
+    def command(name, params = {})
       @commands << [name, params]
-      # Achado D: modela a resposta REAL do CDP Network.setCookie. Em falha o
-      # Chrome devolve success=false com errorText; o fake antigo retornava
-      # `true` sempre, mascarando a rejeicao. Quando @reject_setcookie esta
-      # ligado, devolvemos a falha para o teste validar que a producao NAO a
-      # ignora.
-      if name == "Network.setCookie" && @reject_setcookie
-        { "success" => false, "errorText" => "cookie rejected by Chrome" }
-      else
-        { "success" => true }
-      end
+      @command_result
     end
 
     def go_to(url)
@@ -227,47 +238,104 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     assert_equal true, posto[:secure]
   end
 
-  test "cookie __Host- recusado pelo CDP (success=false) levanta CookieRejected, nao passa silencioso" do
-    host_cookie = { "name" => "__Host-3PSID", "value" => "host_val", "domain" => ".youtube.com", "path" => "/safebrowse" }
-    Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[host_cookie], :jar])
-    @page.reject_setcookie = true
-
-    erro = assert_raises(Fetcher::BrowserSession::CookieRejected) do
-      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
-    end
-
-    assert_match(/recusou|rejected/i, erro.message)
-  end
-
-  test "inject_cookies força secure, path=/ e ausência de domain para cookies __Host-*" do
-    host_cookie = { "name" => "__Host-3PSID", "value" => "host_val", "domain" => ".youtube.com", "path" => "/safebrowse" }
+  test "inject_cookies envia Network.setCookie via CDP com url, secure e path / sem domain para cookies __Host-*" do
+    host_cookie = { "name" => "__Host-SID", "value" => "host_val", "domain" => "youtube.com", "path" => "/" }
     Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[host_cookie], :jar])
 
     Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
 
-    cmd = @page.commands.find { |c| c[0] == "Network.setCookie" && c[1][:name] == "__Host-3PSID" }
-    assert_not_nil cmd, "cookie __Host- deve chamar Network.setCookie no CDP diretamente"
-    params = cmd[1]
-    assert_equal true, params[:secure], "cookie __Host- precisa de Secure"
-    assert_equal "/", params[:path], "cookie __Host- precisa de Path=/ exato"
-    assert_equal "https://www.youtube.com/", params[:url], "cookie __Host- precisa de url de origem"
-    assert_not params.key?(:domain), "cookie __Host- não pode ter atributo Domain (Chrome/Ferrum rejeita se domain for passado)"
+    cmd = @page.commands.find { |c, p| c == "Network.setCookie" && p[:name] == "__Host-SID" }
+    assert_not_nil cmd
+    _name, params = cmd
+    assert_equal "host_val", params[:value]
+    assert_equal "https://www.youtube.com/", params[:url]
+    assert_equal true, params[:secure]
+    assert_equal "/", params[:path]
+    assert_not_includes params.keys, :domain
+    assert_not_includes params.keys, "domain"
   end
 
-  test "sem remoteIPAddress no CDP o canal segue (fail-open com log), não derruba" do
-    log = StringIO.new
-    original_logger = Rails.logger
-    Rails.logger = Logger.new(log)
-    Rails.logger.level = Logger::WARN
-    begin
-      result = Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
-    ensure
-      Rails.logger = original_logger
-    end
+  test "persist_rotation solicita renovação de expires_at por sete dias" do
+    sid_cookie = Struct.new(:name, :value, :domain, :path).new(
+      "SID", "abc", ".youtube.com", "/"
+    )
+    @page.cookies.stubs(:all).returns({ "SID" => sid_cookie })
 
-    assert_equal :ok, result
-    assert_match(/remoteIPAddress ausente/i, log.string)
-    assert_match(/validação pós-navegação desativada/i, log.string)
-    assert_match(/youtube\.com/, log.string)
+    # Teste REAL (sem stub de refresh_for!): o stub mascara o ArgumentError
+    # quando a assinatura não aceita expires_at: (achado P1 do sol, 13/08).
+    # O setup já criou o registro (domain "youtube.com", 7 dias) — encurta
+    # expires_at para provar que a rotação REALMENTE estende.
+    jar_record = BrowserSessionCookie.find_by(domain: "youtube.com")
+    assert_not_nil jar_record, "setup deve ter criado o registro do jar"
+    jar_record.update!(expires_at: 1.day.from_now)
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    jar_record.reload
+    parsed = JSON.parse(jar_record.payload)
+    assert_equal "abc", parsed.first["value"], "payload deve ser persistido de volta"
+    assert_operator jar_record.expires_at, :>, 6.days.from_now,
+                    "rotacao deve estender expires_at para ~7 dias"
+    assert_operator jar_record.expires_at, :<=, 8.days.from_now
+  end
+
+  # ACHADO A (13/08, P2): o retorno de Network.setCookie era ignorado. O CDP
+  # responde `{ "success": false, "errorText": "..." }` sem lançar exceção, então
+  # o cookie __Host- podia falhar silenciosamente e a sessão seguir anônima.
+  test "inject_cookies levanta quando Network.setCookie do CDP responde success: false" do
+    host_cookie = { "name" => "__Host-SID", "value" => "host_val", "domain" => "youtube.com", "path" => "/" }
+    Fetcher::SessionCookies.stubs(:for).with("www.youtube.com").returns([[host_cookie], :jar])
+
+    # FakePage cujo command simula o CDP recusando o cookie (success:false, sem exceção)
+    @page = FakePage.new
+    @page.command_result = { "success" => false, "errorText" => "Bloqueado pelo Chrome" }
+    @page.cookies.stubs(:all).returns({})
+    @context = FakeContext.new(@page)
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(@context))
+
+    erro = assert_raises(RuntimeError) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+    assert_match(/success.*false|falha|setCookie|recusou/i, erro.message)
+  end
+
+  # ACHADO B (13/08, P2): o `rescue StandardError` engolia erros de programação
+  # (era o bug original desta PR). Um NoMethodError na rotação deve propagar.
+  test "persist_rotation deixa erro de programação (NoMethodError) propagar em vez de engolir" do
+    sid = Struct.new(:name, :value, :domain, :path).new("SID", "abc", ".youtube.com", "/")
+    @page.cookies.stubs(:all).returns({ "SID" => sid })
+    Fetcher::CookieJar.stubs(:refresh_for!).raises(NoMethodError, "bug de programacao na rotacao")
+
+    assert_raises(NoMethodError) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+  end
+
+  # Rodada 2 (sol 13/08): o bug original desta PR ERA um ArgumentError de
+  # assinatura (refresh_for! sem expires_at:) — mantê-lo no rescue recriaria
+  # o mascaramento. ArgumentError deve propagar como erro de programação.
+  test "persist_rotation deixa ArgumentError (assinatura/contrato) propagar em vez de engolir" do
+    sid = Struct.new(:name, :value, :domain, :path).new("SID", "abc", ".youtube.com", "/")
+    @page.cookies.stubs(:all).returns({ "SID" => sid })
+    Fetcher::CookieJar.stubs(:refresh_for!).raises(ArgumentError, "wrong number of arguments")
+
+    assert_raises(ArgumentError) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+  end
+
+  # Regressão do ACHADO B: erro operacional esperado (JSON::GeneratorError da
+  # serialização) continua engolido e logado, para não derrubar o fetch da página.
+  test "persist_rotation ainda engole e loga erro operacional esperado (JSON::GeneratorError)" do
+    sid = Struct.new(:name, :value, :domain, :path).new("SID", "abc", ".youtube.com", "/")
+    @page.cookies.stubs(:all).returns({ "SID" => sid })
+    Fetcher::CookieJar.stubs(:refresh_for!).raises(JSON::GeneratorError, "valor não serializável")
+    log_capturado = ""
+    Rails.logger.stubs(:warn).with { |msg| log_capturado += msg.to_s }
+
+    assert_nothing_raised do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+    assert_match(/rotação não persistida/, log_capturado)
   end
 end
