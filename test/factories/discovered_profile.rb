@@ -1,7 +1,10 @@
 FactoryBot.define do
   factory :discovered_profile do
     platform { %w[twitter instagram youtube].sample }
-    username { Faker::Internet.username(specifier: 3..15) }
+    # Username ÚNICO garantido (SecureRandom): a validação do modelo é
+    # `platform, uniqueness: { scope: :username }` — Faker gera duplicatas em
+    # create_list grande (ex.: 55 perfis, CI 13/08 — RecordInvalid flaky).
+    username { SecureRandom.hex(4)[0, 8] }
     bio { Faker::Lorem.sentence }
     profile_url { "https://#{platform}.com/#{username}" }
 
