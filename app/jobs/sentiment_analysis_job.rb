@@ -96,6 +96,17 @@ class SentimentAnalysisJob < ApplicationJob
 
   private
 
+  # TRADE-OFF REGISTRADO (decisão do dono pendente, 14/08/2026 — PR #44):
+  # Semântica de entrega: "ao menos uma vez". Não há como garantir "exatamente uma vez"
+  # sem dedup do lado do Discord (sem idempotency key no envio de mensagens).
+  # Janela conhecida: se o processo morrer entre o aceite do Discord e o
+  # SentimentChunkDelivery.create!, a retomada reenvia o chunk (duplicação possível).
+  # Lease de 15s sem renovação: envio mais longo que o TTL permite outro executor
+  # adquirir a lease expirada e reenviar o mesmo chunk.
+  # Release no FileStore (teste) é read→delete não atômico; em produção o SolidCache
+  # usa lock_and_write com CAS atômico (ver referência solid-cache-locks).
+  # Se a semântica "ao menos uma vez" for aceita, remover este aviso é opcional;
+  # se for exigida entrega exata, é preciso dedup por conteúdo consultando o canal.
   def deliver_chunks(run, channel_id, chunks, target)
     run.reload
     return if run.delivered_at.present?
