@@ -66,20 +66,28 @@ class RunSentimentAnalysisTool < ManagementToolBase
   description "Dispara a execução do pipeline de análise de sentimento para um alvo (owner-only)."
 
   param :target_identifier, type: :string, desc: "ID numérico ou nome do alvo", required: true
+  param :run_id, type: :integer, desc: "ID opcional de uma rodada anterior para retry/retomada", required: false
   param :async, type: :boolean, desc: "Se true, enfileira o job em background; se false, roda síncrono (padrão true)", required: false
 
-  def run(target_identifier:, async: true)
+  def run(target_identifier:, run_id: nil, async: true)
     return owner_error unless owner?
 
     target = find_target(target_identifier)
     return error("Alvo não encontrado: #{target_identifier}") if target.nil?
 
+    r_id = run_id.presence&.to_i
+
     if async
-      SentimentAnalysisJob.perform_later(target.id)
-      success({ target_id: target.id, name: target.name, status: "enqueued" })
+      if r_id
+        SentimentAnalysisJob.perform_later(target.id, r_id)
+        success({ target_id: target.id, name: target.name, run_id: r_id, status: "enqueued" })
+      else
+        SentimentAnalysisJob.perform_later(target.id)
+        success({ target_id: target.id, name: target.name, status: "enqueued" })
+      end
     else
       job = SentimentAnalysisJob.new
-      run_record = job.perform(target.id)
+      run_record = r_id ? job.perform(target.id, r_id) : job.perform(target.id)
       success({ target_id: target.id, name: target.name, run_id: run_record&.id, status: run_record&.status })
     end
   rescue StandardError => e

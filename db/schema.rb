@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_14_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_14_000002) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -146,6 +146,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_000001) do
     t.index ["recorded_at"], name: "index_profile_snapshots_on_recorded_at"
     t.index ["social_profile_id", "recorded_at"], name: "index_profile_snapshots_on_social_profile_id_and_recorded_at", unique: true
     t.index ["social_profile_id"], name: "index_profile_snapshots_on_social_profile_id"
+  end
+
+  create_table "sentiment_chunk_deliveries", force: :cascade do |t|
+    t.integer "chunk_index", null: false
+    t.datetime "created_at", null: false
+    t.datetime "delivered_at", null: false
+    t.integer "run_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["run_id", "chunk_index"], name: "index_sentiment_chunk_deliveries_on_run_id_and_chunk_index", unique: true
+    t.index ["run_id"], name: "index_sentiment_chunk_deliveries_on_run_id"
   end
 
   create_table "sentiment_daily_quotas", force: :cascade do |t|
@@ -433,6 +443,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_000001) do
   add_foreign_key "discovered_profiles", "social_profiles", column: "source_profile_id"
   add_foreign_key "post_snapshots", "social_posts"
   add_foreign_key "profile_snapshots", "social_profiles"
+  add_foreign_key "sentiment_chunk_deliveries", "sentiment_runs", column: "run_id"
   add_foreign_key "sentiment_labels", "sentiment_phrases", column: "phrase_id"
   add_foreign_key "sentiment_labels", "sentiment_runs", column: "run_id"
   add_foreign_key "sentiment_phrases", "sentiment_runs", column: "run_id"

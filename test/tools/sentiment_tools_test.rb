@@ -78,6 +78,20 @@ class SentimentToolsTest < ActiveSupport::TestCase
     assert_equal "enqueued", res[:data][:status]
   end
 
+  test "run_sentiment_analysis repassa run_id na execucao ou retry do job" do
+    target = SentimentTarget.create!(name: "Alvo Retry Tool", query: "query")
+    run = target.sentiment_runs.create!(status: "failed", error: "Timeout", frozen_spec: {})
+
+    SentimentAnalysisJob.expects(:perform_later).with(target.id, run.id).returns(true)
+
+    tool = RunSentimentAnalysisTool.new
+    res = tool.execute(target_identifier: target.name, run_id: run.id, async: true)
+
+    assert_equal :success, res[:status]
+    assert_equal "enqueued", res[:data][:status]
+    assert_equal run.id, res[:data][:run_id]
+  end
+
   test "sentiment_status retorna lista de rodadas" do
     target = SentimentTarget.create!(name: "Alvo Status Tool", query: "query")
     target.sentiment_runs.create!(status: "completed", frozen_spec: {}, collected_count: 50)

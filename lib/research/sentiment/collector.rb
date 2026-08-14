@@ -81,10 +81,16 @@ module Research
             end
 
             if query.present?
-              relevance = Research::Relevance.token_overlap_relevance(query, text)
-              if relevance < 0.1
-                rejected += 1
-                next
+              query_str = query.to_s.strip
+              item_author = item[:author].to_s.strip.downcase
+              author_matches = query_str.start_with?("@") && item_author == query_str.delete_prefix("@").strip.downcase
+
+              unless author_matches
+                relevance = Research::Relevance.token_overlap_relevance(query, text)
+                if relevance < 0.1
+                  rejected += 1
+                  next
+                end
               end
             end
 

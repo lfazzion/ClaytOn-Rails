@@ -166,4 +166,26 @@ class Discord::CommandRouterTest < ActiveSupport::TestCase
     assert por_nome["sentiment_status"][:takes_index]
     assert_not por_nome["sentiment_target"][:takes_index]
   end
+
+  test "sentiment_target no SLASH_COMMANDS declara opcoes obrigatorias name e query" do
+    target_cmd = Discord::CommandRouter::SLASH_COMMANDS.find { |c| c[:name] == "sentiment_target" }
+    assert_not_nil target_cmd, "sentiment_target deve existir no SLASH_COMMANDS"
+
+    options = target_cmd[:options] || []
+    opt_names = options.map { |o| o[:name].to_s }
+    assert_includes opt_names, "name", "slash command sentiment_target deve declarar opcao name"
+    assert_includes opt_names, "query", "slash command sentiment_target deve declarar opcao query"
+
+    name_opt = options.find { |o| o[:name].to_s == "name" }
+    query_opt = options.find { |o| o[:name].to_s == "query" }
+    assert name_opt[:required], "opcao name deve ser obrigatoria"
+    assert query_opt[:required], "opcao query deve ser obrigatoria"
+  end
+
+  test "parse_text para !sentiment_target extrai argumentos name e query" do
+    cmd = Discord::CommandRouter.parse_text('!sentiment_target "Cleitin" "cleitin bot"')
+    assert_equal :sentiment_target, cmd.name
+    assert_equal "Cleitin", cmd.target_name
+    assert_equal "cleitin bot", cmd.target_query
+  end
 end

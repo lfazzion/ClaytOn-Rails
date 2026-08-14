@@ -104,6 +104,119 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     assert_equal "⚠️ Erro ao processar o comando.", texto
   end
 
+  # --- sentiment commands: despacho, autorizacao owner-only e respostas ---
+
+  test "run_command despacha sentiment_target, sentiment_run e sentiment_status sem retornar nil" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+
+    target_cmd = Discord::CommandRouter::Command.new(name: :sentiment_target, arg: nil, confirm: nil)
+    target_cmd.define_singleton_method(:target_name) { "Alvo Teste" }
+    target_cmd.define_singleton_method(:target_query) { "query teste" }
+
+    target_res = DiscordBotService.run_command(target_cmd, scope)
+    assert_not_nil target_res, "sentiment_target nao pode retornar nil"
+    refute_equal "", target_res
+
+    target = SentimentTarget.create!(name: "Alvo Despacho", query: "query")
+    run_cmd = Discord::CommandRouter.build("sentiment_run", target.id)
+    run_res = DiscordBotService.run_command(run_cmd, scope)
+    assert_not_nil run_res, "sentiment_run nao pode retornar nil"
+    refute_equal "", run_res
+
+    status_cmd = Discord::CommandRouter.build("sentiment_status", target.id)
+    status_res = DiscordBotService.run_command(status_cmd, scope)
+    assert_not_nil status_res, "sentiment_status nao pode retornar nil"
+    refute_equal "", status_res
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
+  test "comandos de sentiment recusam execucao para usuario que nao e dono (owner-only fail-closed)" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    non_owner_scope = Discord::SessionScope.for(user_id: "999", channel_id: "456")
+
+    target_cmd = Discord::CommandRouter::Command.new(name: :sentiment_target, arg: nil, confirm: nil)
+    target_cmd.define_singleton_method(:target_name) { "Alvo Nao Autorizado" }
+    target_cmd.define_singleton_method(:target_query) { "query" }
+
+    res_target = DiscordBotService.run_command(target_cmd, non_owner_scope)
+    assert_includes res_target.downcase, "restrita ao dono"
+
+    res_run = DiscordBotService.run_command(Discord::CommandRouter.build("sentiment_run", 1), non_owner_scope)
+    assert_includes res_run.downcase, "restrita ao dono"
+
+    res_status = DiscordBotService.run_command(Discord::CommandRouter.build("sentiment_status", 1), non_owner_scope)
+    assert_includes res_status.downcase, "restrita ao dono"
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
+  test "comandos de sentiment recusam execucao quando DISCORD_OWNER_IDS esta vazio" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = ""
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+
+    res = DiscordBotService.run_command(Discord::CommandRouter.build("sentiment_run", 1), scope)
+    assert_includes res.downcase, "restrita ao dono"
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
+  test "run_command executa sentiment_target para o dono e retorna confirmacao com o alvo criado/atualizado" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+
+    cmd = Discord::CommandRouter::Command.new(name: :sentiment_target, arg: nil, confirm: nil)
+    cmd.define_singleton_method(:target_name) { "Novo Alvo Bot" }
+    cmd.define_singleton_method(:target_query) { "novo termo bot" }
+
+    res = DiscordBotService.run_command(cmd, scope)
+
+    assert_includes res, "Novo Alvo Bot"
+    target = SentimentTarget.find_by(name: "Novo Alvo Bot")
+    assert_not_nil target
+    assert_equal "novo termo bot", target.query
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
+  test "run_command executa sentiment_run para o dono e enfileira job retornando ID" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+    target = SentimentTarget.create!(name: "Alvo Para Rodar", query: "query")
+
+    SentimentAnalysisJob.expects(:perform_later).with(target.id).returns(true)
+
+    cmd = Discord::CommandRouter.build("sentiment_run", target.id)
+    res = DiscordBotService.run_command(cmd, scope)
+
+    assert_includes res, target.name
+    assert_includes res.downcase, "disparada"
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
+  test "run_command executa sentiment_status para o dono e retorna informacoes do alvo e historico de runs" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+    target = SentimentTarget.create!(name: "Alvo Para Status", query: "query")
+    target.sentiment_runs.create!(status: "completed", frozen_spec: {}, collected_count: 42)
+
+    cmd = Discord::CommandRouter.build("sentiment_status", target.id)
+    res = DiscordBotService.run_command(cmd, scope)
+
+    assert_includes res, target.name
+    assert_includes res, "completed"
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
   # --- sessions_response e pagina_inexistente ---
 
   test "sessions_response monta a listagem com titulo, marca e contagem sem N+1" do

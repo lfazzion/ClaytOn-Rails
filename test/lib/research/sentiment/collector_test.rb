@@ -228,4 +228,88 @@ class SentimentCollectorTest < ActiveSupport::TestCase
     assert_includes collected_texts, "Novos modelos de inteligência artificial generativa apresentam grande capacidade de raciocínio."
     refute_includes collected_texts, "Receita deliciosa de bolo de cenoura com calda cremosa de chocolate para o café da tarde."
   end
+
+  test "para query de perfil com @, posts da timeline do próprio autor são aceitos mesmo sem o handle no corpo do texto" do
+    @target.update!(query: "@cleitin", max_phrases: 10)
+    now = Time.current.utc
+    w_start = now - 30.days
+    w_end = now + 1.minute
+    @run.update!(
+      window_start: w_start,
+      window_end: w_end,
+      frozen_spec: @target.frozen_spec.merge(
+        "query" => "@cleitin",
+        "window_start" => w_start.iso8601,
+        "window_end" => w_end.iso8601
+      )
+    )
+
+    items = [
+      {
+        source: "x",
+        external_id: "timeline_post_1",
+        permalink: "https://x.com/cleitin/status/1001",
+        author: "cleitin",
+        text: "Lançamos o update 1.2 hoje com várias melhorias importantes de performance e estabilidade.",
+        posted_at: now - 2.hours
+      }
+    ]
+
+    Research::Sentiment::Sources::Reddit.stubs(:fetch).returns([])
+    Research::Sentiment::Sources::X.stubs(:fetch).returns(items)
+
+    Research::Sentiment::Collector.collect(@run)
+    @run.reload
+
+    assert_equal 1, @run.collected_count, "Post da timeline do autor @cleitin deve ser aceito mesmo sem o handle no corpo"
+    assert_equal 0, @run.rejected_count
+    assert_equal "Lançamos o update 1.2 hoje com várias melhorias importantes de performance e estabilidade.", @run.sentiment_phrases.first.text
+  end
+
+  test "para query de perfil com @, posts de outros autores continuam sujeitos ao filtro de relevância" do
+    @target.update!(query: "@cleitin", max_phrases: 10)
+    now = Time.current.utc
+    w_start = now - 30.days
+    w_end = now + 1.minute
+    @run.update!(
+      window_start: w_start,
+      window_end: w_end,
+      frozen_spec: @target.frozen_spec.merge(
+        "query" => "@cleitin",
+        "window_start" => w_start.iso8601,
+        "window_end" => w_end.iso8601
+      )
+    )
+
+    items = [
+      {
+        source: "x",
+        external_id: "other_user_irrelevant",
+        permalink: "https://x.com/other/status/2002",
+        author: "other_user",
+        text: "Receita de bolo de chocolate super fácil e rápido de fazer em casa.",
+        posted_at: now - 3.hours
+      },
+      {
+        source: "x",
+        external_id: "other_user_mentioning",
+        permalink: "https://x.com/fan/status/2003",
+        author: "fan_account",
+        text: "O bot do @cleitin ficou sensacional depois dessa última atualização!",
+        posted_at: now - 1.hour
+      }
+    ]
+
+    Research::Sentiment::Sources::Reddit.stubs(:fetch).returns([])
+    Research::Sentiment::Sources::X.stubs(:fetch).returns(items)
+
+    Research::Sentiment::Collector.collect(@run)
+    @run.reload
+
+    assert_equal 1, @run.collected_count, "Apenas o post que menciona o @cleitin deve ser aceito de outros autores"
+    assert_equal 1, @run.rejected_count, "Post sem relação e de outro autor deve ser rejeitado"
+    collected_ids = @run.sentiment_phrases.pluck(:external_id)
+    assert_includes collected_ids, "other_user_mentioning"
+    refute_includes collected_ids, "other_user_irrelevant"
+  end
 end

@@ -263,5 +263,109 @@ class SentimentAnalysisJobTest < ActiveJob::TestCase
     assert_equal "completed", result_run.status
     assert_not_nil result_run.delivered_at
   end
-end
 
+  test "entrega registra progresso por chunk com indice unico para o run" do
+    Research::Sentiment::Collector.expects(:collect).once
+    Research::Sentiment::Classifier.expects(:classify).once
+    Research::Sentiment::Aggregator.expects(:aggregate).returns({
+      spec: { name: "Cleitin Job Test" },
+      period_balance: { balance: 0.1 },
+      collected_count: 10,
+      rejected_count: 0,
+      unparsed_count: 0,
+      sem_data_count: 0
+    })
+    Sentiment::MessageBuilder.expects(:build).returns("Mensagem longa").once
+    DiscordMessageChunker.expects(:chunk).with("Mensagem longa").returns(["chunk_0", "chunk_1", "chunk_2"]).once
+
+    SentimentAnalysisJob.any_instance.stubs(:ensure_digest_channel).returns("channel_123")
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_0").once
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_1").once
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_2").once
+
+    job = SentimentAnalysisJob.new
+    run = job.perform(@target.id)
+
+    assert_equal "completed", run.status
+    assert_not_nil run.delivered_at
+
+    # Verifica o registro de progresso por chunk
+    if defined?(SentimentChunkDelivery)
+      chunk_indices = SentimentChunkDelivery.where(run_id: run.id).pluck(:chunk_index).sort
+      assert_equal [0, 1, 2], chunk_indices
+    end
+  end
+
+  test "falha no meio da entrega (chunk 2 de 3) permite retomada sem reenviar chunks ja entregues" do
+    Research::Sentiment::Collector.stubs(:collect)
+    Research::Sentiment::Classifier.stubs(:classify)
+    Research::Sentiment::Aggregator.stubs(:aggregate).returns({
+      spec: { name: "Cleitin Job Test" },
+      period_balance: { balance: 0.1 },
+      collected_count: 10,
+      rejected_count: 0,
+      unparsed_count: 0,
+      sem_data_count: 0
+    })
+    Sentiment::MessageBuilder.stubs(:build).returns("Mensagem com 3 chunks")
+    DiscordMessageChunker.stubs(:chunk).returns(["chunk_0", "chunk_1", "chunk_2"])
+
+    SentimentAnalysisJob.any_instance.stubs(:ensure_digest_channel).returns("channel_123")
+
+    # Primeira tentativa: chunk 0 envia com sucesso, chunk 1 falha com erro de rede
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_0").once
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_1").raises(RuntimeError.new("Discord API 500 error")).once
+
+    job = SentimentAnalysisJob.new
+    assert_raises(RuntimeError) do
+      job.perform(@target.id)
+    end
+
+    run = @target.sentiment_runs.last
+    assert_nil run.delivered_at, "delivered_at global nao pode ser preenchido apos falha parcial"
+
+    # Segunda tentativa (retomada passando run_id):
+    # chunk 0 NÃO deve ser reenviado; chunk 1 e chunk 2 devem ser enviados
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_0").never
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_1").once
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_2").once
+
+    resumed_run = job.perform(@target.id, run.id)
+    assert_equal "completed", resumed_run.status
+    assert_not_nil resumed_run.delivered_at
+  end
+
+  test "executores concorrentes nao entregam o mesmo chunk duas vezes (lock/idempotencia por chunk)" do
+    run = @target.sentiment_runs.create!(
+      status: "aggregating",
+      started_at: Time.current,
+      frozen_spec: { "target_id" => @target.id }
+    )
+
+    Research::Sentiment::Collector.stubs(:collect)
+    Research::Sentiment::Classifier.stubs(:classify)
+    Research::Sentiment::Aggregator.stubs(:aggregate).returns({
+      spec: { name: "Cleitin Job Test" },
+      period_balance: { balance: 0.1 },
+      collected_count: 10,
+      rejected_count: 0,
+      unparsed_count: 0,
+      sem_data_count: 0
+    })
+    Sentiment::MessageBuilder.stubs(:build).returns("Mensagem concorrente")
+    DiscordMessageChunker.stubs(:chunk).returns(["chunk_0", "chunk_1"])
+    SentimentAnalysisJob.any_instance.stubs(:ensure_digest_channel).returns("channel_123")
+
+    # Chunk 0 e 1 devem ser entregues exatamente uma vez
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_0").once
+    DiscordApiClient.expects(:send_message).with("channel_123", "chunk_1").once
+
+    # Simula o primeiro executor completando a entrega
+    job1 = SentimentAnalysisJob.new
+    job1.perform(@target.id, run.id)
+
+    # Segundo executor rodando o mesmo run não deve enviar nenhum chunk novamente
+    job2 = SentimentAnalysisJob.new
+    job2.perform(@target.id, run.id)
+  end
+end

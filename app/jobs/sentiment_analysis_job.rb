@@ -56,18 +56,14 @@ class SentimentAnalysisJob < ApplicationJob
     if channel_id.present?
       chunks = DiscordMessageChunker.chunk(message)
       begin
-        chunks.each do |chunk|
-          DiscordApiClient.send_message(channel_id, chunk)
-        end
+        send_chunks(run, channel_id, chunks)
         run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
         Rails.logger.info "[SentimentAnalysisJob] Análise concluída para alvo ##{target.id} (#{target.name})"
       rescue RuntimeError => e
         if e.message.include?("404") || e.message.match?(/unknown channel/i)
           recovered_id = recover_digest_channel(channel_id)
           if recovered_id.present?
-            chunks.each do |chunk|
-              DiscordApiClient.send_message(recovered_id, chunk)
-            end
+            send_chunks(run, recovered_id, chunks)
             run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
             Rails.logger.info "[SentimentAnalysisJob] Análise concluída no canal recuperado para alvo ##{target.id} (#{target.name})"
           else
@@ -88,5 +84,27 @@ class SentimentAnalysisJob < ApplicationJob
     run&.update!(status: "failed", error: e.message, finished_at: Time.current)
     Rails.logger.error "[SentimentAnalysisJob] Falha no job: #{e.class}: #{e.message}"
     raise e
+  end
+
+  private
+
+  def send_chunks(run, channel_id, chunks)
+    chunks.each_with_index do |chunk, idx|
+      next if SentimentChunkDelivery.exists?(run_id: run.id, chunk_index: idx)
+
+      delivery = nil
+      begin
+        delivery = SentimentChunkDelivery.create!(run_id: run.id, chunk_index: idx, delivered_at: Time.current)
+      rescue ActiveRecord::RecordNotUnique
+        next
+      end
+
+      begin
+        DiscordApiClient.send_message(channel_id, chunk)
+      rescue StandardError => e
+        delivery.destroy rescue nil
+        raise e
+      end
+    end
   end
 end
