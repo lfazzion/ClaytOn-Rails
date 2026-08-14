@@ -36,9 +36,70 @@ class Fetcher::Channels::RssTest < ActiveSupport::TestCase
     </feed>
   XML
 
+  ATOM_HTTPS = <<~XML
+    <?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="https://www.w3.org/2005/Atom">
+      <title>Atom HTTPS</title>
+      <entry>
+        <title>Entrada segura</title>
+        <link href="https://blog.test/entrada-segura" rel="alternate"/>
+        <updated>2026-08-14T12:00:00Z</updated>
+        <summary>Namespace Atom servido com HTTPS.</summary>
+      </entry>
+    </feed>
+  XML
+
+  ATOM_FEEDBURNER = <<~XML
+    <?xml version="1.0" encoding="utf-8"?>
+    <feed
+      xmlns="http://www.w3.org/2005/Atom"
+      xmlns:feedburner="http://rssnamespace.org/feedburner/ext/1.0">
+      <title>Blog via FeedBurner</title>
+      <entry>
+        <title>Post original</title>
+        <link
+          href="http://feeds.feedburner.com/~r/blog/~3/abc123/post"
+          rel="alternate"/>
+        <feedburner:origLink>https://blog.test/post-original</feedburner:origLink>
+        <updated>2026-08-14T10:00:00Z</updated>
+        <summary>Resumo FeedBurner.</summary>
+      </entry>
+    </feed>
+  XML
+
+  RDF = <<~XML
+    <?xml version="1.0" encoding="utf-8"?>
+    <rdf:RDF
+      xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+      xmlns="http://purl.org/rss/1.0/">
+      <channel rdf:about="https://rdf.test/feed">
+        <title>Feed RDF</title>
+        <link>https://rdf.test/</link>
+        <description>Exemplo RSS 1.0.</description>
+      </channel>
+      <item rdf:about="https://rdf.test/post">
+        <title>Entrada RDF</title>
+        <link>https://rdf.test/post</link>
+        <description>Resumo RDF.</description>
+      </item>
+    </rdf:RDF>
+  XML
+
   def response(body, content_type: "application/xml", final_url: "https://exemplo.test/feed")
     Fetcher::SafeHttpClient::Response.new(
       status: 200, final_url: final_url, content_type: content_type, body: body
+    )
+  end
+
+  test "restringe a autodeteccao aos parsers consumidos pelo canal" do
+    assert_equal(
+      [
+        Feedjira::Parser::AtomFeedBurner,
+        Feedjira::Parser::RSSFeedBurner,
+        Feedjira::Parser::Atom,
+        Feedjira::Parser::RSS
+      ],
+      Feedjira.parsers
     )
   end
 
@@ -65,10 +126,53 @@ class Fetcher::Channels::RssTest < ActiveSupport::TestCase
     assert_includes result[:content], "https://blog.test/rust-2"
   end
 
-  test "devolve nil para XML que nao e feed" do
+  test "extrai Atom com namespace HTTPS e classifica como atom" do
+    result = Fetcher::Channels::Rss.call(
+      url: "https://blog.test/feed-https.xml",
+      response: response(ATOM_HTTPS)
+    )
+
+    assert_equal "Atom HTTPS", result[:title]
+    assert_equal "atom", result[:metadata]["format"]
+    assert_equal 1, result[:metadata]["item_count"]
+    assert_includes result[:content], "## Entrada segura"
+    assert_includes result[:content], "https://blog.test/entrada-segura"
+  end
+
+  test "preserva Atom FeedBurner, o link original e a classificacao atom" do
+    result = Fetcher::Channels::Rss.call(
+      url: "https://feeds.feedburner.com/blog",
+      response: response(ATOM_FEEDBURNER)
+    )
+
+    assert_equal "Blog via FeedBurner", result[:title]
+    assert_equal "atom", result[:metadata]["format"]
+    assert_equal 1, result[:metadata]["item_count"]
+    assert_includes result[:content], "## Post original"
+    assert_includes result[:content], "https://blog.test/post-original"
+    refute_includes result[:content], "http://feeds.feedburner.com/~r/blog/~3/abc123/post"
+  end
+
+  test "extrai RDF como RSS" do
+    result = Fetcher::Channels::Rss.call(
+      url: "https://rdf.test/feed",
+      response: response(RDF)
+    )
+
+    assert_equal "Feed RDF", result[:title]
+    assert_equal "rss", result[:metadata]["format"]
+    assert_equal 1, result[:metadata]["item_count"]
+    assert_includes result[:content], "## Entrada RDF"
+    assert_includes result[:content], "https://rdf.test/post"
+  end
+
+  test "devolve nil para sitemap mesmo com a lista restrita de parsers" do
     xml = '<?xml version="1.0"?><sitemapindex><sitemap><loc>https://x.test/</loc></sitemap></sitemapindex>'
 
-    assert_nil Fetcher::Channels::Rss.call(url: "https://x.test/sitemap.xml", response: response(xml))
+    assert_nil Fetcher::Channels::Rss.call(
+      url: "https://x.test/sitemap.xml",
+      response: response(xml)
+    )
   end
 
   test "devolve nil para XML malformado" do
