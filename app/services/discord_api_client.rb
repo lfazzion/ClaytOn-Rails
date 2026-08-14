@@ -29,6 +29,11 @@ class DiscordApiClient
       JSON.parse(response.body)
     end
 
+    def get_guild_channels(guild_id)
+      response = request(:get, "/guilds/#{guild_id}/channels")
+      JSON.parse(response.body)
+    end
+
     private
 
     MAX_RETRIES = 3

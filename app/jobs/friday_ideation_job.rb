@@ -10,8 +10,24 @@ class FridayIdeationJob < ApplicationJob
     return unless channel_id
 
     message = build_ideation_digest
-    DiscordApiClient.send_message(channel_id, message)
-
+    chunks = DiscordMessageChunker.chunk(message)
+    begin
+      chunks.each do |chunk|
+        DiscordApiClient.send_message(channel_id, chunk)
+      end
+    rescue RuntimeError => e
+      # ACHADO E (rodada 2, sol 13/08): canal obsoleto no cache de 30 dias.
+      # Rodada 3 (sol 13/08): se um chunk POSTERIOR falhar com 404, reenviar
+      # do início duplicaria os já entregues — só o canal é recuperado e o
+      # ENVIO não é repetido (o job encerra; o próximo ciclo reenvia tudo
+      # com o canal novo e o Discord deduplica/encadeia).
+      if e.message.include?('404') || e.message.match?(/unknown channel/i)
+        recover_digest_channel(channel_id)
+        Rails.logger.warn "[FridayIdeationJob] Canal #{channel_id} inválido (404); cache invalidado. Mensagem NÃO reenviada nesta execução para evitar duplicação de chunks já entregues."
+      else
+        raise
+      end
+    end
     Rails.logger.info "[FridayIdeationJob] Digest de ideias enviado para canal #{channel_id}"
   end
 
@@ -51,8 +67,11 @@ class FridayIdeationJob < ApplicationJob
     prompt = Llm::PromptLoader.load('ideation_digest', context: lines.join("\n"))
     response = AiRouter.complete(prompt, context: :background)
 
-    lines << '**Sugestões de conteúdo:**'
-    lines << response.content.to_s
+    formatted_suggestions = IdeationResponseFormatter.format(response.content)
+    if formatted_suggestions.present?
+      lines << '**Sugestões de conteúdo:**'
+      lines << formatted_suggestions
+    end
 
     lines.join("\n")
   end

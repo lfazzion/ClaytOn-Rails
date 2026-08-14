@@ -4,6 +4,7 @@ require 'test_helper'
 
 class ScrapeYoutubeJobTest < ActiveJob::TestCase
   setup do
+    Scraping::FetchPacer.stubs(:wait)
     @profile = create(:social_profile, :youtube, platform_username: 'test_channel')
     @metadata = {
       channel_id: 'UC123',
@@ -37,6 +38,20 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
 
   test 'should enqueue in scraping queue' do
     assert_equal 'scraping', ScrapeYoutubeJob.new.queue_name
+  end
+
+  test 'concurrency key should differ by profile' do
+    other_profile = create(:social_profile, :youtube, platform_username: 'other_channel')
+    key_profile_a = ScrapeYoutubeJob.new(@profile.id).concurrency_key
+    key_profile_b = ScrapeYoutubeJob.new(other_profile.id).concurrency_key
+    assert_not_equal key_profile_a, key_profile_b
+  end
+
+  test 'serializes two executions for the same profile' do
+    job_a = ScrapeYoutubeJob.new(@profile.id)
+    job_b = ScrapeYoutubeJob.new(@profile.id)
+    assert_equal job_a.concurrency_key, job_b.concurrency_key
+    assert job_a.concurrency_limited?, "expected concurrency limiting to be enabled"
   end
 
   test 'should raise ArgumentError for non-YouTube profile' do
@@ -118,8 +133,46 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_equal 'partial', @profile.collection_status
   end
 
-  test 'should skip when metadata is nil' do
+  test 'should fallback to no cookies when extract_videos_detailed raises non-CookieJar error' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    # Erro de parser/rede RECUPERÁVEL (entra em RECOVERABLE_SCRAPER_ERRORS) ainda
+    # justifica o fallback sem cookies (achado D: só estes, não qualquer
+    # StandardError genérico).
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: '/tmp/fake_cookies.txt'
+    ).raises(Errno::ECONNRESET.new('connection reset by peer'))
+    # Fallback call must use cookies_path: nil (achado R3-6)
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: nil
+    ).returns([@videos, false])
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal 'success', @profile.collection_status
+  end
+
+  # DECISÃO 5 do sol — metadata nil NÃO é return silencioso: marca o perfil como
+  # "degraded" e enfileira ScrapingFailureAlertJob("youtube", id, msg, "metadata_failure"),
+  # preservando last_collected_at nil (não houve coleta). Atualizado da expectativa
+  # antiga (return silencioso) para o comportamento canônico da fusão.
+  test 'should mark profile degraded, enqueue metadata_failure alert and preserve last_collected_at when metadata is nil' do
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(nil)
+    ScrapingFailureAlertJob.expects(:perform_later).with(
+      'youtube',
+      @profile.id,
+      'extract_channel_metadata returned nil',
+      'metadata_failure'
+    )
 
     assert_no_difference 'ProfileSnapshot.count' do
       assert_no_difference 'SocialPost.count' do
@@ -128,6 +181,7 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     end
 
     @profile.reload
+    assert_equal 'degraded', @profile.collection_status
     assert_nil @profile.last_collected_at
   end
 
@@ -162,11 +216,61 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, false])
 
     ScrapeYoutubeJob.perform_now(@profile.id)
-    first_count = ProfileSnapshot.where(social_profile: @profile).count
+    first_snapshot = ProfileSnapshot.where(social_profile: @profile).last
+    assert_equal 50_000, first_snapshot.followers_count
+    assert_equal 100, first_snapshot.posts_count
+
+    # Reset last_collected_at so the second run is not blocked by rate-limit,
+    # but keep within the same hour so create_snapshot reuses the same record.
+    # update_all (não update!) é obrigatório: o objeto @profile em memória já
+    # tem last_collected_at nil (do factory), então update! seria no-op e o
+    # banco manteria o valor setado pela primeira execução do job.
+    SocialProfile.where(id: @profile.id).update_all(last_collected_at: nil)
+
+    # Second run with DIFFERENT metadata to prove snapshot is actually updated
+    updated_metadata = @metadata.merge(subscriber_count: 75_000, video_count: 200)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(updated_metadata)
 
     ScrapeYoutubeJob.perform_now(@profile.id)
 
-    assert_equal first_count, ProfileSnapshot.where(social_profile: @profile).count
+    assert_equal 1, ProfileSnapshot.where(social_profile: @profile).count
+    second_snapshot = ProfileSnapshot.where(social_profile: @profile).last
+    assert_equal first_snapshot.id, second_snapshot.id
+    assert_equal 75_000, second_snapshot.followers_count
+    assert_equal 200, second_snapshot.posts_count
+  end
+
+  # ACHADO D: o rescue interno de extract_videos_with_cookies engolia QUALQUER
+  # StandardError — inclusive NoMethodError/contrato (bug de programação) — e
+  # caía num fallback "sucesso" silencioso sem cookies. Erros de programação
+  # DEVEM propagar. Aqui injetamos um NoMethodError DENTRO do bloco de cookies
+  # e exigimos que suba (e que o fallback sem cookies NÃO seja chamado).
+  test 'extract_videos_with_cookies propaga erro de programacao em vez de fallback silencioso' do
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
+    # Erro de programação (contrato quebrado), não de rede/parser/timeout:
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: '/tmp/fake_cookies.txt'
+    ).raises(NoMethodError.new('undefined method `parse\' for nil'))
+    # O fallback sem cookies NÃO deve ocorrer:
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: nil
+    ).never
+
+    assert_raises(NoMethodError) do
+      ScrapeYoutubeJob.new.send(
+        :extract_videos_with_cookies,
+        'https://www.youtube.com/@test_channel',
+        limit: 30,
+        proxy: nil
+      )
+    end
   end
 
   test 'should set degraded status and enqueue ScrapingFailureAlertJob on StandardError' do
@@ -289,6 +393,111 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
 
     assert_equal 'https://www.youtube.com/channel/abc123',
                  ScrapeYoutubeJob.new.send(:build_channel_url, profile)
+  end
+
+  test 'should raise RateLimitError and not fallback to no cookies when extract_videos_with_cookies raises RateLimitError' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: '/tmp/fake_cookies.txt'
+    ).raises(ScrapingServices::RateLimitError.new('429 Too Many Requests'))
+
+    ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
+      'https://www.youtube.com/@test_channel',
+      limit: 30,
+      proxy: nil,
+      cookies_path: nil
+    ).never
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal 'rate_limited', @profile.collection_status
+    assert_not_nil @profile.blocked_until
+  end
+
+  # ACHADO G: o teste antigo pré-criava o snapshot e chamava create_snapshot
+  # com update normal — sem disparar RecordNotUnique nem concorrência. Aqui
+  # forçamos o RecordNotUnique REAL: induzimos um INSERT que colide com o
+  # registro já existente (simulando a corrida de upsert/concorrência). A
+  # rotina deve resgatar o RecordNotUnique, reler o registro e atualizá-lo —
+  # resultado final = 1 linha com os valores novos, sem duplicar nem perder.
+  test 'create_snapshot trata RecordNotUnique real e atualiza o registro existente' do
+    recorded_at = Time.current.beginning_of_hour
+
+    s1 = ProfileSnapshot.create!(
+      social_profile: @profile,
+      recorded_at: recorded_at,
+      followers_count: 50_000,
+      posts_count: 100
+    )
+
+    # Fazemos o find_or_initialize_by retornar um objeto NOVO (não salvo) para
+    # forçar o INSERT. Como s1 já ocupa a unique (social_profile_id,
+    # recorded_at), esse INSERT colide de verdade e levanta
+    # ActiveRecord::RecordNotUnique — exatamente a condição de corrida.
+    ProfileSnapshot.stubs(:find_or_initialize_by).returns(
+      ProfileSnapshot.new(social_profile: @profile, recorded_at: recorded_at)
+    )
+
+    ScrapeYoutubeJob.new.send(:create_snapshot, @profile, { subscriber_count: 60_000, video_count: 110 })
+
+    snapshots = ProfileSnapshot.where(social_profile: @profile, recorded_at: recorded_at)
+    assert_equal 1, snapshots.count, 'não deve duplicar o snapshot sob RecordNotUnique'
+    assert_equal s1.id, snapshots.first.id, 'deve manter o mesmo registro'
+    assert_equal 60_000, snapshots.first.followers_count
+    assert_equal 110, snapshots.first.posts_count
+  end
+
+  # ACHADO C (P2, sol 13/08): o rescue StandardError é muito amplo —
+  # NoMethodError/ArgumentError viravam fallback degradado "com sucesso".
+  # Testamos pelo caminho PÚBLICO (extract_videos_with_cookies) — o contrato
+  # real — em vez da unidade interna collect_with_cookies (estrutura unificada
+  # com a PR #140).
+  test 'extract_videos_with_cookies propaga NoMethodError em vez de fallback' do
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      .raises(NoMethodError.new('undefined method for nil'))
+
+    assert_raises(NoMethodError) do
+      ScrapeYoutubeJob.new.send(:extract_videos_with_cookies, 'https://x', limit: 30, proxy: nil)
+    end
+  end
+
+  test 'extract_videos_with_cookies propaga ArgumentError em vez de fallback' do
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      .raises(ArgumentError.new('nil cipher'))
+
+    assert_raises(ArgumentError) do
+      ScrapeYoutubeJob.new.send(:extract_videos_with_cookies, 'https://x', limit: 30, proxy: nil)
+    end
+  end
+
+  test 'extract_videos_with_cookies ainda cai no fallback sem cookies em erro conhecido de rede/parse' do
+    # JSON::ParserError é erro de extração conhecido → continua elegível ao fallback.
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt')
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      .raises(JSON::ParserError.new('unexpected token'))
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://x', limit: 30, proxy: nil, cookies_path: nil)
+      .returns([@videos, true])
+
+    result = ScrapeYoutubeJob.new.send(:extract_videos_with_cookies, 'https://x', limit: 30, proxy: nil)
+
+    assert_equal [@videos, true], result
   end
 end
 

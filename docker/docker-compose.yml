@@ -75,8 +75,16 @@ services:
       PYTHON_SCRAPER_URL: "http://python-scraper:8080"
     volumes:
       - ../storage:/rails/storage
+    # O `bin/jobs start` (Solid Queue supervisor) NÃO roda `db:prepare`. No
+    # primeiro deploy ele abriria o `production_queue.sqlite3` vazio e reiniciaria
+    # com erro de tabela inexistente. O `app` já executa `db:prepare` no seu
+    # entrypoint (incluindo as migrations do `queue_migrate`) e expõe
+    # healthcheck de `/up`; fazer `jobs` depender da saúde do `app` garante que
+    # o banco de fila foi criado/migrado antes do worker subir.
     depends_on:
       chrome:
+        condition: service_healthy
+      app:
         condition: service_healthy
     networks:
       - internal
@@ -98,6 +106,9 @@ services:
       RAILS_LOG_TO_STDOUT: "true"
       PYTHON_SCRAPER_URL: "http://python-scraper:8080"
       DISCORD_OPEN_CHANNEL_IDS: ${DISCORD_OPEN_CHANNEL_IDS:-}
+      # Donos das ferramentas de gestao (add/remove/promote profile). Sem isso
+      # o owner? do ManagementToolBase retorna false para TODO mundo.
+      DISCORD_OWNER_IDS: ${DISCORD_OWNER_IDS:-}
       DISCORD_MUTE_PREFIX: ${DISCORD_MUTE_PREFIX:-//}
       DISCORD_COMPACTION_THRESHOLD: ${DISCORD_COMPACTION_THRESHOLD:-0.75}
       DISCORD_REHYDRATE_MESSAGES: ${DISCORD_REHYDRATE_MESSAGES:-30}
@@ -134,8 +145,15 @@ services:
   # ── Chrome Headless Shell ─────────────────────────────────────────────────
   chrome:
     image: chromedp/headless-shell:stable
-    # shm_size obrigatório: evita memory leak de renderização no Ferrum/Chrome 120+
+    # Limites explícitos de recursos: o navegador processa páginas externas e
+    # roda na mesma VM que app e workers (24 GB / 4 OCPUs). Consumo descontrolado
+    # pode causar OOM global. Valores compatíveis com a VM documentada:
+    #   - mem_limit 4g < 24 GB do host; shm_size 2gb continua dentro do teto.
+    #   - pids_limit conservador: o chrome-fleet abre dezenas de processos por aba.
     shm_size: '2gb'
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 256
     security_opt:
       - seccomp:unconfined
     # SEM `ports:` de propósito. A 9222 é o CDP — controle remoto total do navegador,
@@ -157,7 +175,14 @@ services:
     networks:
       - browser
     healthcheck:
-      test: ["CMD-SHELL", "socat -u OPEN:/dev/null TCP:localhost:9222,connect-timeout=3 2>/dev/null"]
+      # Healthcheck REAL do CDP (sol, 14/08 — valida o achado #107 SEM derrubar):
+      # o GET /json/version com printf+pipe simples fechava o stdin antes da
+      # resposta (EOF precoce — socat encerrava cedo). `{ printf ...; sleep 2; }`
+      # mantém o stdin aberto até a resposta voltar; testa a porta REAL do
+      # headless (9223) e o campo semântico webSocketDebuggerUrl.
+      test:
+        - "CMD-SHELL"
+        - "{ printf 'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n'; sleep 2; } | socat -t3 -T3 - TCP4:127.0.0.1:9223 | grep -q '\"webSocketDebuggerUrl\"'"
       interval: 5s
       timeout: 3s
       retries: 3
@@ -169,15 +194,41 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    user: root
-    env_file:
-      - ../.env
+    user: rails
     environment:
       RAILS_ENV: test
       CHROME_HOST: chrome
       CHROME_PORT: "9222"
+      # Banco de teste apontado para um SQLite em /tmp — ambiente inline, não
+      # secreto, e não depende do .env compartilhado da produção.
+      DATABASE_URL: "sqlite3:/tmp/clayton_test.sqlite3"
+      # Chaves de criptografia de TESTE (geradas via `rails db:encryption:init`
+      # em 13/08, campanha laguna-fix): o modelo BrowserSessionCookie usa
+      # `encrypts :payload` (migration 20260812000001) e sem elas toda a suíte
+      # do CookieJar morre com Missing encryption credential. São chaves de
+      # teste, nunca usadas em produção.
+      ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY: "QHPi2qXwoQDy93VkdLVD1PGvJm38wy0X"
+      ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY: "zA88ZTnHms1QvOVPygCY4z1tdwc6lOtt"
+      ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT: "Af7tSdX0dqlrQVKRvZFHatqFwoO9NUuv"
     volumes:
-      - ../:/rails
+      # Checkout read-only: o container de teste nunca deve escrever no source.
+      - ../:/rails:ro
+      # Apenas diretórios temporários explicitamente graváveis. Bind (não
+      # tmpfs): o daemon root do CI não monta tmpfs aninhado dentro do bind
+      # :ro de /rails (mountpoint não é criado — read-only file system, 13/08).
+      # O workflow cria tmp/ log/ com chmod 777 antes do run.
+      - ../tmp:/rails/tmp
+      - ../log:/rails/log
+      # tmpfs gravável sobre /tmp — SQLite de teste vive só na memória do
+      # container. O bind-mount /tmp/clayton_test.sqlite3:/tmp/... cria um
+      # arquivo vazio (0 bytes) no host antes do Rails subir, e um SQLite
+      # vazio pode ser aberto como "banco corrompido" em vez de "banco novo",
+      # disparando SQLite3::CorruptException. O tmpfs evita o arquivo no host
+      # e descarta o estado a cada container restart (correto para testes).
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 134217728  # 128MB — mais que suficiente para testes.
     networks:
       - internal
       - browser

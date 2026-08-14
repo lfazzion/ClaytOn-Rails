@@ -18,6 +18,17 @@ Rails.application.configure do
   config.active_job.queue_adapter = :solid_queue
   config.solid_queue.connects_to = { database: { writing: :queue } }
 
+  # ── Criptografia (Active Record Encryption) ─────────────────────────────────
+  # O Rails 8.1 NÃO lê ACTIVE_RECORD_ENCRYPTION_* automaticamente — precisa do
+  # mapeamento explícito (medido 13/08: sem isto, produção falha com Missing
+  # encryption credential ao ler/gravar BrowserSessionCookie). As chaves vêm
+  # do .env do deploy (docker-compose env_file) — geradas via
+  # `rails db:encryption:init` e NUNCA commitadas. Sem elas o boot falha de
+  # propósito (fail-closed): melhor morrer que gravar payload em claro.
+  config.active_record.encryption.primary_key = ENV.fetch("ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY")
+  config.active_record.encryption.deterministic_key = ENV.fetch("ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY")
+  config.active_record.encryption.key_derivation_salt = ENV.fetch("ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT")
+
   # ── Health Check ────────────────────────────────────────────────────────────
   config.silence_healthcheck = "/up"
 

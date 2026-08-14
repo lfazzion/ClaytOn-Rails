@@ -139,6 +139,38 @@ class EventsRssParserTest < ActiveSupport::TestCase
     assert_equal "BGS 2026: Brasil Game Show anuncia datas", first[:title]
     assert_equal "https://example.com/bgs2026", first[:source_url]
     assert_equal "Evento de games em São Paulo", first[:description]
-    assert first[:start_date].is_a?(Date)
+    assert_equal Time.parse("Mon, 20 Mar 2026 12:00:00 GMT"), first[:pub_date]
+  end
+
+  test "parse_xml handles invalid pubDate between valid items" do
+    xml = <<~XML
+      <?xml version="1.0" encoding="UTF-8"?>
+      <rss version="2.0">
+        <channel>
+          <item>
+            <title>Valid Event One</title>
+            <link>https://example.com/one</link>
+            <pubDate>Mon, 20 Mar 2026 12:00:00 GMT</pubDate>
+          </item>
+          <item>
+            <title>Invalid PubDate Event</title>
+            <link>https://example.com/invalid</link>
+            <pubDate>N/A</pubDate>
+          </item>
+          <item>
+            <title>Valid Event Two</title>
+            <link>https://example.com/two</link>
+            <pubDate>Tue, 21 Mar 2026 10:00:00 GMT</pubDate>
+          </item>
+        </channel>
+      </rss>
+    XML
+
+    items = ScrapingServices::EventsRssParser.send(:parse_xml, xml)
+
+    assert_equal 3, items.size
+    assert_equal Time.parse("Mon, 20 Mar 2026 12:00:00 GMT"), items[0][:pub_date]
+    assert_nil items[1][:pub_date]
+    assert_equal Time.parse("Tue, 21 Mar 2026 10:00:00 GMT"), items[2][:pub_date]
   end
 end

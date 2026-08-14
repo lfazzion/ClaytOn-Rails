@@ -34,6 +34,13 @@ jobs:
           DISCORD_DIGEST_CHANNEL_ID=
           EOF
 
+      - name: Create writable dirs for test container
+        # tmp/ e log/ são gitignored e não existem no checkout; o service test
+        # monta bind por cima deles (checkout é :ro) — o container roda como
+        # user rails (uid 1000) e o runner cria os dirs com uid 1001, então
+        # chmod 777 garante escrita (CI 13/08).
+        run: mkdir -p tmp log && chmod 777 tmp log
+
       - name: Build images
         run: docker compose -f docker/docker-compose.yml build test chrome
 
@@ -43,7 +50,12 @@ jobs:
           sleep 3
 
       - name: Run tests
-        run: docker compose -f docker/docker-compose.yml run --rm test
+        # OPENROUTER_API_KEY passada explicitamente: o service test NÃO lê
+        # ../.env (hardening da campanha) e o RubyLLM exige a chave mesmo em
+        # teste (medido 13/08).
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || 'ci_test_key' }}
+        run: docker compose -f docker/docker-compose.yml run --rm -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" test
 
       - name: Cleanup
         if: always()

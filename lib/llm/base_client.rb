@@ -17,35 +17,69 @@ module Llm
     end
 
     def complete(prompt, system: nil, tools: [])
-      check_quota!
-      track_request!
+      reserve_quota!
 
-      chat = RubyLLM.chat(model: model_id)
-      chat.with_instructions(system) if system
-      tools.each { |t| chat.with_tool(t) }
+      begin
+        chat = RubyLLM.chat(model: model_id)
+        chat.with_instructions(system) if system
+        tools.each { |t| chat.with_tool(t) }
+      rescue QuotaExceededError
+        # levantada dentro de reserve_quota! antes de qualquer chat — nada a reverter
+        raise
+      rescue StandardError
+        # Falha na PREPARAÇÃO (antes do envio ao provedor): a quota externa não
+        # foi tocada, reverte a reserva local (P1 do sol, 13/08).
+        rollback_quota!
+        raise
+      end
 
+      # A partir daqui a requisição SAI para o provedor: timeout, parse error e
+      # qualquer falha do chat.ask NÃO revertem a quota — o provedor já contou
+      # a chamada mesmo sem resposta útil.
       Rails.logger.info "[#{self.class.name}] Requisição enviada (model: #{model_id})"
       chat.ask(prompt)
+    rescue QuotaExceededError
+      raise
     end
 
     private
 
-    def check_quota!
-      count = daily_request_count
-      return unless count >= max_daily_requests
-
-      Rails.logger.warn "[#{self.class.name}] Quota diária atingida: #{count}/#{max_daily_requests}"
-      raise QuotaExceededError, "#{self.class.name} excedeu #{max_daily_requests} requests/dia"
-    end
-
-    def track_request!
+    # Atômico: usa Rails.cache.increment como única operação de reserva.
+    # Nenhum read-modify-write — o incremento é uma operação CAS do backend.
+    def reserve_quota!
       cache_key = daily_cache_key
-      current = Rails.cache.read(cache_key).to_i
-      Rails.cache.write(cache_key, current + 1, expires_in: 26.hours)
+      max = max_daily_requests
+
+      # Primeira tentativa: criação atômica da chave (unless_exist) + incremento.
+      # Se a chave já existia, increment retorna nil e fazemos uma nova tentativa
+      # sem unless_exist — ainda assim atômica.
+      count = Rails.cache.increment(cache_key, 1, expires_in: 26.hours, unless_exist: true)
+      count = Rails.cache.increment(cache_key, 1, expires_in: 26.hours) if count.nil?
+
+      # ACHADO B (P1, sol 13/08): se AMBAS as tentativas de increment retornarem
+      # nil (backend de cache sem suporte a increment/CAS), `count` fica nil e o
+      # método retornaria nil, fazendo com que o provedor fosse chamado SEM
+      # qualquer reserva de quota — um bypass silencioso. Levantamos erro
+      # explícito ANTES de criar o chat (complete() chama reserve_quota! antes de
+      # RubyLLM.chat). Não há fallback seguro: sem increment atômico não podemos
+      # garantir a contagem, então recusamos a chamada em vez de contorná-la.
+      raise RuntimeError, "#{self.class.name}: não foi possível reservar quota — Rails.cache.increment retornou nil nas duas tentativas (backend sem suporte a increment atômico?)" if count.nil?
+
+      if count && count > max
+        rollback_quota!
+        Rails.logger.warn "[#{self.class.name}] Quota diária atingida: #{count}/#{max}"
+        raise QuotaExceededError, "#{self.class.name} excedeu #{max} requests/dia"
+      end
+
+      count
     end
 
-    def daily_request_count
-      Rails.cache.read(daily_cache_key).to_i
+    # Reverte atomicamente o incremento feito por reserve_quota! quando a
+    # requisição falha antes de completar. Garante que a quota só seja
+    # consumida por requisições que realmente atingiram o provedor.
+    def rollback_quota!
+      cache_key = daily_cache_key
+      Rails.cache.decrement(cache_key, 1, expires_in: 26.hours)
     end
 
     def daily_cache_key

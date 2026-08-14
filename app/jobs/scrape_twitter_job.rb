@@ -3,12 +3,16 @@
 class ScrapeTwitterJob < ApplicationJob
   queue_as :scraping
 
+  limits_concurrency key: ->(profile_id, _options = {}) { "scrape_twitter/#{profile_id}" }, to: 1
+
   SNAPSHOT_DEDUP_WINDOW = 20.hours
 
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
 
     return unless should_collect?(profile)
+
+    Scraping::FetchPacer.wait("twitter.com")
 
     scraper_data = scrape_profile(profile, options)
 
@@ -80,16 +84,17 @@ class ScrapeTwitterJob < ApplicationJob
       followers_count: data[:followers_count] || profile.followers_count,
       following_count: data[:following_count] || profile.following_count,
       posts_count: data[:posts_count] || profile.posts_count,
-      verified: data[:is_verified] || profile.verified,
+      verified: data.key?(:is_verified) ? data[:is_verified] : profile.verified,
       avatar_url: data[:profile_image_url] || profile.avatar_url,
       is_private: data.key?(:is_private) ? data[:is_private] : profile.is_private
     )
   end
 
   def create_snapshot(profile, data, degraded: false)
+    recorded_at = Time.current.beginning_of_hour
     snapshot = ProfileSnapshot.find_or_initialize_by(
       social_profile: profile,
-      recorded_at: Time.current.beginning_of_hour
+      recorded_at: recorded_at
     )
 
     if snapshot.new_record? || !degraded
@@ -98,6 +103,18 @@ class ScrapeTwitterJob < ApplicationJob
       snapshot.posts_count = data[:posts_count]
       snapshot.source_degraded = degraded
       snapshot.save!
+    end
+  rescue ActiveRecord::RecordNotUnique
+    snapshot = ProfileSnapshot.find_by!(
+      social_profile: profile,
+      recorded_at: recorded_at
+    )
+    if !degraded
+      snapshot.followers_count = data[:followers_count]
+      snapshot.following_count = data[:following_count]
+      snapshot.posts_count = data[:posts_count]
+      snapshot.source_degraded = degraded
+      snapshot.save! if snapshot.changed?
     end
   end
 end

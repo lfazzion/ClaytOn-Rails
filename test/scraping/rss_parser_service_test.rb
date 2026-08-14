@@ -62,4 +62,42 @@ class RssParserServiceTest < ActiveSupport::TestCase
     assert_nil articles.first[:title]
     assert_equal 'https://example.com/article', articles.first[:link]
   end
+
+  test 'parse_feed handles invalid pubDate values without breaking the batch' do
+    xml = <<~XML
+      <?xml version="1.0" encoding="UTF-8"?>
+      <rss version="2.0">
+        <channel>
+          <item>
+            <title>Valid Article One</title>
+            <link>https://example.com/article1</link>
+            <pubDate>Mon, 20 Mar 2026 12:00:00 GMT</pubDate>
+          </item>
+          <item>
+            <title>Invalid PubDate Article</title>
+            <link>https://example.com/article2</link>
+            <pubDate>N/A</pubDate>
+          </item>
+          <item>
+            <title>Empty PubDate Article</title>
+            <link>https://example.com/article3</link>
+            <pubDate></pubDate>
+          </item>
+          <item>
+            <title>Valid Article Two</title>
+            <link>https://example.com/article4</link>
+            <pubDate>Tue, 21 Mar 2026 10:00:00 GMT</pubDate>
+          </item>
+        </channel>
+      </rss>
+    XML
+
+    articles = ScrapingServices::RssParserService.send(:parse_feed, xml)
+
+    assert_equal 4, articles.size
+    assert articles[0][:pub_date].is_a?(Time)
+    assert_nil articles[1][:pub_date]
+    assert_nil articles[2][:pub_date]
+    assert articles[3][:pub_date].is_a?(Time)
+  end
 end

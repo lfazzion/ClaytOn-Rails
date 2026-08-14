@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
 require_relative "../../../lib/fetcher/page_fetcher"
 
 # Defeitos do segundo nível (escalada para o Chrome), com guarda para cada um.
@@ -345,8 +346,20 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
     fetcher.stubs(:wait_for_body_stabilize)
 
-    payload = fetcher.call("https://spa.test/")
+    log = StringIO.new
+    original_logger = Rails.logger
+    Rails.logger = Logger.new(log)
+    Rails.logger.level = Logger::WARN
+    begin
+      payload = fetcher.call("https://spa.test/")
+    ensure
+      Rails.logger = original_logger
+    end
 
     assert_equal "Título Renderizado", payload[:title]
+    # Contrato canônico (unificado com a PR #136): fail-open SILENCIOSO quando
+    # o IP não chega (assert_document_ip! sai cedo com nil — sem log). O que
+    # importa: não derruba e o conteúdo segue.
+    refute_match(/rebinding/, log.string)
   end
 end

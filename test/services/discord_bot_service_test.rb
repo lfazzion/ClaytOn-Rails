@@ -648,4 +648,36 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     refute_nil tempfile_path_erro
     refute File.exist?(tempfile_path_erro)
   end
+
+  # --- start: encerramento rapido quando bot.run termina (CORRECAO 1) ---
+
+  test "start termina rapidamente quando bot.run retorna e libera a cleanup_thread" do
+    bot_instance = mock("bot")
+    bot_instance.stubs(:message)
+    bot_instance.stubs(:ready)
+    bot_instance.stubs(:mention)
+    bot_instance.stubs(:stop)
+    bot_instance.stubs(:run)
+
+    DiscordBotService.stubs(:register_commands)
+    DiscordBotService.stubs(:attach_command_handlers)
+    DiscordBotService.stubs(:should_handle?).returns(false)
+    Discordrb::Bot.expects(:new).returns(bot_instance)
+
+    inicio = Time.now
+    DiscordBotService.start
+    duracao = Time.now - inicio
+
+    assert duracao < 2, "start devia terminar rapido, levou #{duracao}s"
+  end
+
+  test "start propaga excecao sem mascarar caso a configuracao do bot falhe" do
+    Discordrb::Bot.expects(:new).raises(StandardError, "falha de inicializacao do bot")
+
+    err = assert_raises(StandardError) do
+      DiscordBotService.start
+    end
+
+    assert_equal "falha de inicializacao do bot", err.message
+  end
 end

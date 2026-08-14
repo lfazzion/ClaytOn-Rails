@@ -66,7 +66,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalx', timeout: 8)
                                            .returns(metadata)
-    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)).returns(true)
+    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
+      @captured_profile_id = profile_id
+      true
+    end.returns(true)
 
     tool = AddProfileTool.new
     result = tool.execute(platform: 'youtube', handle: 'canalx')
@@ -79,6 +82,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert_equal 'UC_REAL_CHANNEL_ID', profile.platform_user_id
     assert_equal 'active', profile.monitoring_status
     assert_equal 'Canal Real YouTube', profile.display_name
+    assert_equal profile.id, @captured_profile_id
   end
 
   test 'add_profile em youtube com URL colada extrai handle e cria' do
@@ -91,13 +95,20 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalurl', timeout: 8)
                                            .returns(metadata)
-    ScrapeYoutubeJob.stubs(:perform_later)
+    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
+      @captured_profile_id = profile_id
+      true
+    end.returns(true)
 
     tool = AddProfileTool.new
     result = tool.execute(platform: 'youtube', handle: 'https://www.youtube.com/@CanalUrl')
 
     assert_equal :success, result[:status]
     assert_equal 'canalurl', result[:data][:username]
+
+    profile = SocialProfile.find_by(platform: 'youtube', platform_username: 'canalurl')
+    assert_not_nil profile
+    assert_equal profile.id, @captured_profile_id
   end
 
   test 'add_profile em youtube com metadata nil retorna error e não cria' do
@@ -265,7 +276,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'set_profile_monitoring com status active em perfil arquivado limpa archived_at' do
-    profile = create(:social_profile, :twitter, platform_username: 'archived_monitored', archived_at: 2.days.ago, monitoring_status: 'paused')
+    profile = create(:social_profile, :twitter, platform_username: 'archived_monit', archived_at: 2.days.ago, monitoring_status: 'paused')
 
     tool = SetProfileMonitoringTool.new
     result = tool.execute(identifier: profile.platform_username, status: 'active')
@@ -291,122 +302,113 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
   # ── 4. RemoveProfileTool ──────────────────────────────────────────────────────
 
-  # R3 — token-boundary matching: confirming "ana" with a phrase that only
-  # contains "ana_clara" must FAIL. The old include?('ana') wrongly matched
-  # the substring inside "ana_clara".
-  test 'remove_profile: confirmar ana com frase que menciona apenas ana_clara retorna error' do
-    profile_ana = create(:social_profile, :twitter, platform_username: 'ana')
-    create_list(:social_post, 1, social_profile: profile_ana)
-    profile_ana_clara = create(:social_profile, :twitter, platform_username: 'ana_clara')
+  test 'remove_profile por handle remove perfil de verdade (destroy!) em um unico turno' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_hndl')
 
     tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'to_remove_hndl')
 
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: 'ana')
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: 'ana',
-                       confirmation_phrase: 'confirmo a remoção de ana_clara')
-    assert_equal :error, res[:status]
-    assert_nil profile_ana.reload.archived_at
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+    refute SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile: username vazio nao remove mesmo com confirmo' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_empty')
+  test 'remove_profile por ID numerico remove perfil de verdade' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_id')
+
     tool = RemoveProfileTool.new
+    res = tool.execute(identifier: profile.id.to_s)
 
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: 'to_remove_empty')
-
-    profile.update_columns(platform_username: '')
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: 'to_remove_empty',
-                       confirmation_phrase: 'confirmo a remoção')
-    assert_equal :error, res[:status]
-    assert_nil profile.reload.archived_at
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+    refute SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile em dois turnos: primeiro pede confirmação e segundo arquiva' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove')
-    create_list(:social_post, 3, social_profile: profile)
-    create_list(:profile_snapshot, 2, social_profile: profile)
+  test 'remove_profile recusa execucao para nao-dono' do
+    profile = create(:social_profile, :twitter, platform_username: 'protected_user')
+    Thread.current[:cleitin_actor] = { user_id: '99999', username: 'intruso' }
 
     tool = RemoveProfileTool.new
-
-    # Turno 1
-    Thread.current[:cleitin_turn] = 'turn_1111'
-    res1 = tool.execute(identifier: profile.platform_username)
-    assert_equal :success, res1[:status]
-    assert_equal :confirmation_required, res1[:data][:status]
-    assert_nil res1[:data][:confirm_token], 'confirm_token não deve ser retornado na data'
-    assert_includes res1[:data][:resumo], '3 posts'
-    assert_includes res1[:data][:resumo], '2 snapshots'
-    assert_nil profile.reload.archived_at
-
-    # Repetição no MESMO turno (turn 1): não deve executar
-    res_same = tool.execute(identifier: profile.platform_username)
-    assert_equal :success, res_same[:status]
-    assert_equal :confirmation_required, res_same[:data][:status]
-    assert_nil profile.reload.archived_at
-
-    # Turno 2 (novo turn ID): executa SÓ com a frase literal de confirmação
-    Thread.current[:cleitin_turn] = 'turn_2222'
-    res2 = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'confirmo a remoção de to_remove')
-    assert_equal :success, res2[:status]
-    assert_equal 'removed', res2[:data][:status]
-    assert_not_nil profile.reload.archived_at
-    assert_equal 'paused', profile.monitoring_status
-    assert_equal 3, profile.social_posts.count
-  end
-
-  test 'remove_profile em turno diferente SEM confirmation_phrase NÃO remove' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_sem_frase')
-
-    tool = RemoveProfileTool.new
-
-    Thread.current[:cleitin_turn] = 'turn_a'
-    res1 = tool.execute(identifier: profile.platform_username)
-    assert_equal :confirmation_required, res1[:data][:status]
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res2 = tool.execute(identifier: profile.platform_username)
-
-    assert_equal :error, res2[:status]
-    assert_includes res2[:reason], 'Confirmação inválida'
-    assert_nil profile.reload.archived_at
-  end
-
-  test 'remove_profile em turno diferente com frase sem a palavra confirmo NÃO remove' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_sem_conf')
-
-    tool = RemoveProfileTool.new
-
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: profile.platform_username)
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'quero apagar o to_remove_sem_conf')
+    res = tool.execute(identifier: 'protected_user')
 
     assert_equal :error, res[:status]
-    assert_nil profile.reload.archived_at
+    assert_includes res[:reason], 'Ação restrita ao dono do bot'
+    assert SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile em turno diferente com frase citando OUTRO perfil NÃO remove' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_alvo')
-    outro = create(:social_profile, :twitter, platform_username: 'outro_canal')
-
+  test 'remove_profile retorna erro para perfil inexistente' do
     tool = RemoveProfileTool.new
-
-    Thread.current[:cleitin_turn] = 'turn_a'
-    tool.execute(identifier: profile.platform_username)
-
-    Thread.current[:cleitin_turn] = 'turn_b'
-    res = tool.execute(identifier: profile.platform_username, confirmation_phrase: 'confirmo a remoção de outro_canal')
+    res = tool.execute(identifier: 'fantasma')
 
     assert_equal :error, res[:status]
-    assert_nil profile.reload.archived_at
-    assert_not_nil outro
+    assert_includes res[:reason], 'Perfil não encontrado'
+  end
+
+  test 'remove_profile retorna erro para perfil ambiguo sem plataforma' do
+    create(:social_profile, :twitter, platform_username: 'same_handle')
+    create(:social_profile, :instagram, platform_username: 'same_handle')
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'same_handle')
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'Perfil ambíguo'
+  end
+
+  test 'remove_profile remove em cascata posts, profile_snapshots e post_snapshots' do
+    profile = create(:social_profile, :twitter, platform_username: 'cascade_user')
+    posts = create_list(:social_post, 2, social_profile: profile)
+    post_ids = posts.map(&:id)
+    create(:profile_snapshot, social_profile: profile)
+    posts.each { |post| create(:post_snapshot, social_post: post) }
+
+    profile_id = profile.id
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'cascade_user')
+
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+
+    refute SocialProfile.exists?(profile_id)
+    assert_equal 0, SocialPost.where(social_profile_id: profile_id).count
+    assert_equal 0, ProfileSnapshot.where(social_profile_id: profile_id).count
+    assert_equal 0, PostSnapshot.where(social_post_id: post_ids).count
+  end
+
+  test 'remove_profile desvincula (nullify) DiscoveredProfile associado preservando o registro' do
+    profile = create(:social_profile, :twitter, platform_username: 'source_user')
+    dp = create(:discovered_profile, source_profile: profile)
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'source_user')
+
+    assert_equal :success, res[:status]
+    refute SocialProfile.exists?(profile.id)
+    assert DiscoveredProfile.exists?(dp.id)
+    assert_nil dp.reload.source_profile_id
+  end
+
+  test 'remove_profile rescata RecordNotDestroyed e retorna erro amigavel' do
+    profile = create(:social_profile, :twitter, platform_username: 'not_destroyed')
+    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'not_destroyed')
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'Erro ao remover'
+  end
+
+  test 'remove_profile rescata InvalidForeignKey e retorna erro amigavel' do
+    profile = create(:social_profile, :twitter, platform_username: 'fk_error_user')
+    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::InvalidForeignKey.new('Foreign key violation'))
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'fk_error_user')
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'Erro ao remover'
   end
 
   # ── 5. PromoteProspectTool ──────────────────────────────────────────────────
@@ -464,5 +466,149 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     tool = PromoteProspectTool.new
     result = tool.execute(discovered_profile_id: 999_999)
     assert_equal :error, result[:status]
+  end
+
+  # ── 6. Corrida de criação (RecordNotUnique) ──────────────────────────────────
+
+  test 'add_profile em race retorna already_monitored com vencedor e sem enqueue duplicado' do
+    metadata = {
+      channel_id: 'UC_RACE_ID',
+      title: 'Canal Race',
+      subscriber_count: 1_000
+    }
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+
+    winner = create(:social_profile, platform: 'youtube', platform_username: 'racechannel',
+                                     platform_user_id: 'UC_RACE_ID', display_name: 'Canal Race',
+                                     monitoring_status: 'active', collection_status: 'pending',
+                                     followers_count: 1_000)
+
+    tool = AddProfileTool.new
+    # Primeira chamada (pre-check): nil — nenhum duplicado.
+    # Segunda chamada (via find_winner após RecordNotUnique): o vencedor.
+    tool.stubs(:find_duplicate).with('youtube', 'racechannel').returns(nil, winner)
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate'))
+    ScrapeYoutubeJob.expects(:perform_later).never
+
+    result = tool.execute(platform: 'youtube', handle: 'racechannel')
+
+    assert_equal :already_monitored, result[:status]
+    expected = tool.send(:format_profile, winner)
+    assert_equal expected, result[:data]
+  end
+
+  test 'add_profile em race por platform_user_id com handles diferentes retorna already_monitored com vencedor' do
+    metadata = {
+      channel_id: 'UC_DIFF_HANDLE_ID',
+      title: 'Canal YouTube',
+      subscriber_count: 5_000
+    }
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+
+    winner = create(:social_profile, platform: 'youtube', platform_username: 'handle_antigo',
+                                     platform_user_id: 'UC_DIFF_HANDLE_ID', display_name: 'Canal YouTube',
+                                     monitoring_status: 'active', collection_status: 'pending',
+                                     followers_count: 5_000)
+
+    tool = AddProfileTool.new
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate user_id'))
+    ScrapeYoutubeJob.expects(:perform_later).never
+
+    result = tool.execute(platform: 'youtube', handle: 'handle_novo')
+
+    assert_equal :already_monitored, result[:status]
+    expected = tool.send(:format_profile, winner)
+    assert_equal expected, result[:data]
+  end
+
+  test 'promote_prospect em race retorna already_monitored com vencedor e sem enqueue duplicado' do
+    dp = create(:discovered_profile, platform: 'twitter', username: 'prospect_race')
+
+    winner = create(:social_profile, platform: 'twitter', platform_username: 'prospect_race',
+                                     platform_user_id: 'UC_WIN_ID',
+                                     monitoring_status: 'active', collection_status: 'pending_validation')
+
+    tool = PromoteProspectTool.new
+    # Primeira chamada (pre-check): nil. Segunda chamada (recovery): winner.
+    tool.stubs(:find_duplicate).with('twitter', 'prospect_race').returns(nil, winner)
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate'))
+    ScrapeTwitterJob.expects(:perform_later).never
+
+    result = tool.execute(discovered_profile_id: dp.id)
+
+    assert_equal :already_monitored, result[:status]
+    expected = tool.send(:format_profile, winner)
+    assert_equal expected, result[:data]
+  end
+
+  test 'add_profile em race por platform_user_id em perfil arquivado reativa o perfil e retorna reactivated' do
+    metadata = {
+      channel_id: 'UC_ARCHIVED_HANDLE_ID',
+      title: 'Canal YouTube',
+      subscriber_count: 5_000
+    }
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+
+    winner = create(:social_profile, platform: 'youtube', platform_username: 'handle_antigo',
+                                     platform_user_id: 'UC_ARCHIVED_HANDLE_ID', display_name: 'Canal YouTube',
+                                     monitoring_status: 'paused', archived_at: 1.day.ago)
+
+    tool = AddProfileTool.new
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate user_id'))
+
+    result = tool.execute(platform: 'youtube', handle: 'handle_novo')
+
+    assert_equal :reactivated, result[:status]
+    assert_nil winner.reload.archived_at
+    assert_equal 'active', winner.monitoring_status
+    assert_equal winner.id, result[:data][:id]
+  end
+
+  # ── 7. Deduplicação de channel ID (case sensível) ───────────────────────────
+
+  test 'channel IDs que diferem apenas em caixa são tratados como perfis distintos' do
+    create(:social_profile, platform: 'youtube', platform_username: 'UCn8SzhX6Z1qW9_123456789',
+                            platform_user_id: 'UC_ORIG_ID', display_name: 'Original')
+    create(:social_profile, platform: 'youtube', platform_username: 'UCN8SZHX6Z1QW9_123456789',
+                            platform_user_id: 'UC_OTHER_ID', display_name: 'Outro case')
+
+    tool = AddProfileTool.new
+    dup = tool.send(:find_duplicate, 'youtube', 'UCn8SzhX6Z1qW9_123456789')
+    assert_equal 'UCn8SzhX6Z1qW9_123456789', dup.platform_username
+
+    dup_lower = tool.send(:find_duplicate, 'youtube', 'UCN8SZHX6Z1QW9_123456789')
+    assert_equal 'UCN8SZHX6Z1QW9_123456789', dup_lower.platform_username
+  end
+
+  test 'find_profile diferencia channel IDs do YouTube por caixa exata em SetProfileMonitoringTool e RemoveProfileTool' do
+    orig = create(:social_profile, platform: 'youtube', platform_username: 'UCn8SzhX6Z1qW9_123456789',
+                                  platform_user_id: 'UCn8SzhX6Z1qW9_123456789', monitoring_status: 'active')
+    other = create(:social_profile, platform: 'youtube', platform_username: 'UCN8SZHX6Z1QW9_123456789',
+                                   platform_user_id: 'UCN8SZHX6Z1QW9_123456789', monitoring_status: 'active')
+
+    set_tool = SetProfileMonitoringTool.new
+    set_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789', status: 'paused')
+
+    assert_equal 'paused', orig.reload.monitoring_status
+    assert_equal 'active', other.reload.monitoring_status
+
+    remove_tool = RemoveProfileTool.new
+    res = remove_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789')
+
+    assert_equal :success, res[:status]
+    refute SocialProfile.exists?(orig.id)
+    assert SocialProfile.exists?(other.id)
+  end
+
+  test 'handle com deduplicação case-insensitive mantém comportamento existente' do
+    create(:social_profile, platform: 'twitter', platform_username: 'casehandle')
+    tool = AddProfileTool.new
+    dup = tool.send(:find_duplicate, 'twitter', 'CaseHandle')
+    assert_not_nil dup
+    assert_equal 'casehandle', dup.platform_username
   end
 end

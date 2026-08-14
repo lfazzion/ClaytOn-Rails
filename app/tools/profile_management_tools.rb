@@ -65,7 +65,11 @@ class ManagementToolBase < ToolBase
     handle = normalize_handle(identifier)
     scope = SocialProfile.all
     scope = scope.where(platform: platform) if platform.present?
-    profiles = scope.where('LOWER(platform_username) = ?', handle.downcase)
+    profiles = if handle.match?(SocialProfile::CHANNEL_ID_PATTERN)
+                 scope.where(platform_username: handle)
+               else
+                 scope.where('LOWER(platform_username) = ?', handle.downcase)
+               end
 
     if platform.blank? && profiles.count > 1
       :ambiguous
@@ -79,6 +83,37 @@ class ManagementToolBase < ToolBase
       monitoring_status: profile.monitoring_status,
       collection_status: profile.collection_status
     )
+  end
+
+  # Deduplicação unificada (PR #36, parte 3).
+  #  - Channel IDs do YouTube: case significativo — comparação exata.
+  #  - Handles / @handles: case-insensitive — comparação com LOWER.
+  def find_duplicate(platform, handle)
+    normalized = normalize_handle(handle)
+    scope = SocialProfile.where(platform: platform)
+    return scope.where(platform_username: normalized).first if normalized.match?(SocialProfile::CHANNEL_ID_PATTERN)
+
+    scope.where('LOWER(platform_username) = ?', normalized.downcase).first
+  end
+
+  # Recupera o perfil vencedor após uma corrida de criação (RecordNotUnique).
+  # Procura primeiro por (platform, platform_user_id) se informado, caindo de volta para a deduplicação por username.
+  def find_winner(platform, handle, platform_user_id: nil)
+    if platform_user_id.present?
+      winner = SocialProfile.find_by(platform: platform, platform_user_id: platform_user_id)
+      return winner if winner
+    end
+
+    find_duplicate(platform, handle)
+  end
+
+  def handle_existing_profile(profile)
+    if profile.archived_at.present?
+      profile.update!(archived_at: nil, monitoring_status: 'active')
+      { status: :reactivated, data: format_profile(profile) }
+    else
+      { status: :already_monitored, data: format_profile(profile) }
+    end
   end
 end
 
@@ -102,15 +137,8 @@ class AddProfileTool < ManagementToolBase
       return error("Handle inválido para #{plt}: #{normalized_handle}")
     end
 
-    existing = SocialProfile.where(platform: plt).where('LOWER(platform_username) = ?', normalized_handle.downcase).first
-    if existing
-      if existing.archived_at.present?
-        existing.update!(archived_at: nil, monitoring_status: 'active')
-        return { status: :reactivated, data: format_profile(existing) }
-      else
-        return { status: :already_monitored, data: format_profile(existing) }
-      end
-    end
+    duplicate = find_duplicate(plt, normalized_handle)
+    return handle_existing_profile(duplicate) if duplicate
 
     if plt == 'youtube'
       is_channel_id = handle.to_s =~ %r{/channel/}i || normalized_handle.match?(SocialProfile::CHANNEL_ID_PATTERN)
@@ -124,28 +152,40 @@ class AddProfileTool < ManagementToolBase
 
       return error("Perfil do YouTube não encontrado ou sem metadata válida: #{normalized_handle}") if metadata.nil?
 
-      profile = SocialProfile.create!(
-        platform: plt,
-        platform_username: normalized_handle,
-        platform_user_id: metadata[:channel_id].presence || (is_channel_id ? normalized_handle : "pending:youtube:#{normalized_handle}"),
-        display_name: metadata[:title],
-        avatar_url: metadata[:avatar_url] || metadata[:thumbnail_url],
-        bio: metadata[:description],
-        followers_count: metadata[:subscriber_count],
-        monitoring_status: 'active',
-        collection_status: 'pending'
-      )
+      begin
+        profile = SocialProfile.create!(
+          platform: plt,
+          platform_username: normalized_handle,
+          platform_user_id: metadata[:channel_id].presence || (is_channel_id ? normalized_handle : "pending:youtube:#{normalized_handle}"),
+          display_name: metadata[:title],
+          avatar_url: metadata[:avatar_url] || metadata[:thumbnail_url],
+          bio: metadata[:description],
+          followers_count: metadata[:subscriber_count],
+          monitoring_status: 'active',
+          collection_status: 'pending'
+        )
+      rescue ActiveRecord::RecordNotUnique
+        winner = find_winner(plt, normalized_handle, platform_user_id: metadata[:channel_id].presence)
+        return handle_existing_profile(winner) if winner
+        return error('Corrida de criação: perfil não encontrado após RecordNotUnique')
+      end
 
       ScrapeYoutubeJob.perform_later(profile.id)
       success(format_profile(profile))
     else
-      profile = SocialProfile.create!(
-        platform: plt,
-        platform_username: normalized_handle,
-        platform_user_id: "pending:#{plt}:#{normalized_handle}",
-        monitoring_status: 'active',
-        collection_status: 'pending_validation'
-      )
+      begin
+        profile = SocialProfile.create!(
+          platform: plt,
+          platform_username: normalized_handle,
+          platform_user_id: "pending:#{plt}:#{normalized_handle}",
+          monitoring_status: 'active',
+          collection_status: 'pending_validation'
+        )
+      rescue ActiveRecord::RecordNotUnique
+        winner = find_winner(plt, normalized_handle)
+        return handle_existing_profile(winner) if winner
+        return error('Corrida de criação: perfil não encontrado após RecordNotUnique')
+      end
 
       case plt
       when 'twitter'
@@ -190,60 +230,24 @@ class SetProfileMonitoringTool < ManagementToolBase
 end
 
 class RemoveProfileTool < ManagementToolBase
-  description 'Remove (arquiva) um perfil do monitoramento em duas etapas (requer confirmação).'
+  description 'Remove um perfil do monitoramento.'
 
   param :identifier, type: :string, desc: 'ID numérico ou username do perfil', required: true
   param :platform, type: :string, desc: 'Plataforma opcional para desambiguação', required: false
-  param :confirmation_phrase, type: :string, desc: "Texto literal da mensagem do usuário confirmando a remoção (ex.: 'confirmo a remoção de canalx')", required: false
 
-  def run(identifier:, platform: nil, confirmation_phrase: nil)
+  def run(identifier:, platform: nil)
     return owner_error unless owner?
 
     profile = find_profile(identifier, platform)
     return error('Perfil ambíguo: especifique a plataforma') if profile == :ambiguous
     return error("Perfil não encontrado: #{identifier}") if profile.nil?
 
-    current_user_id = Thread.current[:cleitin_actor][:user_id]
-    current_turn = Thread.current[:cleitin_turn]
-    cache_key = "profile_remove_pending:#{current_user_id}:#{profile.id}"
-    pending = Rails.cache.read(cache_key)
+    formatted = format_profile(profile)
+    profile.destroy!
 
-    if pending.nil?
-      Rails.cache.write(cache_key, { profile_id: profile.id, user_id: current_user_id, turn: current_turn }, expires_in: 2.minutes)
-      posts_count = profile.social_posts.count
-      snapshots_count = profile.profile_snapshots.count
-
-      success({
-                status: :confirmation_required,
-                resumo: "perfil ##{profile.id} (#{profile.platform}/#{profile.platform_username}) — #{posts_count} posts, #{snapshots_count} snapshots",
-                instrucao: 'quando o usuário confirmar, chame novamente passando confirmation_phrase com o texto literal da mensagem do usuário (ex.: "confirmo a remoção de #{profile.platform_username}")'
-              })
-    elsif pending[:turn] != current_turn
-      # Gate primário: a frase literal de confirmação do usuário na próxima
-      # mensagem. Turn-ID distinto é só um gate secundário (achado 2 do PR #36).
-      phrase = confirmation_phrase.to_s.downcase
-      username = profile.platform_username.to_s.downcase
-      token_matches = username.present? && phrase.match?(/(?<![A-Za-z0-9_])#{Regexp.escape(username)}(?![A-Za-z0-9_])/)
-      unless phrase.include?('confirmo') && token_matches
-        return error("Confirmação inválida — o usuário precisa dizer 'confirmo a remoção de #{profile.platform_username}' na próxima mensagem")
-      end
-
-      Rails.cache.delete(cache_key)
-      profile.update!(archived_at: Time.current, monitoring_status: 'paused')
-
-      success(format_profile(profile).merge(status: 'removed'))
-    else
-      posts_count = profile.social_posts.count
-      snapshots_count = profile.profile_snapshots.count
-
-      success({
-                status: :confirmation_required,
-                resumo: "perfil ##{profile.id} (#{profile.platform}/#{profile.platform_username}) — #{posts_count} posts, #{snapshots_count} snapshots",
-                instrucao: 'quando o usuário confirmar, chame novamente passando confirmation_phrase com o texto literal da mensagem do usuário (ex.: "confirmo a remoção de #{profile.platform_username}")'
-              })
-    end
-  rescue ActiveRecord::RecordInvalid => e
-    error("Erro ao salvar: #{e.record.errors.full_messages.join(', ')}")
+    success(formatted.merge(status: 'removed'))
+  rescue ActiveRecord::RecordNotDestroyed, ActiveRecord::InvalidForeignKey => e
+    error("Erro ao remover: #{e.message}")
   end
 end
 
@@ -269,17 +273,23 @@ class PromoteProspectTool < ManagementToolBase
       return error("Handle inválido para #{plt}: #{normalized_handle}")
     end
 
-    existing = SocialProfile.where(platform: plt).where('LOWER(platform_username) = ?', normalized_handle.downcase).first
-    return { status: :already_monitored, data: format_profile(existing) } if existing
+    duplicate = find_duplicate(plt, normalized_handle)
+    return handle_existing_profile(duplicate) if duplicate
 
-    profile = SocialProfile.create!(
-      platform: plt,
-      platform_username: normalized_handle,
-      platform_user_id: "pending:#{plt}:#{normalized_handle}",
-      bio: prospect.bio,
-      monitoring_status: 'active',
-      collection_status: 'pending_validation'
-    )
+    begin
+      profile = SocialProfile.create!(
+        platform: plt,
+        platform_username: normalized_handle,
+        platform_user_id: "pending:#{plt}:#{normalized_handle}",
+        bio: prospect.bio,
+        monitoring_status: 'active',
+        collection_status: 'pending_validation'
+      )
+    rescue ActiveRecord::RecordNotUnique
+      winner = find_winner(plt, normalized_handle)
+      return handle_existing_profile(winner) if winner
+      return error('Corrida de promoção: prospecto não encontrado após RecordNotUnique')
+    end
 
     case plt
     when 'youtube'

@@ -13,6 +13,16 @@ class WeeklyDigestJob < ApplicationJob
     send_digest_message(channel_id, message)
 
     Rails.logger.info "[WeeklyDigestJob] Digest enviado para canal #{channel_id}"
+  rescue RuntimeError => e
+    # Rodada 3 (sol 13/08): canal obsoleto no cache de 30 dias — invalida e
+    # re-resolve (o próximo ciclo reenvia com o canal novo). Não reenviar
+    # aqui: chunks já entregues não podem ser duplicados. Outro erro propaga.
+    if e.message.include?('404') || e.message.match?(/unknown channel/i)
+      recover_digest_channel(channel_id)
+      Rails.logger.warn "[WeeklyDigestJob] Canal #{channel_id} inválido (404); cache invalidado. Mensagem NÃO reenviada nesta execução para evitar duplicação de chunks."
+    else
+      raise
+    end
   end
 
   private

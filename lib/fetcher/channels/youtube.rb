@@ -32,6 +32,13 @@ module Fetcher
     module Youtube
       class NoTranscript < Error; end
 
+      # Falha operacional do yt-dlp (exit não-zero) — NÃO é ausência de legenda.
+      class YtdlpError < Error
+        def initialize(exit_status, stderr_line)
+          super("yt-dlp falhou (exit #{exit_status}): #{stderr_line}")
+        end
+      end
+
       # Busca em plataforma logada é onde rajada vira ban — a conta responde,
       # não só o IP. Estourar o teto é erro nomeado; devolver lista vazia faria
       # o modelo concluir "não existe nada sobre isso".
@@ -250,7 +257,8 @@ module Fetcher
           raise CookieJar::Expired, COOKIE_DOMAIN if sessao_rejeitada?(err)
 
           unless status.success?
-            Rails.logger.warn "[Fetcher::Channels::Youtube] yt-dlp falhou: #{err.to_s.lines.last&.strip}"
+            linha = err.to_s.lines.last&.strip.to_s
+            raise YtdlpError.new(status.exitstatus, linha)
           end
 
           JSON.parse(out.to_s.lines.first.to_s)

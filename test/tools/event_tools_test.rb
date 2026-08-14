@@ -26,11 +26,21 @@ class EventToolsTest < ActiveSupport::TestCase
     assert_equal 'bgs', result[:data].first[:event_type]
   end
 
-  test 'upcoming_events respeita limit' do
-    create_list(:event, 5, start_date: 1.week.from_now)
+  test 'upcoming_events respeita limit exatamente e ordena por start_date' do
+    base = 5.days.from_now
+    create(:event, title: 'Evento 5', event_type: 'bgs', start_date: base + 4.days)
+    create(:event, title: 'Evento 1', event_type: 'bgs', start_date: base + 0.days)
+    create(:event, title: 'Evento 3', event_type: 'bgs', start_date: base + 2.days)
+    create(:event, title: 'Evento 2', event_type: 'bgs', start_date: base + 1.days)
+    create(:event, title: 'Evento 4', event_type: 'bgs', start_date: base + 3.days)
+
     tool = UpcomingEventsTool.new
     result = tool.execute(limit: 2)
     assert_equal :success, result[:status]
-    assert_operator result[:data].size, :<=, 2
+    assert_equal 2, result[:data].size
+    assert_equal 'Evento 1', result[:data][0][:title]
+    assert_equal 'Evento 2', result[:data][1][:title]
+    dates = result[:data].map { |e| e[:start_date] }
+    assert_equal dates.sort, dates
   end
 end

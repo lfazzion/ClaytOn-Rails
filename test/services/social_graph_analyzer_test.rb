@@ -100,4 +100,33 @@ class SocialGraphAnalyzerTest < ActiveSupport::TestCase
     assert handles.first.key?(:username)
     assert handles.first.key?(:bio)
   end
+
+  test 'should strip trailing periods from handles' do
+    create(:social_post, social_profile: @profile, content: 'Check this out @usuario.',
+                         posted_at: 1.day.ago)
+
+    handles = Discovery::SocialGraphAnalyzer.extract_handles(@profile, days: 15)
+
+    assert(handles.any? { |h| h[:username] == '@usuario' })
+    refute(handles.any? { |h| h[:username] == '@usuario.' })
+  end
+
+  test 'should strip multiple trailing periods from handles' do
+    create(:social_post, social_profile: @profile, content: 'See @usuario.. and @teste...',
+                         posted_at: 1.day.ago)
+
+    handles = Discovery::SocialGraphAnalyzer.extract_handles(@profile, days: 15)
+
+    assert(handles.any? { |h| h[:username] == '@usuario' })
+    assert(handles.any? { |h| h[:username] == '@teste' })
+  end
+
+  test 'should preserve internal dots in handles' do
+    create(:social_post, social_profile: @profile, content: 'Check @user.name out',
+                         posted_at: 1.day.ago)
+
+    handles = Discovery::SocialGraphAnalyzer.extract_handles(@profile, days: 15)
+
+    assert(handles.any? { |h| h[:username] == '@user.name' })
+  end
 end

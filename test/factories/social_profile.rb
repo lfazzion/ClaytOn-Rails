@@ -1,7 +1,10 @@
 FactoryBot.define do
   factory :social_profile do
     platform { %w[twitter instagram youtube tiktok].sample }
-    platform_username { Faker::Internet.username(specifier: 5..20) }
+    # Username SEMPRE válido para a validação de Twitter ([A-Za-z0-9_]{1,15}):
+    # Faker::Internet.username gera pontos/hífens e até 20 chars, quebrando
+    # a validação adicionada na campanha laguna-fix (13/08).
+    platform_username { SecureRandom.hex(4)[0, 8] }
     platform_user_id { Faker::Number.number(digits: 10) }
     display_name { Faker::Name.name }
     bio { Faker::Lorem.sentence }
