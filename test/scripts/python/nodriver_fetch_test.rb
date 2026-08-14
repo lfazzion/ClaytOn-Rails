@@ -204,6 +204,10 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
             # producao nao deve mascarar com `except Exception: pass` amplo.
             if os.environ.get("DOC_STOP_RAISE") == "1":
                 raise RuntimeError("erro real de stop no fake")
+            # Rodada 3 (sol 13/08): falso positivo da heurística por substring —
+            # mensagem com "closed" NÃO é TargetClosedError e deve propagar.
+            if os.environ.get("DOC_STOP_RAISE_CLOSED") == "1":
+                raise RuntimeError("closed state invariant broken")
             return None
 
     async def start(**kwargs):
@@ -331,6 +335,19 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
 
     refute status.success?, "erro em browser.stop() nao deve ser mascarado pelo except amplo (stderr: #{stderr})"
     assert_match(/erro real de stop no fake/, stderr, "a causa real do erro de stop deve aparecer no stderr")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "RuntimeError com 'closed' na mensagem PROPAGA (nao e TargetClosedError)" do
+    # Rodada 3 (sol 13/08): a heurística por substring (`"closed" in str(exc)`)
+    # engolia erro de programação cuja mensagem contém "closed". Agora só
+    # TargetClosedError (nome do tipo) é suprimido.
+    dir, env = build_fake_env("DOC_STOP_RAISE_CLOSED" => "1")
+    _, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    refute status.success?, "RuntimeError('closed...') nao e TargetClosedError — deve propagar (stderr: #{stderr})"
+    assert_match(/closed state invariant broken/, stderr, "a causa real deve aparecer no stderr")
   ensure
     FileUtils.remove_entry(dir) if dir
   end

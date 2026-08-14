@@ -464,6 +464,14 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
       assert_match(/try/, bloco, "helper #{helper} não protege com try")
       assert_match(/catch/, bloco, "helper #{helper} não tem catch")
     end
+    # Rodada 3 (sol 13/08): o teste lexical acima pode ser enganado por try/catch
+    # que exista SÓ em comentário. O contrato real: o try de cada helper está em
+    # código executável (linha que não começa com //).
+    %w[txt permalink quando autor reserva contador].each do |helper|
+      bloco = extract_timeline_js_function(js, helper)
+      linha_try = bloco.to_s.lines.find { |l| l.include?("try") && !l.strip.start_with?("//") }
+      refute_nil linha_try, "helper #{helper}: try/catch deve estar em código executável (não só em comentário)"
+    end
     refute_match(/querySelector\(\s*['"]\s*>/, js)
   end
 
