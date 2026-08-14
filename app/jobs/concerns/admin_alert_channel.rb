@@ -31,6 +31,11 @@ module AdminAlertChannel
 
     heartbeat = start_lock_heartbeat(lock_token)
     begin
+      # Rodada 2 (sol 13/08): se o heartbeat falhou ANTES de chegarmos aqui,
+      # o lease foi perdido — criar o canal sem ser dono do lock quebraria a
+      # exclusão mútua (dois workers criariam canais duplicados). Aborta.
+      check_heartbeat!(heartbeat)
+
       # Re-check after acquiring lock — another thread may have created it
       cached = Rails.cache.read(CACHED_CHANNEL_KEY)
       if cached.present?
@@ -40,6 +45,10 @@ module AdminAlertChannel
       guilds = DiscordApiClient.get_bot_guilds
       return nil if guilds.empty?
 
+      # Rodada 2: re-checa o heartbeat DEPOIS da chamada lenta (get_bot_guilds)
+      # e antes da criação — se o lease expirou durante a chamada, não cria.
+      check_heartbeat!(heartbeat)
+
       guild_id = guilds.first["id"]
       channel = DiscordApiClient.create_text_channel(guild_id, "system-alerts")
       channel_id = channel["id"]
@@ -48,8 +57,20 @@ module AdminAlertChannel
       Rails.logger.info "[#{self.class.name}] Canal admin criado e cacheado: #{channel_id}"
       channel_id
     ensure
-      stop_lock_heartbeat(heartbeat)
+      # Rodada 2 (sol 13/08): release_lock DEVE rodar mesmo se o stop do
+      # heartbeat levantar (ex.: propagando falha do lease) — se o stop
+      # lançar antes, o lock ficaria preso até expirar. Aninha: captura o erro
+      # do stop, garante o release, e só então relança o erro original.
+      heartbeat_error = stop_lock_heartbeat(heartbeat)
       release_lock(lock_token)
+      raise heartbeat_error if heartbeat_error
+    end
+  end
+
+  def check_heartbeat!(heartbeat)
+    thread, state = heartbeat
+    if state[:error]
+      raise state[:error]
     end
   end
 
@@ -94,11 +115,16 @@ module AdminAlertChannel
 
     thread, state = heartbeat
 
-    # Verifica antes de tocar na thread: se o heartbeat falhou, propaga a
-    # exceção original à thread principal (ACHADO C). O wakeup/join abaixo é
-    # protegido para não substituir essa exceção por um ThreadError.
+    # Rodada 2 (sol 13/08): NÃO levanta aqui — RETORNA o erro para o caller
+    # garantir o release do lock ANTES de propagar. Se levantasse, o ensure
+    # sequencial (`stop; release`) nunca chegaria ao release e o lock ficaria
+    # preso até expirar. O wakeup/join é protegido para não substituir o erro
+    # original por um ThreadError.
     if state[:error]
-      raise state[:error]
+      state[:running] = false
+      thread.wakeup if thread.alive?
+      thread.join(1) rescue ThreadError
+      return state[:error]
     end
 
     state[:running] = false
@@ -106,6 +132,7 @@ module AdminAlertChannel
     # Protege contra ThreadError (thread já morta) — não deve mascarar a
     # exceção original do heartbeat.
     thread.join(1) rescue ThreadError
+    nil
   end
 
   def renew_lock(token)

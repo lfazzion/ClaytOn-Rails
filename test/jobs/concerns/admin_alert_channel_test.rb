@@ -106,6 +106,42 @@ class AdminAlertChannelTest < ActiveSupport::TestCase
     assert_equal 'other_worker_token', Rails.cache.read('discord:admin_channel_lock')
   end
 
+  # Rodada 2 (sol 13/08): stop_lock_heartbeat RETORNA o erro (não levanta),
+  # para o ensure poder garantir release_lock ANTES de propagar — se levantasse,
+  # o lock ficaria preso até expirar.
+  test 'stop_lock_heartbeat retorna o erro do heartbeat em vez de levantar' do
+    job = DummyJob.new
+    erro = RuntimeError.new('lease perdido')
+    thread = Thread.new { sleep 0.5 }
+    heartbeat = [thread, { running: true, error: erro }]
+
+    resultado = job.send(:stop_lock_heartbeat, heartbeat)
+
+    assert_equal erro, resultado, "deve RETORNAR o erro do heartbeat"
+    assert_equal false, heartbeat[1][:running], "thread deve ser parada"
+  ensure
+    thread&.kill
+  end
+
+  # Rodada 2: falha do heartbeat ANTES da criação aborta — não cria canal sem
+  # ser dono do lock (exclusão mútua quebrada = canais duplicados).
+  test 'ensure_admin_channel não cria canal quando o heartbeat já falhou' do
+    ENV.delete('DISCORD_ADMIN_CHANNEL_ID')
+    job = DummyJob.new
+    erro = RuntimeError.new('renovação do lease falhou')
+
+    thread = Thread.new { sleep 0.5 }
+    heartbeat = [thread, { running: false, error: erro }]
+    job.stubs(:start_lock_heartbeat).returns(heartbeat)
+    job.stubs(:acquire_lock).returns('token123')
+
+    DiscordApiClient.expects(:create_text_channel).never
+
+    assert_raises(RuntimeError) { job.send(:ensure_admin_channel) }
+    thread.kill
+    thread.join(1)
+  end
+
   test 'ensure_admin_channel renova o lease periodicamente permitindo criacao longa ultrapassar o TTL original' do
     ENV.delete('DISCORD_ADMIN_CHANNEL_ID')
     DiscordApiClient.stubs(:get_bot_guilds).returns([{ 'id' => 'guild789' }])
