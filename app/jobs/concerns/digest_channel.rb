@@ -12,6 +12,15 @@ module DigestChannel
   # canal. 120s cobre o pior caso (handshake + criação) com folga. Não renovamos
   # o lease: a seção crítica é curta e o compare-delete no unlock (achado A)
   # impede que um release obsoleto apague o lock do worker que entrou depois.
+  #
+  # DECISÃO DO DONO (13/08, aceito como trade-off após 4 rodadas de revisão):
+  # o sol pediu heartbeat (renovação periódica do lease) como no
+  # admin_alert_channel, para o caso em que create_text_channel (sem timeout)
+  # exceda o TTL de 120s. O dono avaliou e ACEITOU o risco: a janela exige
+  # latência >120s no Discord (raro), e mesmo com canal duplicado o fluxo
+  # reutiliza por nome na próxima execução (resolve_digest_channel). Heartbeat
+  # aqui seria feature nova por achado repetido — decisão registrada; não
+  # implementar sem novo pedido.
   LOCK_TTL = 120.seconds
   LOCK_WAIT_TIMEOUT = 15.seconds
   LOCK_RETRY_INTERVAL = 0.05
