@@ -32,6 +32,6 @@ class NewsToolsTest < ActiveSupport::TestCase
     tool = RecentArticlesTool.new
     result = tool.execute(limit: 2)
     assert_equal :success, result[:status]
-    assert_operator result[:data].size, :<=, 2
+    assert_equal 2, result[:data].size
   end
 end

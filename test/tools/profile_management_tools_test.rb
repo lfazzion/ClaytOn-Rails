@@ -66,7 +66,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalx', timeout: 8)
                                            .returns(metadata)
-    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)).returns(true)
+    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
+      @captured_profile_id = profile_id
+      true
+    end.returns(true)
 
     tool = AddProfileTool.new
     result = tool.execute(platform: 'youtube', handle: 'canalx')
@@ -79,6 +82,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert_equal 'UC_REAL_CHANNEL_ID', profile.platform_user_id
     assert_equal 'active', profile.monitoring_status
     assert_equal 'Canal Real YouTube', profile.display_name
+    assert_equal profile.id, @captured_profile_id
   end
 
   test 'add_profile em youtube com URL colada extrai handle e cria' do
@@ -91,13 +95,20 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalurl', timeout: 8)
                                            .returns(metadata)
-    ScrapeYoutubeJob.stubs(:perform_later)
+    ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
+      @captured_profile_id = profile_id
+      true
+    end.returns(true)
 
     tool = AddProfileTool.new
     result = tool.execute(platform: 'youtube', handle: 'https://www.youtube.com/@CanalUrl')
 
     assert_equal :success, result[:status]
     assert_equal 'canalurl', result[:data][:username]
+
+    profile = SocialProfile.find_by(platform: 'youtube', platform_username: 'canalurl')
+    assert_not_nil profile
+    assert_equal profile.id, @captured_profile_id
   end
 
   test 'add_profile em youtube com metadata nil retorna error e não cria' do

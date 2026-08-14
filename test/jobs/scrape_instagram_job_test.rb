@@ -99,10 +99,19 @@ class ScrapeInstagramJobTest < ActiveJob::TestCase
 
     ScrapeInstagramJob.perform_now(@profile.id)
     first_count = ProfileSnapshot.where(social_profile: @profile).count
+    first_snapshot = ProfileSnapshot.where(social_profile: @profile).last
+
+    # Reset last_collected_at so the second run is not blocked by rate-limit,
+    # but keep within the same hour so create_snapshot reuses the same record
+    @profile.update!(last_collected_at: nil)
 
     ScrapeInstagramJob.perform_now(@profile.id)
 
-    assert_equal first_count, ProfileSnapshot.where(social_profile: @profile).count
+    assert_equal 1, ProfileSnapshot.where(social_profile: @profile).count
+    second_snapshot = ProfileSnapshot.where(social_profile: @profile).last
+    assert_equal first_snapshot.id, second_snapshot.id
+    assert_equal 10_000, second_snapshot.followers_count
+    assert_equal false, second_snapshot.source_degraded
   end
 
   test 'should complete without raising, mark degraded, and enqueue ScrapingFailureAlertJob on StandardError' do

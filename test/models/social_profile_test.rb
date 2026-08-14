@@ -237,5 +237,20 @@ class SocialProfileTest < ActiveSupport::TestCase
 
     assert_equal 3, profile.profile_snapshots.count
   end
+
+  test "should_collect? respeita blocked_until no futuro" do
+    profile_due = build(:social_profile, last_collected_at: 3.hours.ago, blocked_until: nil)
+    profile_blocked = build(:social_profile, last_collected_at: 3.hours.ago, blocked_until: 1.hour.from_now)
+    profile_past_block = build(:social_profile, last_collected_at: 3.hours.ago, blocked_until: 1.hour.ago)
+
+    assert profile_due.should_collect?(2.hours)
+    assert_not profile_blocked.should_collect?(2.hours)
+    assert profile_past_block.should_collect?(2.hours)
+  end
+
+  test "should_collect? retorna true para perfil nunca coletado mesmo sem blocked_until" do
+    profile = build(:social_profile, last_collected_at: nil, blocked_until: nil)
+    assert profile.should_collect?(2.hours)
+  end
 end
 
