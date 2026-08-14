@@ -19,7 +19,11 @@ module Discord
       "sessions" => :sessions,
       "resume" => :resume,
       "delete" => :delete,
-      "help" => :help
+      "help" => :help,
+      "sentiment_target" => :sentiment_target,
+      "sentiment_run" => :sentiment_run,
+      "sentiment_status" => :sentiment_status,
+      "sentiment" => :sentiment_status
     }.freeze
 
     SLASH_COMMANDS = [
@@ -34,7 +38,13 @@ module Discord
       { name: "delete", description: "Apaga uma conversa anterior pelo numero",
         takes_index: true, index_label: "Numero da conversa", takes_confirm: true },
       { name: "help", description: "Explica os comandos e como o chat funciona",
-        takes_index: false, index_label: nil, takes_confirm: false }
+        takes_index: false, index_label: nil, takes_confirm: false },
+      { name: "sentiment_target", description: "Cria ou atualiza alvo de analise de sentimento",
+        takes_index: false, index_label: nil, takes_confirm: false },
+      { name: "sentiment_run", description: "Executa analise de sentimento para um alvo",
+        takes_index: true, index_label: "ID do alvo", takes_confirm: false },
+      { name: "sentiment_status", description: "Consulta status da analise de sentimento",
+        takes_index: true, index_label: "ID do alvo", takes_confirm: false }
     ].freeze
 
     Command = Struct.new(:name, :arg, :confirm, keyword_init: true)

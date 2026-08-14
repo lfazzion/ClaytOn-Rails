@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_13_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_14_000001) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -194,6 +194,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_13_000001) do
     t.datetime "created_at", null: false
     t.text "error"
     t.datetime "finished_at"
+    t.datetime "delivered_at"
     t.json "frozen_spec", null: false
     t.string "model_id"
     t.string "prompt_version"

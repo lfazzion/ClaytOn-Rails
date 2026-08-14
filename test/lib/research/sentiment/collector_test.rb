@@ -181,4 +181,51 @@ class SentimentCollectorTest < ActiveSupport::TestCase
     assert_equal 5, @run.sentiment_phrases.count
     assert_equal ["reddit"], @run.sentiment_phrases.pluck(:source).uniq
   end
+
+  test "rejeita itens claramente fora do tema da query pelo filtro de relevância" do
+    @target.update!(query: "inteligência artificial", max_phrases: 10)
+    now = Time.current.utc
+    w_start = now - 30.days
+    w_end = now + 1.minute
+    @run.update!(
+      window_start: w_start,
+      window_end: w_end,
+      frozen_spec: @target.frozen_spec.merge(
+        "query" => "inteligência artificial",
+        "window_start" => w_start.iso8601,
+        "window_end" => w_end.iso8601
+      )
+    )
+
+    items = [
+      {
+        source: "x",
+        external_id: "relevant_ai_1",
+        permalink: "https://x.com/user/status/1",
+        author: "ai_researcher",
+        text: "Novos modelos de inteligência artificial generativa apresentam grande capacidade de raciocínio.",
+        posted_at: now - 1.hour
+      },
+      {
+        source: "x",
+        external_id: "irrelevant_cake_1",
+        permalink: "https://x.com/user/status/2",
+        author: "chef_master",
+        text: "Receita deliciosa de bolo de cenoura com calda cremosa de chocolate para o café da tarde.",
+        posted_at: now - 1.hour
+      }
+    ]
+
+    Research::Sentiment::Sources::Reddit.stubs(:fetch).returns([])
+    Research::Sentiment::Sources::X.stubs(:fetch).returns(items)
+
+    Research::Sentiment::Collector.collect(@run)
+    @run.reload
+
+    assert_equal 1, @run.collected_count, "Apenas a frase relevante deveria ter sido coletada"
+    assert_operator @run.rejected_count, :>=, 1, "O item fora do tema (receita de bolo) deve ser rejeitado"
+    collected_texts = @run.sentiment_phrases.pluck(:text)
+    assert_includes collected_texts, "Novos modelos de inteligência artificial generativa apresentam grande capacidade de raciocínio."
+    refute_includes collected_texts, "Receita deliciosa de bolo de cenoura com calda cremosa de chocolate para o café da tarde."
+  end
 end

@@ -37,12 +37,6 @@ module Research
                 posted_at: parse_time(item["created_at"])
               }
             end
-          rescue Fetcher::Channels::X::RateLimited => e
-            Rails.logger.warn "[Research::Sentiment::Sources::X] Rate limited: #{e.message}"
-            []
-          rescue Fetcher::Channels::X::Error => e
-            Rails.logger.warn "[Research::Sentiment::Sources::X] Erro de canal X: #{e.message}"
-            []
           end
 
           private

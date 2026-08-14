@@ -60,9 +60,6 @@ module Research
             end
 
             phrases
-          rescue Fetcher::Channels::Reddit::Error => e
-            Rails.logger.warn "[Research::Sentiment::Sources::Reddit] Erro no canal Reddit: #{e.message}"
-            []
           end
 
           private

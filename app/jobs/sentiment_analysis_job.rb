@@ -5,30 +5,44 @@ class SentimentAnalysisJob < ApplicationJob
 
   queue_as :default
 
-  def perform(target_id)
+  def perform(target_id, run_id = nil)
+    if run_id.present?
+      run = SentimentRun.find_by(id: run_id)
+      return run if run&.delivered_at.present?
+    end
+
     target = SentimentTarget.find(target_id)
 
-    started_at = Time.current.utc
-    w_start = started_at - target.window_days.days
-    # folga de 1 minuto no limite superior: o fim da janela é o instante do início do run + tolerância de skew de relógio/ordenação — declarado no spec para o relatório ser honesto
-    w_end = started_at + 1.minute
+    unless run
+      started_at = Time.current.utc
+      w_start = started_at - target.window_days.days
+      # folga de 1 minuto no limite superior: o fim da janela é o instante do início do run + tolerância de skew de relógio/ordenação — declarado no spec para o relatório ser honesto
+      w_end = started_at + 1.minute
 
-    spec = target.frozen_spec.merge(
-      "target_id" => target.id,
-      "window_start" => w_start.iso8601(9),
-      "window_end" => w_end.iso8601(9)
-    )
+      spec = target.frozen_spec.merge(
+        "target_id" => target.id,
+        "window_start" => w_start.iso8601(9),
+        "window_end" => w_end.iso8601(9)
+      )
 
-    run = target.sentiment_runs.create!(
-      status: "pending",
-      started_at: started_at,
-      frozen_spec: spec,
-      window_start: w_start,
-      window_end: w_end
-    )
+      run = target.sentiment_runs.create!(
+        status: "pending",
+        started_at: started_at,
+        frozen_spec: spec,
+        window_start: w_start,
+        window_end: w_end
+      )
+    end
 
     run.update!(status: "collecting")
     Research::Sentiment::Collector.collect(run)
+
+    run.reload
+    if run.status == "insufficient_data"
+      run.update!(finished_at: Time.current)
+      Rails.logger.warn "[SentimentAnalysisJob] Coleta sem dados suficientes para alvo ##{target.id} (#{target.name})"
+      return run
+    end
 
     run.update!(status: "classifying")
     Research::Sentiment::Classifier.classify(run)
@@ -40,11 +54,30 @@ class SentimentAnalysisJob < ApplicationJob
 
     channel_id = ensure_digest_channel
     if channel_id.present?
-      DiscordMessageChunker.chunk(message).each do |chunk|
-        DiscordApiClient.send_message(channel_id, chunk)
+      chunks = DiscordMessageChunker.chunk(message)
+      begin
+        chunks.each do |chunk|
+          DiscordApiClient.send_message(channel_id, chunk)
+        end
+        run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
+        Rails.logger.info "[SentimentAnalysisJob] Análise concluída para alvo ##{target.id} (#{target.name})"
+      rescue RuntimeError => e
+        if e.message.include?("404") || e.message.match?(/unknown channel/i)
+          recovered_id = recover_digest_channel(channel_id)
+          if recovered_id.present?
+            chunks.each do |chunk|
+              DiscordApiClient.send_message(recovered_id, chunk)
+            end
+            run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
+            Rails.logger.info "[SentimentAnalysisJob] Análise concluída no canal recuperado para alvo ##{target.id} (#{target.name})"
+          else
+            run.update!(status: "delivery_failed", error: "canal digest indisponível", finished_at: Time.current)
+            Rails.logger.error "[SentimentAnalysisJob] Canal digest obsoleto e não recuperado para envio do relatório (run ##{run.id})"
+          end
+        else
+          raise e
+        end
       end
-      run.update!(status: "completed", finished_at: Time.current)
-      Rails.logger.info "[SentimentAnalysisJob] Análise concluída para alvo ##{target.id} (#{target.name})"
     else
       run.update!(status: "delivery_failed", error: "canal digest indisponível", finished_at: Time.current)
       Rails.logger.error "[SentimentAnalysisJob] Canal digest indisponível para envio do relatório (run ##{run.id})"

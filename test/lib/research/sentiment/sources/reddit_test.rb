@@ -30,16 +30,24 @@ class SentimentSourcesRedditTest < ActiveSupport::TestCase
     assert_not_nil items.first[:posted_at]
   end
 
-  test "trata exceção RateLimited do canal interrompendo busca graciosamente" do
+  test "não achata erro de RateLimited do canal Reddit em lista vazia e propaga exceção" do
     threads = [
       { "url" => "https://www.reddit.com/r/ruby/comments/abc123/cleitin_bot/", "title" => "Cleitin Bot" }
     ]
 
-    Fetcher::Channels::Reddit.expects(:search).returns(threads)
-    Fetcher::Channels::Reddit.expects(:thread_comments).raises(Fetcher::Channels::Reddit::RateLimited.new("old.reddit.com"))
+    Fetcher::Channels::Reddit.expects(:search).raises(Fetcher::Channels::Reddit::RateLimited.new("old.reddit.com"))
 
-    items = Research::Sentiment::Sources::Reddit.fetch(query: "cleitin", limit: 10)
-    assert_equal [], items
+    assert_raises(Fetcher::Channels::Reddit::RateLimited) do
+      Research::Sentiment::Sources::Reddit.fetch(query: "cleitin", limit: 10)
+    end
+  end
+
+  test "não achata erro genérico do canal Reddit em lista vazia e propaga exceção" do
+    Fetcher::Channels::Reddit.expects(:search).raises(Fetcher::Channels::Error.new("500 Internal Server Error"))
+
+    assert_raises(Fetcher::Channels::Error) do
+      Research::Sentiment::Sources::Reddit.fetch(query: "cleitin", limit: 10)
+    end
   end
 
   test "ignora threads com url vazia e realiza leituras das threads validas sequencialmente" do

@@ -2,6 +2,7 @@
 
 require "digest"
 require "time"
+require_relative "../relevance"
 
 module Research
   module Sentiment
@@ -41,7 +42,11 @@ module Research
                          end
           next unless source_class
 
-          source_fetched[src_name] = source_class.fetch(query: query, limit: per_source_limit)
+          begin
+            source_fetched[src_name] = source_class.fetch(query: query, limit: per_source_limit)
+          rescue StandardError => e
+            Rails.logger.warn "[Research::Sentiment::Collector] Falha ao coletar fonte #{src_name}: #{e.class}: #{e.message}"
+          end
         end
 
         collected = 0
@@ -75,11 +80,12 @@ module Research
               next
             end
 
-            # Checagem de relevância mínima usando o Research::Scorer se houver contexto
-            relevance = Research::Scorer.score({ "title" => text, "text" => text }, query: query)
-            if relevance.zero? && query.present? && query.length > 3
-              rejected += 1
-              next
+            if query.present?
+              relevance = Research::Relevance.token_overlap_relevance(query, text)
+              if relevance < 0.1
+                rejected += 1
+                next
+              end
             end
 
             ext_id = item[:external_id]
@@ -100,10 +106,11 @@ module Research
           end
         end
 
+        final_status = collected.zero? ? "insufficient_data" : "collected"
         @run.update!(
           collected_count: collected,
           rejected_count: rejected,
-          status: "collected"
+          status: final_status
         )
 
         @run

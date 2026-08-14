@@ -44,10 +44,19 @@ class SentimentSourcesXTest < ActiveSupport::TestCase
     assert_equal "cleitin", items.first[:author]
   end
 
-  test "trata exceção RateLimited do canal X devolvendo lista vazia" do
+  test "não achata exceção RateLimited do canal X em lista vazia e propaga o erro" do
     Fetcher::Channels::X.expects(:search).raises(Fetcher::Channels::X::RateLimited.new("[search]"))
 
-    items = Research::Sentiment::Sources::X.fetch(query: "cleitin", limit: 10)
-    assert_equal [], items
+    assert_raises(Fetcher::Channels::X::RateLimited) do
+      Research::Sentiment::Sources::X.fetch(query: "cleitin", limit: 10)
+    end
+  end
+
+  test "não achata erro genérico do canal X em lista vazia e propaga o erro" do
+    Fetcher::Channels::X.expects(:search).raises(Fetcher::Channels::Error.new("503 Service Unavailable"))
+
+    assert_raises(Fetcher::Channels::Error) do
+      Research::Sentiment::Sources::X.fetch(query: "cleitin", limit: 10)
+    end
   end
 end
