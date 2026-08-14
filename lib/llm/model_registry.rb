@@ -103,6 +103,22 @@ module Llm
             max_output_tokens: 32_768,
             context_window: 200_000
           ),
+          RubyLLM::Model::Info.new(
+            id: 'google/gemma-4-26b-a4b-it:free',
+            name: 'Google Gemma 4 26B (Free)',
+            provider: 'openrouter',
+            capabilities: %w[function_calling streaming],
+            max_output_tokens: 32_768,
+            context_window: 131_072
+          ),
+          RubyLLM::Model::Info.new(
+            id: 'nvidia/nemotron-3-nano-30b-a3b:free',
+            name: 'NVIDIA Nemotron 3 Nano 30B (Free)',
+            provider: 'openrouter',
+            capabilities: %w[function_calling streaming],
+            max_output_tokens: 32_768,
+            context_window: 131_072
+          ),
           # --- Gemini ----------------------------------------------------------------
           # Os três existem na API do Google mas não no registry embutido na gem.
           RubyLLM::Model::Info.new(

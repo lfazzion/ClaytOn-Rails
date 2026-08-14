@@ -109,9 +109,9 @@ class Discord::CommandRouterTest < ActiveSupport::TestCase
     assert_not Discord::CommandRouter.build("delete", 3).confirm
   end
 
-  test "SLASH_COMMANDS cobre os seis nomes, e só delete pede confirmação" do
+  test "SLASH_COMMANDS cobre os nove nomes, e só delete pede confirmação" do
     nomes = Discord::CommandRouter::SLASH_COMMANDS.map { |c| c[:name] }
-    assert_equal %w[new clear sessions resume delete help].sort, nomes.sort
+    assert_equal %w[new clear sessions resume delete help sentiment_target sentiment_run sentiment_status].sort, nomes.sort
 
     com_confirmacao = Discord::CommandRouter::SLASH_COMMANDS.select { |c| c[:takes_confirm] }
     assert_equal ["delete"], com_confirmacao.map { |c| c[:name] }
@@ -123,5 +123,69 @@ class Discord::CommandRouterTest < ActiveSupport::TestCase
     %w[sessions resume delete].each { |nome| assert por_nome[nome][:takes_index] }
     %w[new clear help].each { |nome| assert_not por_nome[nome][:takes_index] }
     assert_not_equal por_nome["sessions"][:index_label], por_nome["resume"][:index_label]
+  end
+
+  test "comandos de sentiment são reconhecidos via prefixo text" do
+    assert_equal :sentiment_target, Discord::CommandRouter.parse_text("!sentiment_target").name
+    assert_equal :sentiment_run, Discord::CommandRouter.parse_text("!sentiment_run 1").name
+    assert_equal :sentiment_status, Discord::CommandRouter.parse_text("!sentiment_status 1").name
+    assert_equal :sentiment_status, Discord::CommandRouter.parse_text("!sentiment 1").name
+  end
+
+  test "comandos de sentiment extraem argumento numérico quando fornecido" do
+    cmd_run = Discord::CommandRouter.parse_text("!sentiment_run 42")
+    assert_equal :sentiment_run, cmd_run.name
+    assert_equal 42, cmd_run.arg
+
+    cmd_status = Discord::CommandRouter.parse_text("!sentiment_status 42")
+    assert_equal :sentiment_status, cmd_status.name
+    assert_equal 42, cmd_status.arg
+  end
+
+  test "build aceita comandos de sentiment vindos de slash command" do
+    cmd_target = Discord::CommandRouter.build("sentiment_target")
+    assert_equal :sentiment_target, cmd_target.name
+
+    cmd_run = Discord::CommandRouter.build("sentiment_run", 5)
+    assert_equal :sentiment_run, cmd_run.name
+    assert_equal 5, cmd_run.arg
+
+    cmd_status = Discord::CommandRouter.build("sentiment_status", 5)
+    assert_equal :sentiment_status, cmd_status.name
+    assert_equal 5, cmd_status.arg
+  end
+
+  test "SLASH_COMMANDS inclui comandos de sentiment" do
+    nomes = Discord::CommandRouter::SLASH_COMMANDS.map { |c| c[:name] }
+    assert_includes nomes, "sentiment_target"
+    assert_includes nomes, "sentiment_run"
+    assert_includes nomes, "sentiment_status"
+
+    por_nome = Discord::CommandRouter::SLASH_COMMANDS.index_by { |c| c[:name] }
+    assert por_nome["sentiment_run"][:takes_index]
+    assert por_nome["sentiment_status"][:takes_index]
+    assert_not por_nome["sentiment_target"][:takes_index]
+  end
+
+  test "sentiment_target no SLASH_COMMANDS declara opcoes obrigatorias name e query" do
+    target_cmd = Discord::CommandRouter::SLASH_COMMANDS.find { |c| c[:name] == "sentiment_target" }
+    assert_not_nil target_cmd, "sentiment_target deve existir no SLASH_COMMANDS"
+
+    options = target_cmd[:options] || []
+    opt_names = options.map { |o| o[:name].to_s }
+    assert_includes opt_names, "name", "slash command sentiment_target deve declarar opcao name"
+    assert_includes opt_names, "query", "slash command sentiment_target deve declarar opcao query"
+
+    name_opt = options.find { |o| o[:name].to_s == "name" }
+    query_opt = options.find { |o| o[:name].to_s == "query" }
+    assert name_opt[:required], "opcao name deve ser obrigatoria"
+    assert query_opt[:required], "opcao query deve ser obrigatoria"
+  end
+
+  test "parse_text para !sentiment_target extrai argumentos name e query" do
+    cmd = Discord::CommandRouter.parse_text('!sentiment_target "Cleitin" "cleitin bot"')
+    assert_equal :sentiment_target, cmd.name
+    assert_equal "Cleitin", cmd.target_name
+    assert_equal "cleitin bot", cmd.target_query
   end
 end

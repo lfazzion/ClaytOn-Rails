@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "shellwords"
+
 module Discord
   # Única fonte de verdade dos comandos. O slash nativo e o prefixo "!" entram
   # os dois aqui e saem como o mesmo Command, então não existe caminho onde uma
@@ -19,7 +21,11 @@ module Discord
       "sessions" => :sessions,
       "resume" => :resume,
       "delete" => :delete,
-      "help" => :help
+      "help" => :help,
+      "sentiment_target" => :sentiment_target,
+      "sentiment_run" => :sentiment_run,
+      "sentiment_status" => :sentiment_status,
+      "sentiment" => :sentiment_status
     }.freeze
 
     SLASH_COMMANDS = [
@@ -34,10 +40,20 @@ module Discord
       { name: "delete", description: "Apaga uma conversa anterior pelo numero",
         takes_index: true, index_label: "Numero da conversa", takes_confirm: true },
       { name: "help", description: "Explica os comandos e como o chat funciona",
-        takes_index: false, index_label: nil, takes_confirm: false }
+        takes_index: false, index_label: nil, takes_confirm: false },
+      { name: "sentiment_target", description: "Cria ou atualiza alvo de analise de sentimento",
+        takes_index: false, index_label: nil, takes_confirm: false,
+        options: [
+          { name: "name", description: "Nome unico do alvo", required: true },
+          { name: "query", description: "Termo de busca", required: true }
+        ] },
+      { name: "sentiment_run", description: "Executa analise de sentimento para um alvo",
+        takes_index: true, index_label: "ID do alvo", takes_confirm: false },
+      { name: "sentiment_status", description: "Consulta status da analise de sentimento",
+        takes_index: true, index_label: "ID do alvo", takes_confirm: false }
     ].freeze
 
-    Command = Struct.new(:name, :arg, :confirm, keyword_init: true)
+    Command = Struct.new(:name, :arg, :confirm, :target_name, :target_query, keyword_init: true)
 
     class << self
       def parse_text(content)
@@ -45,16 +61,47 @@ module Discord
         return nil unless text.start_with?(TEXT_PREFIX)
 
         word, rest = text.delete_prefix(TEXT_PREFIX).split(/\s+/, 2)
+        name = ALIASES[word.to_s.strip.downcase]
+        return nil unless name
+
+        if name == :sentiment_target
+          target_name, target_query = parse_target_args(rest)
+          return Command.new(
+            name: name,
+            arg: nil,
+            confirm: false,
+            target_name: target_name,
+            target_query: target_query
+          )
+        end
+
         build(word, rest)
       end
 
       # `value` é String no caminho "!" e Integer no caminho slash; `confirm` é
       # nil no caminho "!" (a palavra vem dentro de `value`) e Boolean no slash.
-      def build(word, value = nil, confirm = nil)
+      def build(word, value = nil, confirm = nil, target_name: nil, target_query: nil)
         name = ALIASES[word.to_s.strip.downcase]
         return nil unless name
 
-        Command.new(name: name, arg: parse_index(value), confirm: parse_confirm(value, confirm))
+        Command.new(
+          name: name,
+          arg: parse_index(value),
+          confirm: parse_confirm(value, confirm),
+          target_name: target_name,
+          target_query: target_query
+        )
+      end
+
+      def parse_target_args(rest)
+        return [nil, nil] if rest.blank?
+
+        parts = begin
+          Shellwords.split(rest)
+        rescue ArgumentError
+          rest.scan(/"([^"]*)"|'([^']*)'|(\S+)/).map { |m| m.compact.first }
+        end
+        [parts[0], parts[1]]
       end
 
       # SEM clamp, de propósito, e é a exceção à regra 10 do CLAUDE.md. Clampar

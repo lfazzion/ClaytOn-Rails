@@ -126,6 +126,11 @@ class DiscordBotService
           options.integer("numero", command[:index_label], required: false) if command[:takes_index]
           options.boolean("confirmar", "Marque para confirmar a exclusao", required: false) if
             command[:takes_confirm]
+          if command[:options].present?
+            command[:options].each do |opt|
+              options.string(opt[:name].to_s, opt[:description].to_s, required: opt[:required])
+            end
+          end
         end
       end
       Rails.logger.info "[DiscordBotService] Slash commands registrados " \
@@ -151,8 +156,13 @@ class DiscordBotService
     # reconhecida e não aceita um segundo "respond" inicial.
     def handle_slash_command(event, definition)
       event.defer(ephemeral: false)
-      command = Discord::CommandRouter.build(definition[:name], event.options["numero"],
-                                             event.options["confirmar"])
+      command = Discord::CommandRouter.build(
+        definition[:name],
+        event.options["numero"],
+        event.options["confirmar"],
+        target_name: event.options["name"],
+        target_query: event.options["query"]
+      )
       scope = Discord::SessionScope.for(user_id: event.user.id.to_s,
                                         channel_id: event.channel.id.to_s)
       respond_deferred(event, run_command(command, scope))
@@ -254,6 +264,18 @@ class DiscordBotService
       when :sessions then sessions_response(scope, command.arg)
       when :resume then resume_response(scope, command.arg)
       when :delete then delete_response(scope, command.arg, command.confirm)
+      when :sentiment_target
+        return owner_error unless owner?(scope)
+
+        sentiment_target_response(command)
+      when :sentiment_run
+        return owner_error unless owner?(scope)
+
+        sentiment_run_response(command)
+      when :sentiment_status
+        return owner_error unless owner?(scope)
+
+        sentiment_status_response(command)
       end
     rescue StandardError => e
       Rails.logger.error "[DiscordBotService] Comando #{command.name} falhou: #{e.message}"
@@ -513,6 +535,91 @@ class DiscordBotService
     def chunks_for(response)
       text = response.respond_to?(:content) ? response.content : response.to_s
       text.length > MAX_DISCORD_MESSAGE ? Discordrb.split_message(text) : [text]
+    end
+
+    def owner?(scope)
+      user_id = scope&.user_id
+      return false if user_id.blank?
+
+      owner_ids = ENV["DISCORD_OWNER_IDS"].to_s.split(",").map(&:strip).reject(&:empty?)
+      return false if owner_ids.empty?
+
+      owner_ids.include?(user_id.to_s)
+    end
+
+    def owner_error
+      "⚠️ Ação restrita ao dono do bot."
+    end
+
+    def sentiment_target_response(command)
+      target_name = command.respond_to?(:target_name) ? command.target_name : nil
+      target_query = command.respond_to?(:target_query) ? command.target_query : nil
+
+      return "⚠️ Uso: `/sentiment_target name: <nome> query: <termo>` ou `!sentiment_target \"<nome>\" \"<termo>\"`" if target_name.blank? || target_query.blank?
+
+      target = SentimentTarget.find_or_initialize_by(name: target_name.to_s.strip)
+      target.assign_attributes(
+        query: target_query.to_s.strip,
+        sources: target.sources.presence || "reddit,x",
+        window_days: target.window_days || 30,
+        bucket: target.bucket.presence || "week",
+        max_phrases: target.max_phrases || 600,
+        active: true
+      )
+      if target.save
+        "🎯 Alvo **#{target.name}** salvo com sucesso! (ID: #{target.id}, query: `#{target.query}`)"
+      else
+        "⚠️ Erro ao salvar alvo: #{target.errors.full_messages.join(', ')}"
+      end
+    end
+
+    def sentiment_run_response(command)
+      target_id = command.arg
+      return "⚠️ Informe o ID do alvo: `/sentiment_run <id>` ou `!sentiment_run <id>`" if target_id.blank?
+
+      target = find_sentiment_target(target_id)
+      return "⚠️ Alvo não encontrado: #{target_id}" if target.nil?
+
+      SentimentAnalysisJob.perform_later(target.id)
+      "🚀 Análise de sentimento disparada para **#{target.name}** (ID: #{target.id})."
+    end
+
+    def sentiment_status_response(command)
+      target_id = command.arg
+      if target_id.blank?
+        targets = SentimentTarget.all.order(:id)
+        return "Nenhum alvo de sentimento cadastrado." if targets.empty?
+
+        linhas = targets.map do |t|
+          last_run = t.sentiment_runs.order(created_at: :desc).first
+          status_info = last_run ? "último run: #{last_run.status}" : "sem execuções"
+          "**##{t.id} #{t.name}** (`#{t.query}`) — #{status_info}"
+        end
+        return "**Alvos de Sentimento:**\n#{linhas.join("\n")}"
+      end
+
+      target = find_sentiment_target(target_id)
+      return "⚠️ Alvo não encontrado: #{target_id}" if target.nil?
+
+      runs = target.sentiment_runs.order(created_at: :desc).limit(5)
+      runs_text = if runs.empty?
+                    "Nenhuma execução registrada."
+                  else
+                    runs.map do |r|
+                      "• Run ##{r.id}: status **#{r.status}**, #{r.collected_count} frases coletadas, #{r.classified_count} classificadas"
+                    end.join("\n")
+                  end
+
+      "📊 **Status do Alvo: #{target.name}** (ID: #{target.id})\n" \
+      "• Query: `#{target.query}` | Fontes: #{target.sources} | Granularidade: #{target.bucket}\n" \
+      "**Últimas execuções:**\n#{runs_text}"
+    end
+
+    def find_sentiment_target(target_id)
+      str = target_id.to_s.strip
+      return SentimentTarget.find_by(id: str.to_i) if str =~ /\A\d+\z/
+
+      nil
     end
   end
 end

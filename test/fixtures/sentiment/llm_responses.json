@@ -1,0 +1,5 @@
+{
+  "valid": "{\"predictions\": [{\"id\": 0, \"sentiment\": \"positive\"}, {\"id\": 1, \"sentiment\": \"negative\"}, {\"id\": 2, \"sentiment\": \"neutral\"}]}",
+  "invalid_label": "{\"predictions\": [{\"id\": 0, \"sentiment\": \"unknown_label\"}]}",
+  "truncated_json": "{\"predictions\": [{\"id\": 0, \"sentiment\": \"pos"
+}

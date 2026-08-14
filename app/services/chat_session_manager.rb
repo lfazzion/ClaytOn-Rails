@@ -457,7 +457,8 @@ class ChatSessionManager
         UpcomingCatalogTool, PopularCatalogTool,
         UpcomingEventsTool, RecentArticlesTool,
         WebSearchTool, PlatformSearchTool,
-        TopicAddTool, TopicListTool, TopicRemoveTool
+        TopicAddTool, TopicListTool, TopicRemoveTool,
+        CreateSentimentTargetTool, RunSentimentAnalysisTool, SentimentStatusTool
       ]
       tools << PageFetchTool if ENV["ENABLE_PAGE_FETCH"].to_s.downcase == "true"
       tools

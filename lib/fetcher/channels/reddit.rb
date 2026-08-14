@@ -102,10 +102,12 @@ module Fetcher
               for (var p = n.parentElement; p; p = p.parentElement) {
                 if (p.classList && p.classList.contains("child")) depth++;
               }
+              var tEl = n.querySelector(":scope > .entry time");
               out.comments.push({
                 author: txt(n.querySelector(":scope > .entry .author")),
                 score: score(n),
                 depth: depth,
+                created_at: tEl ? tEl.getAttribute("datetime") : null,
                 body: txt(n.querySelector(":scope > .entry .usertext-body"))
               });
             }
@@ -185,6 +187,21 @@ module Fetcher
           raise PageFailed if payload.nil?
 
           build(url, payload)
+        end
+
+        # Acessor estruturado para extração de comentários da thread com timestamps.
+        def thread_comments(url:)
+          target = old_reddit_url(url)
+          return nil if target.nil?
+
+          BrowserSession.with_page(target) { |page| from_thread_comments_page(page: page, url: target) }
+        end
+
+        def from_thread_comments_page(page:, url:)
+          payload = parse(page.evaluate(EXTRACT_JS))
+          raise PageFailed if payload.nil?
+
+          build_thread_comments(url, payload)
         end
 
         # Busca dentro do próprio Reddit. Existe porque buscador web não indexa
@@ -299,6 +316,29 @@ module Fetcher
               "comment_total"   => todos.size,
               "truncated_depth" => MAX_DEPTH
             }
+          }
+        end
+
+        def build_thread_comments(url, payload)
+          todos  = Array(payload["comments"])
+          usados = todos.reject { |c| c["depth"].to_i > MAX_DEPTH }.first(MAX_COMMENTS)
+
+          comentarios = usados.map do |c|
+            {
+              "author"    => c["author"].to_s,
+              "score"     => c["score"],
+              "depth"     => c["depth"].to_i,
+              "posted_at" => c["created_at"].to_s.presence,
+              "body"      => c["body"].to_s
+            }
+          end
+
+          {
+            "url"       => url,
+            "title"     => payload["title"].to_s,
+            "subreddit" => payload["subreddit"].to_s,
+            "author"    => payload["author"].to_s,
+            "comments"  => comentarios
           }
         end
 

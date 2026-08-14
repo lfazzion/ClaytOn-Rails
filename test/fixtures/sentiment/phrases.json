@@ -1,0 +1,17 @@
+[
+  {
+    "id": 0,
+    "text": "Excelente suporte e ferramenta fantástica!",
+    "sentiment": "positive"
+  },
+  {
+    "id": 1,
+    "text": "Muito ruim, lento e cheio de erros.",
+    "sentiment": "negative"
+  },
+  {
+    "id": 2,
+    "text": "A versão 2.0 foi lançada na semana passada.",
+    "sentiment": "neutral"
+  }
+]

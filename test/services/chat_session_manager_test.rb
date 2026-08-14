@@ -9,6 +9,8 @@ require_relative "../../app/tools/discovery_tools"
 require_relative "../../app/tools/catalog_tools"
 require_relative "../../app/tools/event_tools"
 require_relative "../../app/tools/news_tools"
+require_relative "../../app/tools/profile_management_tools"
+require_relative "../../app/tools/sentiment_tools"
 require_relative "../../app/services/chat_session_manager"
 
 class ChatSessionManagerTest < ActiveSupport::TestCase
@@ -291,6 +293,14 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_includes tools, TopicAddTool
     assert_includes tools, TopicListTool
     assert_includes tools, TopicRemoveTool
+  end
+
+  test "all_tool_classes registra as tools de sentiment (CreateSentimentTargetTool, RunSentimentAnalysisTool, SentimentStatusTool)" do
+    ChatSessionManager.unstub(:all_tool_classes)
+    tools = ChatSessionManager.send(:all_tool_classes)
+    assert_includes tools, CreateSentimentTargetTool
+    assert_includes tools, RunSentimentAnalysisTool
+    assert_includes tools, SentimentStatusTool
   end
 
 
