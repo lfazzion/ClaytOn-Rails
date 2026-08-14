@@ -242,11 +242,13 @@ module Fetcher
       ttl = TtlPolicy.for(host: host, path: uri.path)
       begin
         Rails.cache.write(cache_key, payload, expires_in: ttl)
-      rescue SystemCallError, IOError => e
-        # Sol rodada 3 (13/08): só erros OPERACIONAIS do backend (disco cheio,
-        # permissão — SystemCallError cobre todos os Errno::*; IOError) são
+      rescue SystemCallError, IOError, SQLite3::Exception, ActiveJob::DeserializationError => e
+        # Sol rodada 3/4 (13/08): só erros OPERACIONAIS do backend são
         # engolidos — o fetch bem-sucedido não é descartado (contrato da issue
-        # #72). Erros de programação (NoMethodError/ArgumentError) propagam.
+        # #72). Produção usa :solid_cache_store sobre SQLite (medido 13/08):
+        # falhas de escrita sobem como SQLite3::Exception — sem isso, uma
+        # indisponibilidade operacional do cache em produção descartaria o
+        # fetch. Erros de programação (NoMethodError/ArgumentError) propagam.
         Rails.logger.warn "[Fetcher::PageFetcher] falha ao gravar cache: #{e.class}"
       end
       payload
