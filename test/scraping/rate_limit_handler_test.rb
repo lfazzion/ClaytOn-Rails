@@ -102,6 +102,14 @@ class RateLimitHandlerTest < ActiveSupport::TestCase
     assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 1.5)
   end
 
+  # Rodada 3 (sol 13/08): BigDecimal não é Float/Integer — passava sem validação.
+  test 'rate_limited? does NOT match invalid BigDecimal retry_after' do
+    error = StandardError.new('HTTP 403 Forbidden')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: BigDecimal('-1'))
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: BigDecimal('0'))
+    assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: BigDecimal('120'))
+  end
+
   test 'handle_error re-raises (not RateLimitError) for invalid retry_after' do
     error = StandardError.new('Connection refused')
     refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 'garbage')

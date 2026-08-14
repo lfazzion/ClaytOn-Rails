@@ -82,22 +82,17 @@ module ScrapingServices
       def parse_retry_after(val)
         return nil if val.nil?
 
-        if val.is_a?(Numeric)
-          # ACHADO H (P2, sol rodada 2, 13/08): `Numeric` passava SEM a
-          # validação de positividade — retry_after: 0, -1, NaN ou infinito
-          # eram truthy e classificavam como rate limit. Exigir finito e > 0
-          # também para numéricos.
-          return nil if val.is_a?(Float) && (!val.finite? || val <= 0)
-          return nil if val.is_a?(Integer) && val <= 0
-          return val
+        # Rodada 3 (sol 13/08): BigDecimal(\"-1\")/NaN/Infinity passavam pelo
+        # branch Numeric (não são Float/Integer). Normalizar via to_f cobre
+        # todos os numéricos; se to_f não for finito ou <= 0, inválido.
+        num = begin
+          val.to_f
+        rescue StandardError
+          return nil
         end
+        return nil if !num.finite? || num <= 0
 
-        num = val.to_f
-        return nil if num <= 0
-
-        num.to_i == num ? num.to_i : num
-      rescue StandardError
-        nil
+        val.is_a?(Numeric) && val.is_a?(Integer) ? val : (num.to_i == num ? num.to_i : num)
       end
     end
   end
