@@ -47,14 +47,19 @@ class AlertThrottler
     # ACHADO B (13/08): só decrementa se a chave existe e o valor é > 0,
     # evitando recriar a chave com -1 (ex.: release duplicado num retry após já
     # ter liberado).
+    # Rodada 2 (sol 13/08): o read→condição→decrement é TOCTOU (duas releases
+    # concorrentes podem ambas ler 1 e decrementar para -1, e a próxima reserve
+    # ganharia 1 extra). Rails.cache não expõe CAS; correção dentro da API:
+    # decrement atômico incondicional + clamp pós-decrement — o contador nunca
+    # fica negativo de forma persistente (o dano real apontado).
     def release(alert_type, key: nil)
       return if ENV["ALERT_THROTTLE_ENABLED"] != "true"
 
       chave = key || current_key(alert_type)
-      current = Rails.cache.read(chave)
-      return if current.nil? || current.to_i <= 0
+      return unless Rails.cache.exist?(chave)
 
-      Rails.cache.decrement(chave, 1)
+      novo = Rails.cache.decrement(chave, 1, expires_in: WINDOW)
+      Rails.cache.write(chave, 0, expires_in: WINDOW) if novo && novo < 0
     end
 
     # Decrementa a contagem do contador (usado quando o envio falha e o

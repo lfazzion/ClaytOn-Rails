@@ -121,6 +121,16 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     assert_equal 0, valor
   end
 
+  # Rodada 2 (sol 13/08): o read→condição→decrement era TOCTOU. Com decrement
+  # atômico + clamp, o contador NUNCA persiste negativo — mesmo com releases
+  # duplicados concorrentes a partir de um valor pequeno.
+  test 'release duplicado em sequência nunca deixa contador negativo' do
+    AlertThrottler.reserve('clamp_type')       # 1
+    5.times { AlertThrottler.release('clamp_type') }
+    assert_equal 0, Rails.cache.read(current_key('clamp_type')).to_i,
+                 "clamp pós-decrement deve segurar em 0, não -4"
+  end
+
   test 'reserve concorrente a partir do contador 9 aceita apenas uma reserva' do
     # Inicia no contador 9 (um abaixo do limite)
     9.times { AlertThrottler.reserve('concurrent_type') }
