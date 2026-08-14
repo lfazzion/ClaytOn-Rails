@@ -24,6 +24,20 @@ class ScrapeInstagramJobTest < ActiveJob::TestCase
     assert_equal 'scraping', ScrapeInstagramJob.new.queue_name
   end
 
+  test 'concurrency key should differ by profile' do
+    other_profile = create(:social_profile, :instagram, platform_username: 'other_user')
+    key_profile_a = ScrapeInstagramJob.new(@profile.id).concurrency_key
+    key_profile_b = ScrapeInstagramJob.new(other_profile.id).concurrency_key
+    assert_not_equal key_profile_a, key_profile_b
+  end
+
+  test 'serializes two executions for the same profile' do
+    job_a = ScrapeInstagramJob.new(@profile.id)
+    job_b = ScrapeInstagramJob.new(@profile.id)
+    assert_equal job_a.concurrency_key, job_b.concurrency_key
+    assert job_a.concurrency_limited?, "expected concurrency limiting to be enabled"
+  end
+
   test 'should update profile and create snapshot on success' do
     mock_scraper = mock('scraper')
     mock_scraper.stubs(:scrape_profile).returns(@scraper_data)
@@ -154,5 +168,63 @@ class ScrapeInstagramJobTest < ActiveJob::TestCase
     @profile.reload
     assert_equal 'rate_limited', @profile.collection_status
     assert_not_nil @profile.blocked_until
+  end
+
+  test 'should persist is_private false when scraper returns it' do
+    initially_private_profile = create(:social_profile, :instagram, platform_username: 'private_user', is_private: true)
+    scraper_data = @scraper_data.merge(is_private: false)
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::InstagramScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeInstagramJob.perform_now(initially_private_profile.id)
+
+    initially_private_profile.reload
+    assert_equal false, initially_private_profile.is_private
+  end
+
+  test 'should preserve is_private when scraper does not return the key' do
+    initially_private_profile = create(:social_profile, :instagram, platform_username: 'private_user', is_private: true)
+    scraper_data = @scraper_data.dup
+    scraper_data = scraper_data.reject { |k, _| k == :is_private }
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::InstagramScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeInstagramJob.perform_now(initially_private_profile.id)
+
+    initially_private_profile.reload
+    assert_equal true, initially_private_profile.is_private
+  end
+
+  test 'should persist is_verified false (transition from true to false)' do
+    initially_verified_profile = create(:social_profile, :instagram, platform_username: 'verified_user', verified: true)
+    scraper_data = @scraper_data.merge(is_verified: false)
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::InstagramScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeInstagramJob.perform_now(initially_verified_profile.id)
+
+    initially_verified_profile.reload
+    assert_equal false, initially_verified_profile.verified
+  end
+
+  test 'should preserve is_verified when scraper does not return the key' do
+    initially_verified_profile = create(:social_profile, :instagram, platform_username: 'verified_user', verified: true)
+    scraper_data = @scraper_data.dup
+    scraper_data = scraper_data.reject { |k, _| k == :is_verified }
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::InstagramScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeInstagramJob.perform_now(initially_verified_profile.id)
+
+    initially_verified_profile.reload
+    assert_equal true, initially_verified_profile.verified
   end
 end
