@@ -154,11 +154,13 @@ module Fetcher
           }
         end
         CookieJar.refresh_for!(host, atuais, expires_at: 7.days.from_now)
-      # Só erros operacionais esperados da serialização/persistência são
-      # engolidos e logados — não errar de programação. O `rescue StandardError`
-      # original engolia NoMethodError/NameError (o bug desta PR, ACHADO B da
-      # revisão do sol, 13/08); agora esses propagam e quebram o teste/ciclo.
-      rescue JSON::GeneratorError, ArgumentError => e
+      # Só erros operacionais esperados da serialização são engolidos e
+      # logados — não erros de programação. O `rescue StandardError` original
+      # engolia NoMethodError/NameError (o bug desta PR, ACHADO B da revisão
+      # do sol, 13/08); o `ArgumentError` foi removido na rodada 2 porque o
+      # bug original desta PR ERA um ArgumentError de assinatura (refresh_for!
+      # sem `expires_at:`) — mantê-lo no rescue recriaria o mascaramento.
+      rescue JSON::GeneratorError => e
         Rails.logger.warn "[Fetcher::BrowserSession] rotação não persistida: #{e.class}: #{e.message}"
       end
 

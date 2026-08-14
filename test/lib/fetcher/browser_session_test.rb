@@ -311,6 +311,19 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     end
   end
 
+  # Rodada 2 (sol 13/08): o bug original desta PR ERA um ArgumentError de
+  # assinatura (refresh_for! sem expires_at:) — mantê-lo no rescue recriaria
+  # o mascaramento. ArgumentError deve propagar como erro de programação.
+  test "persist_rotation deixa ArgumentError (assinatura/contrato) propagar em vez de engolir" do
+    sid = Struct.new(:name, :value, :domain, :path).new("SID", "abc", ".youtube.com", "/")
+    @page.cookies.stubs(:all).returns({ "SID" => sid })
+    Fetcher::CookieJar.stubs(:refresh_for!).raises(ArgumentError, "wrong number of arguments")
+
+    assert_raises(ArgumentError) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+  end
+
   # Regressão do ACHADO B: erro operacional esperado (JSON::GeneratorError da
   # serialização) continua engolido e logado, para não derrubar o fetch da página.
   test "persist_rotation ainda engole e loga erro operacional esperado (JSON::GeneratorError)" do

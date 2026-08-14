@@ -196,6 +196,18 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
     assert_kind_of Fetcher::Channels::Error, erro
   end
 
+  # Rodada 2 (sol 13/08): Hash NÃO vazio mas sem campos estruturais
+  # (title/user.login) também deve ser rejeitado — senão issue fantasma.
+  test "12. API responde 200 com Hash sem title/user é rejeitado" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 200, body: JSON.generate({ "message" => "erro" }), headers: { "Content-Type" => "application/json" })
+
+    erro = assert_raises(Fetcher::Channels::Github::ApiError) do
+      Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+    end
+    assert_kind_of Fetcher::Channels::Error, erro
+  end
+
   private
 
   def capture_log
