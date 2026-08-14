@@ -71,6 +71,14 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     class Page:
         FrameNavigated = FakeFrameNavigated
 
+    class PageEnableCommand:
+        pass
+
+    def _page_enable():
+        return PageEnableCommand()
+
+    Page.enable = staticmethod(_page_enable)
+
     class cdp:
         network = Network
         page = Page

@@ -150,6 +150,12 @@ async def fetch(url, proxy=None):
         await page.send(uc.cdp.network.enable())
         page.add_handler(uc.cdp.network.ResponseReceived, on_response_received)
 
+        # Rodada 3 (sol 13/08): Page.enable habilita as notificações do domínio
+        # Page — sem ele, o Page.frameNavigated nunca é entregue e
+        # main_frame_id fica None, desativando o filtro de subframe (o IP de um
+        # iframe privado poderia ser atribuído ao documento principal).
+        await page.send(uc.cdp.page.enable())
+
         # Captura o frame_id da navegacao principal para que o listener so
         # aceite documentos desse frame (ignora subframes/iframes — Achado B).
         main_frame_id = None
