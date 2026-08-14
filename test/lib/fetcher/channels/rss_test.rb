@@ -67,6 +67,24 @@ class Fetcher::Channels::RssTest < ActiveSupport::TestCase
     </feed>
   XML
 
+  RSS_FEEDBURNER = <<~XML
+    <?xml version="1.0" encoding="utf-8"?>
+    <rss
+      version="2.0"
+      xmlns:feedburner="http://rssnamespace.org/feedburner/ext/1.0">
+      <channel>
+        <title>Blog RSS via FeedBurner</title>
+        <item>
+          <title>Post original</title>
+          <link>http://feeds.feedburner.com/~r/blog/~3/xyz/post</link>
+          <feedburner:origLink>https://blog.test/post-original</feedburner:origLink>
+          <pubDate>Fri, 14 Aug 2026 10:00:00 GMT</pubDate>
+          <description>Resumo FeedBurner.</description>
+        </item>
+      </channel>
+    </rss>
+  XML
+
   RDF = <<~XML
     <?xml version="1.0" encoding="utf-8"?>
     <rdf:RDF
@@ -151,6 +169,20 @@ class Fetcher::Channels::RssTest < ActiveSupport::TestCase
     assert_includes result[:content], "## Post original"
     assert_includes result[:content], "https://blog.test/post-original"
     refute_includes result[:content], "http://feeds.feedburner.com/~r/blog/~3/abc123/post"
+  end
+
+  test "preserva RSS FeedBurner, o link original e a classificacao rss" do
+    result = Fetcher::Channels::Rss.call(
+      url: "https://feeds.feedburner.com/blog-rss",
+      response: response(RSS_FEEDBURNER)
+    )
+
+    assert_equal "Blog RSS via FeedBurner", result[:title]
+    assert_equal "rss", result[:metadata]["format"]
+    assert_equal 1, result[:metadata]["item_count"]
+    assert_includes result[:content], "## Post original"
+    assert_includes result[:content], "https://blog.test/post-original"
+    refute_includes result[:content], "http://feeds.feedburner.com/~r/blog/~3/xyz/post"
   end
 
   test "extrai RDF como RSS" do
