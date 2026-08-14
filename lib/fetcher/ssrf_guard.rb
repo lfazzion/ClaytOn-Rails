@@ -94,10 +94,10 @@ module Fetcher
         if ip.ipv4?
           IPV4_BLOCKED.any? { |range| range.include?(ip) }
         else
-          # IPv4-mapped IPv6: unwrap e checa contra IPv4 blocklist também
-          if ipv4_mapped?(ip)
-            return true if IPV4_BLOCKED.any? { |range| range.include?(unwrap_ipv4_mapped(ip)) }
-          end
+          # IPv4-mapped IPv6: unwrap e retorna diretamente o resultado da
+          # checagem contra IPV4_BLOCKED. Não cai no IPV6_BLOCKED por causa de
+          # ::ffff:0:0/96 (defesa redundante mantida para demais fluxos IPv6).
+          return IPV4_BLOCKED.any? { |range| range.include?(unwrap_ipv4_mapped(ip)) } if ipv4_mapped?(ip)
           IPV6_BLOCKED.any? { |range| range.include?(ip) }
         end
       rescue IPAddr::InvalidAddressError
