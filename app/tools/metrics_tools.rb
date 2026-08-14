@@ -39,6 +39,9 @@ class SnapshotTrendTool < ToolBase
   param :days, type: :integer, desc: 'Número de dias para buscar (padrão 30)', required: false
 
   def run(username:, platform:, days: 30)
+    days = days.to_i
+    return error("Período inválido: days deve ser maior que 0") if days < 1
+
     profile = SocialProfile.where(platform: platform).where('LOWER(platform_username) = LOWER(?)', username).first
     return error("Perfil não encontrado: #{username} em #{platform}") unless profile
 
@@ -69,6 +72,7 @@ class ProfileRankingTool < ToolBase
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 10)', required: false
 
   def run(metric:, platform: nil, limit: 10)
+    limit = 10 if limit.blank?
     limit = clamp(limit, 1, 50)
 
     case metric
@@ -90,7 +94,7 @@ class ProfileRankingTool < ToolBase
                        SELECT (COALESCE(p.likes_count, 0) + COALESCE(p.comments_count, 0) + COALESCE(p.shares_count, 0)) AS total_engagement
                        FROM social_posts p
                        WHERE p.social_profile_id = social_profiles.id
-                       ORDER BY p.id DESC
+                       ORDER BY COALESCE(p.posted_at, p.created_at) DESC, p.id DESC
                        LIMIT 10
                      ) sub
                    ) / social_profiles.followers_count * 100 AS computed_engagement_rate

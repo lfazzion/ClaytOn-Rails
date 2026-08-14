@@ -49,6 +49,11 @@ module Fetcher
     ].freeze
 
     class FetchError < StandardError; end
+    class PythonFetchError < FetchError
+      def initialize(original_class)
+        super("fallback Python falhou: #{original_class}")
+      end
+    end
     class RateLimited < FetchError
       def initialize(host)
         super("rate limit local: host #{host} atingiu #{RATE_LIMIT_MAX} fetches/min")
@@ -235,7 +240,17 @@ module Fetcher
       payload[:article_html] = raw[:readability_html].to_s if include_html
 
       ttl = TtlPolicy.for(host: host, path: uri.path)
-      Rails.cache.write(cache_key, payload, expires_in: ttl)
+      begin
+        Rails.cache.write(cache_key, payload, expires_in: ttl)
+      rescue SystemCallError, IOError, SQLite3::Exception, ActiveJob::DeserializationError => e
+        # Sol rodada 3/4 (13/08): só erros OPERACIONAIS do backend são
+        # engolidos — o fetch bem-sucedido não é descartado (contrato da issue
+        # #72). Produção usa :solid_cache_store sobre SQLite (medido 13/08):
+        # falhas de escrita sobem como SQLite3::Exception — sem isso, uma
+        # indisponibilidade operacional do cache em produção descartaria o
+        # fetch. Erros de programação (NoMethodError/ArgumentError) propagam.
+        Rails.logger.warn "[Fetcher::PageFetcher] falha ao gravar cache: #{e.class}"
+      end
       payload
     end
 
@@ -331,6 +346,8 @@ module Fetcher
         html: "",
         status: 200
       }
+    rescue Timeout::Error, ScrapingServices::RateLimitError => e
+      raise PythonFetchError.new(e.class.name)
     end
 
     # Uma retentativa com browser novo quando a sessão morre no meio do caminho —

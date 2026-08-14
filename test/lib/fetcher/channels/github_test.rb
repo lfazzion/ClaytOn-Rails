@@ -98,6 +98,16 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
     assert_kind_of Fetcher::Channels::Error, err
   end
 
+  test "5b. API responde HTTP 200 com JSON não-Hash (Array) levanta ApiError herdando de Channels::Error" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 200, body: JSON.generate([]), headers: { "Content-Type" => "application/json" })
+
+    err = assert_raises(Fetcher::Channels::Github::ApiError) do
+      Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+    end
+    assert_kind_of Fetcher::Channels::Error, err
+  end
+
   test "6. comentários com JSON inválido levantam ApiError (não resumo falso)" do
     stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
       .to_return(status: 200, body: JSON.generate({ "title" => "Issue", "state" => "open",
@@ -171,6 +181,31 @@ class Fetcher::Channels::GithubTest < ActiveSupport::TestCase
       Fetcher::Channels::Github.search(query: "rails")
     end
     assert_kind_of Fetcher::Channels::Error, err
+  end
+
+  # ACHADO D (13/08, P2): a API pode responder 200 com um Hash vazio ({}), que
+  # passava no `is_a?(Hash)` e gerava um resultado com título vazio. Campos
+  # estruturais indispensáveis (ex: title) devem ser validados.
+  test "11. API responde 200 com Hash vazio ({}) é rejeitado como issue inválida" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 200, body: JSON.generate({}), headers: { "Content-Type" => "application/json" })
+
+    erro = assert_raises(Fetcher::Channels::Github::ApiError) do
+      Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+    end
+    assert_kind_of Fetcher::Channels::Error, erro
+  end
+
+  # Rodada 2 (sol 13/08): Hash NÃO vazio mas sem campos estruturais
+  # (title/user.login) também deve ser rejeitado — senão issue fantasma.
+  test "12. API responde 200 com Hash sem title/user é rejeitado" do
+    stub_request(:get, "https://api.github.com/repos/rails/rails/issues/100")
+      .to_return(status: 200, body: JSON.generate({ "message" => "erro" }), headers: { "Content-Type" => "application/json" })
+
+    erro = assert_raises(Fetcher::Channels::Github::ApiError) do
+      Fetcher::Channels::Github.call(url: "https://github.com/rails/rails/issues/100")
+    end
+    assert_kind_of Fetcher::Channels::Error, erro
   end
 
   private

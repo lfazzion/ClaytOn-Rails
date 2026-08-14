@@ -80,7 +80,18 @@ module Fetcher
           raise ApiError, "API do GitHub respondeu HTTP #{http_resp.status}" unless http_resp.success?
 
           payload = parse_json(http_resp.body)
-          raise ApiError, "resposta inválida da API do GitHub" if payload.nil?
+          raise ApiError, "resposta inválida da API do GitHub" unless payload.is_a?(Hash)
+          # ACHADO D (revisão do sol, 13/08): a API pode responder 200 com um
+          # Hash vazio ({}). `is_a?(Hash)` sozinho o aceitava e gerava um
+          # resultado com título/autor vazios. Rejeitar o caso vazio força o
+          # `rescue`/tratamento correto em vez de um issue fantasma.
+          raise ApiError, "resposta da API do GitHub veio sem campos (Hash vazio)" if payload.empty?
+          # Rodada 2 (sol 13/08): um Hash NÃO vazio mas sem os campos
+          # estruturais usados no build (`title`/`user`) produziria issue com
+          # título/autor vazios. Validar os campos obrigatórios explicitamente.
+          if payload["title"].to_s.empty? || !payload["user"].is_a?(Hash) || payload["user"]["login"].to_s.empty?
+            raise ApiError, "resposta da API do GitHub sem campos estruturais (title/user)"
+          end
 
           comments = fetch_comments(owner, repo, number, headers) if payload["comments"].to_i.positive?
           comments ||= []

@@ -112,10 +112,25 @@ class RefreshSessionCookiesJobTest < ActiveSupport::TestCase
 
   test "falha de rede nao derruba o job" do
     carregar!
-    Open3.stubs(:capture3).raises(StandardError, "sem rede")
+    Open3.stubs(:capture3).raises(Timeout::Error)
+    Rails.logger.stubs(:error)
 
     assert_nothing_raised { RefreshSessionCookiesJob.perform_now }
     assert_equal 2, Fetcher::CookieJar.for("youtube.com").size
+  end
+
+  test "erro inesperado e registrado e relançado" do
+    carregar!
+    Open3.stubs(:capture3).raises(NoMethodError, "undefined method")
+    # expects + matcher de bloco no logger QUEBRA no Mocha 3.1.0 quando o
+    # ActiveJob LogSubscriber também chama error (matcher recebe nil →
+    # include? for nil). Usa stubs + captura + assert posterior.
+    linhas = []
+    Rails.logger.stubs(:error).with { |m| linhas << m.to_s; true }
+
+    assert_raises(NoMethodError) { RefreshSessionCookiesJob.perform_now }
+    assert linhas.any? { |l| l.include?("NoMethodError") },
+           "erro inesperado deve ser registrado no log: #{linhas.inspect}"
   end
 
   # O portao de leitura do jar e `expires_at > Time.current`; o job estende o

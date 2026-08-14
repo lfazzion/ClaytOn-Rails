@@ -255,4 +255,33 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
 
     assert_equal [], Fetcher::Channels::Youtube.search(query: "   ")
   end
+
+  test "exit não-zero com sessão válida levanta YtdlpError, nunca NoTranscript" do
+    ok = Struct.new(:success?, :exitstatus).new(false, 1)
+    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
+    Open3.stubs(:capture3).returns(["{}", "", ok])
+
+    erro = assert_raises(Fetcher::Channels::Youtube::YtdlpError) do
+      Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
+    end
+    assert_match(/exit 1/, erro.message)
+    assert_kind_of Fetcher::Channels::Error, erro
+    refute_kind_of Fetcher::Channels::Youtube::NoTranscript, erro
+  end
+
+  test "exit não-zero com stderr de sessão rejeitada preserva CookieJar::Expired" do
+    ok = Struct.new(:success?, :exitstatus).new(false, 1)
+    aviso = "ERROR: Sign in to confirm you are not a bot."
+    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
+    Open3.stubs(:capture3).returns(["{}", aviso, ok])
+
+    erro = assert_raises(Fetcher::CookieJar::Expired) do
+      Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
+    end
+    assert_equal "youtube.com", erro.domain
+  end
+
+  test "YtdlpError é subclasse de Channels::Error" do
+    assert Fetcher::Channels::Youtube::YtdlpError < Fetcher::Channels::Error
+  end
 end

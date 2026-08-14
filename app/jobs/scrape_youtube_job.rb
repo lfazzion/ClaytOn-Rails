@@ -7,7 +7,29 @@ require Rails.root.join("lib/fetcher/channels/youtube")
 class ScrapeYoutubeJob < ApplicationJob
   queue_as :scraping
 
+  limits_concurrency key: ->(profile_id, _options = {}) { "scrape_youtube/#{profile_id}" }, to: 1
+
   SNAPSHOT_DEDUP_WINDOW = 20.hours
+
+  # ACHADO D + unificação pós-revisão (13/08): só estas exceções (erros de
+  # rede/timeout/parser do scraper) são recuperáveis via fallback sem cookies.
+  # Bugs de programação (NoMethodError, ArgumentError, quebra de contrato) NÃO
+  # entram aqui e propagam para o handler externo do job.
+  # `const_get` com rescue evita NameError no boot caso alguma classe de
+  # stdlib (ex.: OpenURI) não esteja carregada no ambiente.
+  # União das listas das PRs #135 e #140 (COLLECT_WITH_COOKIES_FALLBACK_ERRORS
+  # ∪ RECOVERABLE_SCRAPER_ERRORS) — mesma semântica, cobertura completa.
+  RECOVERABLE_SCRAPER_ERRORS = %w[
+    Timeout::Error
+    Net::ReadTimeout Net::OpenTimeout Net::HTTPError
+    SocketError
+    OpenURI::HTTPError URI::InvalidURIError
+    Faraday::Error
+    JSON::ParserError
+    Errno::ECONNRESET Errno::ECONNREFUSED Errno::ETIMEDOUT
+    OpenSSL::SSL::SSLError
+    ScrapingServices::RateLimitError
+  ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
 
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
@@ -21,7 +43,16 @@ class ScrapeYoutubeJob < ApplicationJob
     channel_url = build_channel_url(profile)
 
     metadata = ScrapingServices::YoutubeScraperService.extract_channel_metadata(channel_url, proxy: proxy)
-    return if metadata.nil?
+    if metadata.nil?
+      profile.update!(collection_status: "degraded")
+      ScrapingFailureAlertJob.perform_later(
+        "youtube",
+        profile.id,
+        "extract_channel_metadata returned nil",
+        "metadata_failure"
+      )
+      return
+    end
 
     limit = options.fetch(:limit, 30)
     videos, fallback_used = extract_videos_with_cookies(channel_url, limit: limit, proxy: proxy)
@@ -82,6 +113,20 @@ class ScrapeYoutubeJob < ApplicationJob
     end
   rescue Fetcher::CookieJar::Expired
     Rails.logger.warn "[ScrapeYoutubeJob] Sessão de youtube.com ausente ou expirada. Coletando sem cookies."
+    ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+      channel_url,
+      limit: limit,
+      proxy: proxy,
+      cookies_path: nil
+    )
+  rescue ScrapingServices::RateLimitError
+    raise
+  rescue *RECOVERABLE_SCRAPER_ERRORS => e
+    # ACHADO D: só erros RECUPERÁVEIS conhecidos (rede/timeout/parser do
+    # scraper) justificam o fallback sem cookies. Qualquer outra exceção —
+    # inclusive NoMethodError ou quebra de contrato (bug de programação) —
+    # DEVE propagar, e não virar um "sucesso" silencioso sem cookies.
+    Rails.logger.warn "[ScrapeYoutubeJob] Erro recuperável coletando vídeos com cookies (#{e.class}): #{e.message}. Coletando sem cookies."
     ScrapingServices::YoutubeScraperService.extract_videos_detailed(
       channel_url,
       limit: limit,
@@ -163,13 +208,21 @@ class ScrapeYoutubeJob < ApplicationJob
   end
 
   def create_snapshot(profile, metadata)
-
-    ProfileSnapshot.find_or_create_by(
+    recorded_at = Time.current.beginning_of_hour
+    snapshot = ProfileSnapshot.find_or_initialize_by(
       social_profile: profile,
-      recorded_at: Time.current.beginning_of_hour
-    ) do |snapshot|
-      snapshot.followers_count = metadata[:subscriber_count]
-      snapshot.posts_count = metadata[:video_count]
-    end
+      recorded_at: recorded_at
+    )
+    snapshot.followers_count = metadata[:subscriber_count]
+    snapshot.posts_count = metadata[:video_count]
+    snapshot.save!
+  rescue ActiveRecord::RecordNotUnique
+    snapshot = ProfileSnapshot.find_by!(
+      social_profile: profile,
+      recorded_at: recorded_at
+    )
+    snapshot.followers_count = metadata[:subscriber_count]
+    snapshot.posts_count = metadata[:video_count]
+    snapshot.save! if snapshot.changed?
   end
 end

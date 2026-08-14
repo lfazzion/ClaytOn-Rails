@@ -120,6 +120,15 @@ class Fetcher::SsrfGuardTest < ActiveSupport::TestCase
     end
   end
 
+  test "IPv4-mapped IPv6 ::ffff:93.184.216.34 (IPv4 público) é permitido via ip_blocked?" do
+    assert_equal false, Fetcher::SsrfGuard.ip_blocked?("::ffff:93.184.216.34")
+  end
+
+  test "IPv4-mapped IPv6 ::ffff:93.184.216.34 (IPv4 público) é permitido via validação de literal URL" do
+    uri = Fetcher::SsrfGuard.validate!("http://[::ffff:93.184.216.34]/")
+    assert_equal "[::ffff:93.184.216.34]", uri.host
+  end
+
   test "hostname que resolve para IP privado é bloqueado" do
     stub_resolve("interno.empresa.local", ["10.0.0.1"])
     error = assert_raises(Fetcher::SsrfGuard::Blocked) do

@@ -23,6 +23,20 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     assert_equal 'scraping', ScrapeTwitterJob.new.queue_name
   end
 
+  test 'concurrency key should differ by profile' do
+    other_profile = create(:social_profile, :twitter, platform_username: 'other_user')
+    key_profile_a = ScrapeTwitterJob.new(@profile.id).concurrency_key
+    key_profile_b = ScrapeTwitterJob.new(other_profile.id).concurrency_key
+    assert_not_equal key_profile_a, key_profile_b
+  end
+
+  test 'serializes two executions for the same profile' do
+    job_a = ScrapeTwitterJob.new(@profile.id)
+    job_b = ScrapeTwitterJob.new(@profile.id)
+    assert_equal job_a.concurrency_key, job_b.concurrency_key
+    assert job_a.concurrency_limited?, "expected concurrency limiting to be enabled"
+  end
+
   test 'should update profile and create snapshot on success' do
     mock_scraper = mock('scraper')
     mock_scraper.stubs(:scrape_profile).returns(@scraper_data)
@@ -186,5 +200,34 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     @profile.reload
     assert_equal 'degraded', @profile.collection_status
     assert_nil @profile.blocked_until
+  end
+
+  test 'should persist is_verified false (transition from true to false)' do
+    initially_verified_profile = create(:social_profile, :twitter, platform_username: 'verified_user', verified: true)
+    scraper_data = @scraper_data.merge(is_verified: false)
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::TwitterScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeTwitterJob.perform_now(initially_verified_profile.id)
+
+    initially_verified_profile.reload
+    assert_equal false, initially_verified_profile.verified
+  end
+
+  test 'should preserve is_verified when scraper does not return the key' do
+    initially_verified_profile = create(:social_profile, :twitter, platform_username: 'verified_user', verified: true)
+    scraper_data = @scraper_data.dup
+    scraper_data = scraper_data.reject { |k, _| k == :is_verified }
+    mock_scraper = mock('scraper')
+    mock_scraper.stubs(:scrape_profile).returns(scraper_data)
+    mock_scraper.stubs(:close)
+    ScrapingServices::TwitterScraper.stubs(:new).returns(mock_scraper)
+
+    ScrapeTwitterJob.perform_now(initially_verified_profile.id)
+
+    initially_verified_profile.reload
+    assert_equal true, initially_verified_profile.verified
   end
 end
