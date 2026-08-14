@@ -218,8 +218,26 @@ module ScrapingServices
         [videos_limit, limit - videos_limit]
       end
 
+      # Executa o yt-dlp e CAPTURA o stderr (3º retorno do Open3.capture3).
+      #
+      # Incidente 14/08: o caminho anterior descartava o stderr
+      # (`output, _, status = Open3.capture3(*command)`), então quando o
+      # ScrapeYoutubeJob caía no fallback flat-playlist por falha do caminho
+      # detalhado, o ScrapingFailureAlertJob("partial_collection") disparava sem
+      # NENHUMA pista do motivo (extrator JS/deno, bot-check, rate-limit, DOM
+      # mudou). O diagnóstico depende exatamente desse stderr — ele é registrado
+      # em falha (e em warning quando o comando termina ok mas fala algo, ex.:
+      # "cookies are no longer valid" vem como WARNING mesmo com exit 0).
       def execute_yt_dlp(command, timeout: 600)
-        Timeout.timeout(timeout) { Open3.capture3(*command) }
+        output, stderr, status = Timeout.timeout(timeout) { Open3.capture3(*command) }
+
+        if status.success?
+          Rails.logger.warn "[YoutubeScraperService] yt-dlp (ok): #{stderr.strip}" if stderr.strip.present?
+        else
+          Rails.logger.error "[YoutubeScraperService] yt-dlp falhou (exit #{status.exitstatus}): #{stderr.strip}"
+        end
+
+        [output, stderr, status]
       end
 
       def parse_metadata(data)
