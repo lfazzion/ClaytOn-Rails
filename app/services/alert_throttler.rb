@@ -44,22 +44,40 @@ class AlertThrottler
 
     # Libera uma reserva já aceita (usado quando o envio falha). Recebe a chave
     # devolvida por reserve; sem chave, recalcula (compatibilidade).
-    # ACHADO B (13/08): só decrementa se a chave existe e o valor é > 0,
-    # evitando recriar a chave com -1 (ex.: release duplicado num retry após já
-    # ter liberado).
-    # Rodada 2 (sol 13/08): o read→condição→decrement é TOCTOU (duas releases
-    # concorrentes podem ambas ler 1 e decrementar para -1, e a próxima reserve
-    # ganharia 1 extra). Rails.cache não expõe CAS; correção dentro da API:
-    # decrement atômico incondicional + clamp pós-decrement — o contador nunca
-    # fica negativo de forma persistente (o dano real apontado).
+    # ACHADO B (13/08) + rodadas 2-4 (sol): o read→condição→decrement era
+    # TOCTOU. Rodada 4: aplicado o padrão aceito nos outros locks —
+    # SolidCache::Entry.lock_and_write (FOR UPDATE) com retorno nil quando o
+    # decremento acontece (se a chave não existe, bloco retorna nil e nada é
+    # gravado); fallback compare-delete para FileStore (testes). Contador
+    # nunca persiste negativo.
     def release(alert_type, key: nil)
       return if ENV["ALERT_THROTTLE_ENABLED"] != "true"
 
       chave = key || current_key(alert_type)
-      return unless Rails.cache.exist?(chave)
 
-      novo = Rails.cache.decrement(chave, 1, expires_in: WINDOW)
-      Rails.cache.write(chave, 0, expires_in: WINDOW) if novo && novo < 0
+      if Rails.cache.is_a?(SolidCache::Store)
+        normalized = Rails.cache.send(:normalize_key, chave, nil)
+        SolidCache::Entry.lock_and_write(normalized) do |raw|
+          next nil unless raw
+
+          valor = Rails.cache.send(:deserialize_entry, raw)&.value
+          next nil unless valor.is_a?(Numeric) && valor > 0
+
+          novo = valor - 1
+          novo = 0 if novo < 0
+
+          Rails.cache.send(
+            :serialize_entry,
+            ActiveSupport::Cache::Entry.new(novo, expires_in: WINDOW)
+          )
+        end
+      else
+        Rails.cache.delete(chave) if Rails.cache.read(chave).to_i <= 0
+        return unless Rails.cache.exist?(chave)
+
+        novo = Rails.cache.decrement(chave, 1, expires_in: WINDOW)
+        Rails.cache.write(chave, 0, expires_in: WINDOW) if novo && novo < 0
+      end
     end
 
     # Decrementa a contagem do contador (usado quando o envio falha e o
