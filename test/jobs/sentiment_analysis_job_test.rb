@@ -4,6 +4,7 @@ require "test_helper"
 
 class SentimentAnalysisJobTest < ActiveJob::TestCase
   setup do
+    Rails.cache.clear rescue nil
     @target = SentimentTarget.create!(name: "Cleitin Job Test", query: "cleitin")
   end
 
@@ -367,5 +368,123 @@ class SentimentAnalysisJobTest < ActiveJob::TestCase
     # Segundo executor rodando o mesmo run não deve enviar nenhum chunk novamente
     job2 = SentimentAnalysisJob.new
     job2.perform(@target.id, run.id)
+  end
+
+  test "executores concorrentes sobrepostos nao marcam run entregue durante envio em andamento e enviam chunk uma unica vez" do
+    run = @target.sentiment_runs.create!(
+      status: "aggregating",
+      started_at: Time.current,
+      frozen_spec: { "target_id" => @target.id }
+    )
+
+    Research::Sentiment::Collector.stubs(:collect)
+    Research::Sentiment::Classifier.stubs(:classify)
+    Research::Sentiment::Aggregator.stubs(:aggregate).returns({
+      spec: { name: "Cleitin Job Test" },
+      period_balance: { balance: 0.1 },
+      collected_count: 10,
+      rejected_count: 0,
+      unparsed_count: 0,
+      sem_data_count: 0
+    })
+    Sentiment::MessageBuilder.stubs(:build).returns("Mensagem concorrente sobreposta")
+    DiscordMessageChunker.stubs(:chunk).returns(["chunk_0"])
+    SentimentAnalysisJob.any_instance.stubs(:ensure_digest_channel).returns("channel_123")
+
+    q_t1_entered = Queue.new
+    q_t1_unblock = Queue.new
+    send_mutex = Mutex.new
+    send_calls = []
+
+    DiscordApiClient.stubs(:send_message).with do |channel_id, chunk|
+      send_mutex.synchronize { send_calls << [channel_id, chunk] }
+      q_t1_entered.push(true)
+      q_t1_unblock.pop # Bloqueia thread1 simulando I/O lento
+      true
+    end
+
+    t1 = nil
+    t2 = nil
+    Timeout.timeout(5) do
+      t1 = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          SentimentAnalysisJob.new.perform(@target.id, run.id)
+        end
+      end
+
+      # Aguarda Thread 1 entrar no send_message (reservou chunk, mas ainda não concluiu envio)
+      q_t1_entered.pop
+
+      # Enquanto Thread 1 está bloqueada no envio, Thread 2 executa concorrentemente
+      t2 = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          SentimentAnalysisJob.new.perform(@target.id, run.id)
+        end
+      end
+
+      # Breve pausa para dar oportunidade de avanço a Thread 2
+      sleep 0.1
+
+      # Asserção crítica: enquanto Thread 1 não confirmou envio, nenhum executor pode marcar o run entregue
+      assert_nil run.reload.delivered_at, "run nao pode ser marcado entregue enquanto o envio do chunk esta em andamento"
+
+      # Desbloqueia Thread 1 para concluir
+      q_t1_unblock.push(true)
+
+      t1.join
+      t2.join
+
+      assert_equal 1, send_calls.size, "chunk deve ser enviado exatamente uma vez no total"
+      assert_equal "completed", run.reload.status
+      assert_not_nil run.delivered_at
+    end
+  ensure
+    q_t1_unblock.push(true) rescue nil
+    t1&.kill
+    t2&.kill
+  end
+
+  test "acquire_delivery_lock e release_delivery_lock gerenciam posse do lock via token" do
+    job = SentimentAnalysisJob.new
+    token1 = "token_owner"
+    token2 = "token_competitor"
+
+    assert job.send(:acquire_delivery_lock, 9999, token1)
+    refute job.send(:acquire_delivery_lock, 9999, token2)
+
+    # Release com token divergente não libera
+    job.send(:release_delivery_lock, 9999, "token_wrong")
+    refute job.send(:acquire_delivery_lock, 9999, token2)
+
+    # Release com token legítimo libera
+    job.send(:release_delivery_lock, 9999, token1)
+    assert job.send(:acquire_delivery_lock, 9999, token2)
+
+    job.send(:release_delivery_lock, 9999, token2)
+  end
+
+  # --- Validações de target e run_id ---
+
+  test "perform com run_id inexistente lanca erro e nao cria novo run" do
+    assert_no_difference "SentimentRun.count" do
+      assert_raises(ArgumentError) do
+        SentimentAnalysisJob.new.perform(@target.id, 999_999)
+      end
+    end
+  end
+
+  test "perform com run_id pertencente a outro alvo lanca erro e nao processa o run alheio" do
+    other_target = SentimentTarget.create!(name: "Outro Alvo Job", query: "outro")
+    other_run = other_target.sentiment_runs.create!(
+      status: "pending",
+      started_at: Time.current,
+      frozen_spec: { "target_id" => other_target.id }
+    )
+
+    Research::Sentiment::Collector.expects(:collect).never
+
+    assert_raises(ArgumentError) do
+      SentimentAnalysisJob.new.perform(@target.id, other_run.id)
+    end
   end
 end

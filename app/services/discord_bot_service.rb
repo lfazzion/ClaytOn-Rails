@@ -574,19 +574,19 @@ class DiscordBotService
     end
 
     def sentiment_run_response(command)
-      id_or_name = command.arg
-      return "⚠️ Informe o ID ou nome do alvo: `/sentiment_run <id>` ou `!sentiment_run <id>`" if id_or_name.blank?
+      target_id = command.arg
+      return "⚠️ Informe o ID do alvo: `/sentiment_run <id>` ou `!sentiment_run <id>`" if target_id.blank?
 
-      target = find_sentiment_target(id_or_name)
-      return "⚠️ Alvo não encontrado: #{id_or_name}" if target.nil?
+      target = find_sentiment_target(target_id)
+      return "⚠️ Alvo não encontrado: #{target_id}" if target.nil?
 
       SentimentAnalysisJob.perform_later(target.id)
       "🚀 Análise de sentimento disparada para **#{target.name}** (ID: #{target.id})."
     end
 
     def sentiment_status_response(command)
-      id_or_name = command.arg
-      if id_or_name.blank?
+      target_id = command.arg
+      if target_id.blank?
         targets = SentimentTarget.all.order(:id)
         return "Nenhum alvo de sentimento cadastrado." if targets.empty?
 
@@ -598,8 +598,8 @@ class DiscordBotService
         return "**Alvos de Sentimento:**\n#{linhas.join("\n")}"
       end
 
-      target = find_sentiment_target(id_or_name)
-      return "⚠️ Alvo não encontrado: #{id_or_name}" if target.nil?
+      target = find_sentiment_target(target_id)
+      return "⚠️ Alvo não encontrado: #{target_id}" if target.nil?
 
       runs = target.sentiment_runs.order(created_at: :desc).limit(5)
       runs_text = if runs.empty?
@@ -615,14 +615,11 @@ class DiscordBotService
       "**Últimas execuções:**\n#{runs_text}"
     end
 
-    def find_sentiment_target(id_or_name)
-      str = id_or_name.to_s.strip
-      if str =~ /\A\d+\z/
-        t = SentimentTarget.find_by(id: str.to_i)
-        return t if t
-      end
+    def find_sentiment_target(target_id)
+      str = target_id.to_s.strip
+      return SentimentTarget.find_by(id: str.to_i) if str =~ /\A\d+\z/
 
-      SentimentTarget.find_by("LOWER(name) = ?", str.downcase)
+      nil
     end
   end
 end

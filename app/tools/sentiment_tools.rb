@@ -76,6 +76,13 @@ class RunSentimentAnalysisTool < ManagementToolBase
     return error("Alvo não encontrado: #{target_identifier}") if target.nil?
 
     r_id = run_id.presence&.to_i
+    if r_id
+      found_run = SentimentRun.find_by(id: r_id)
+      return error("Run não encontrado: #{r_id}") if found_run.nil?
+      if found_run.target_id != target.id
+        return error("Run ##{r_id} pertence ao alvo ##{found_run.target_id}, não ao alvo ##{target.id} (#{target.name})")
+      end
+    end
 
     if async
       if r_id

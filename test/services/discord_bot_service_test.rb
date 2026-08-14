@@ -217,6 +217,36 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     ENV["DISCORD_OWNER_IDS"] = orig_owners
   end
 
+  test "sentiment_run sem argumento orienta uso apenas com ID numerico sem prometer nome" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+
+    cmd = Discord::CommandRouter::Command.new(name: :sentiment_run, arg: nil, confirm: nil)
+    res = DiscordBotService.run_command(cmd, scope)
+
+    assert_not_nil res
+    assert_includes res, "ID"
+    refute_includes res.downcase, "nome"
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
+  test "sentiment_run via comando de texto com argumento nao-numerico orienta uso apenas com ID numerico sem prometer nome" do
+    orig_owners = ENV["DISCORD_OWNER_IDS"]
+    ENV["DISCORD_OWNER_IDS"] = "123"
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456")
+
+    cmd = Discord::CommandRouter.parse_text("!sentiment_run meu_alvo")
+    res = DiscordBotService.run_command(cmd, scope)
+
+    assert_not_nil res
+    assert_includes res, "ID"
+    refute_includes res.downcase, "nome"
+  ensure
+    ENV["DISCORD_OWNER_IDS"] = orig_owners
+  end
+
   # --- sessions_response e pagina_inexistente ---
 
   test "sessions_response monta a listagem com titulo, marca e contagem sem N+1" do

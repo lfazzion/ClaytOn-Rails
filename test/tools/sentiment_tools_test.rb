@@ -115,4 +115,26 @@ class SentimentToolsTest < ActiveSupport::TestCase
     assert_equal :error, res[:status]
     assert_includes res[:reason], "Limite máximo de 5 alvos de sentimento ativos foi atingido"
   end
+
+  test "run_sentiment_analysis recusa execucao quando run_id inexistente" do
+    target = SentimentTarget.create!(name: "Alvo Tool Inexistente", query: "query")
+
+    tool = RunSentimentAnalysisTool.new
+    res = tool.execute(target_identifier: target.name, run_id: 999_999, async: false)
+
+    assert_equal :error, res[:status]
+    assert_match(/run/i, res[:reason])
+  end
+
+  test "run_sentiment_analysis recusa execucao quando run_id pertence a outro alvo" do
+    target_a = SentimentTarget.create!(name: "Alvo Tool A", query: "query_a")
+    target_b = SentimentTarget.create!(name: "Alvo Tool B", query: "query_b")
+    run_b = target_b.sentiment_runs.create!(status: "failed", error: "Erro anterior", frozen_spec: {})
+
+    tool = RunSentimentAnalysisTool.new
+    res = tool.execute(target_identifier: target_a.name, run_id: run_b.id, async: false)
+
+    assert_equal :error, res[:status]
+    assert_match(/pertence ao alvo|alvo/i, res[:reason])
+  end
 end

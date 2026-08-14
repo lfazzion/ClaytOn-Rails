@@ -32,7 +32,7 @@ module Research
                 source: "x",
                 external_id: post_id,
                 permalink: url,
-                author: item["author"] || item["screen_name"],
+                author: normalize_author(item["author"] || item["screen_name"]),
                 text: text,
                 posted_at: parse_time(item["created_at"])
               }
@@ -40,6 +40,12 @@ module Research
           end
 
           private
+
+          def normalize_author(str)
+            return nil if str.blank?
+
+            str.to_s.strip.delete_prefix("@")
+          end
 
           def extract_status_id(url)
             url.to_s[%r{/status/(\d+)}, 1]

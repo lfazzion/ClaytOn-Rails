@@ -82,7 +82,7 @@ module Research
 
             if query.present?
               query_str = query.to_s.strip
-              item_author = item[:author].to_s.strip.downcase
+              item_author = item[:author].to_s.strip.delete_prefix("@").downcase
               author_matches = query_str.start_with?("@") && item_author == query_str.delete_prefix("@").strip.downcase
 
               unless author_matches

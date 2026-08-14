@@ -312,4 +312,41 @@ class SentimentCollectorTest < ActiveSupport::TestCase
     assert_includes collected_ids, "other_user_mentioning"
     refute_includes collected_ids, "other_user_irrelevant"
   end
+
+  test "para query com @, autor vindo com prefixo @ (@cleitin) e aceito pela comparacao normalizada sem o @" do
+    @target.update!(query: "@cleitin", max_phrases: 10)
+    now = Time.current.utc
+    w_start = now - 30.days
+    w_end = now + 1.minute
+    @run.update!(
+      window_start: w_start,
+      window_end: w_end,
+      frozen_spec: @target.frozen_spec.merge(
+        "query" => "@cleitin",
+        "window_start" => w_start.iso8601,
+        "window_end" => w_end.iso8601
+      )
+    )
+
+    items = [
+      {
+        source: "x",
+        external_id: "post_with_at_author",
+        permalink: "https://x.com/cleitin/status/3001",
+        author: "@cleitin",
+        text: "Novo release disponivel hoje com melhorias.",
+        posted_at: now - 1.hour
+      }
+    ]
+
+    Research::Sentiment::Sources::Reddit.stubs(:fetch).returns([])
+    Research::Sentiment::Sources::X.stubs(:fetch).returns(items)
+
+    Research::Sentiment::Collector.collect(@run)
+    @run.reload
+
+    assert_equal 1, @run.collected_count, "Item com author '@cleitin' deve ser aceito quando query for '@cleitin'"
+    assert_equal 0, @run.rejected_count
+    assert_equal "post_with_at_author", @run.sentiment_phrases.first.external_id
+  end
 end

@@ -59,4 +59,22 @@ class SentimentSourcesXTest < ActiveSupport::TestCase
       Research::Sentiment::Sources::X.fetch(query: "cleitin", limit: 10)
     end
   end
+
+  test "fetch normaliza author removendo prefixo @" do
+    raw_posts = [
+      {
+        "url" => "https://x.com/cleitin/status/555",
+        "text" => "Post de teste no X",
+        "author" => "@cleitin",
+        "created_at" => "2026-08-10T12:00:00Z"
+      }
+    ]
+
+    Fetcher::Channels::X.expects(:search).with(query: "cleitin", limit: 10).returns(raw_posts)
+
+    items = Research::Sentiment::Sources::X.fetch(query: "cleitin", limit: 10)
+
+    assert_equal 1, items.size
+    assert_equal "cleitin", items.first[:author]
+  end
 end

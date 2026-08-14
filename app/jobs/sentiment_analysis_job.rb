@@ -5,13 +5,22 @@ class SentimentAnalysisJob < ApplicationJob
 
   queue_as :default
 
-  def perform(target_id, run_id = nil)
-    if run_id.present?
-      run = SentimentRun.find_by(id: run_id)
-      return run if run&.delivered_at.present?
-    end
+  DELIVERY_LOCK_PREFIX = "sentiment_delivery_lock"
+  DELIVERY_LOCK_TTL = 15
 
+  def perform(target_id, run_id = nil)
     target = SentimentTarget.find(target_id)
+    run = nil
+
+    if run_id.present?
+      found_run = SentimentRun.find_by(id: run_id)
+      raise ArgumentError, "Run ##{run_id} não encontrado" if found_run.nil?
+      if found_run.target_id != target.id
+        raise ArgumentError, "Run ##{run_id} pertence ao alvo ##{found_run.target_id}, não ao alvo ##{target.id}"
+      end
+      return found_run if found_run.delivered_at.present?
+      run = found_run
+    end
 
     unless run
       started_at = Time.current.utc
@@ -33,6 +42,8 @@ class SentimentAnalysisJob < ApplicationJob
         window_end: w_end
       )
     end
+
+    return run if run.delivered_at.present?
 
     run.update!(status: "collecting")
     Research::Sentiment::Collector.collect(run)
@@ -56,15 +67,12 @@ class SentimentAnalysisJob < ApplicationJob
     if channel_id.present?
       chunks = DiscordMessageChunker.chunk(message)
       begin
-        send_chunks(run, channel_id, chunks)
-        run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
-        Rails.logger.info "[SentimentAnalysisJob] Análise concluída para alvo ##{target.id} (#{target.name})"
+        deliver_chunks(run, channel_id, chunks, target)
       rescue RuntimeError => e
         if e.message.include?("404") || e.message.match?(/unknown channel/i)
           recovered_id = recover_digest_channel(channel_id)
           if recovered_id.present?
-            send_chunks(run, recovered_id, chunks)
-            run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
+            deliver_chunks(run, recovered_id, chunks, target)
             Rails.logger.info "[SentimentAnalysisJob] Análise concluída no canal recuperado para alvo ##{target.id} (#{target.name})"
           else
             run.update!(status: "delivery_failed", error: "canal digest indisponível", finished_at: Time.current)
@@ -88,23 +96,57 @@ class SentimentAnalysisJob < ApplicationJob
 
   private
 
-  def send_chunks(run, channel_id, chunks)
-    chunks.each_with_index do |chunk, idx|
-      next if SentimentChunkDelivery.exists?(run_id: run.id, chunk_index: idx)
+  def deliver_chunks(run, channel_id, chunks, target)
+    run.reload
+    return if run.delivered_at.present?
 
-      delivery = nil
-      begin
-        delivery = SentimentChunkDelivery.create!(run_id: run.id, chunk_index: idx, delivered_at: Time.current)
-      rescue ActiveRecord::RecordNotUnique
-        next
-      end
+    token = SecureRandom.hex(8)
+    return unless acquire_delivery_lock(run.id, token)
 
-      begin
+    begin
+      run.reload
+      return if run.delivered_at.present?
+
+      chunks.each_with_index do |chunk, idx|
+        next if SentimentChunkDelivery.exists?(run_id: run.id, chunk_index: idx)
+
         DiscordApiClient.send_message(channel_id, chunk)
-      rescue StandardError => e
-        delivery.destroy rescue nil
-        raise e
+        begin
+          SentimentChunkDelivery.create!(run_id: run.id, chunk_index: idx, delivered_at: Time.current)
+        rescue ActiveRecord::RecordNotUnique
+          # Já registrado concorrentemente
+        end
       end
+
+      delivered_count = SentimentChunkDelivery.where(run_id: run.id).count
+      if delivered_count >= chunks.size
+        run.update!(status: "completed", delivered_at: Time.current, finished_at: Time.current)
+        Rails.logger.info "[SentimentAnalysisJob] Análise concluída para alvo ##{target.id} (#{target.name})"
+      end
+    ensure
+      release_delivery_lock(run.id, token)
+    end
+  end
+
+  def acquire_delivery_lock(run_id, token)
+    lock_key = "#{DELIVERY_LOCK_PREFIX}:#{run_id}"
+    Rails.cache.write(lock_key, token, unless_exist: true, expires_in: DELIVERY_LOCK_TTL)
+  end
+
+  def release_delivery_lock(run_id, token)
+    return unless token.present?
+
+    lock_key = "#{DELIVERY_LOCK_PREFIX}:#{run_id}"
+    if Rails.cache.is_a?(SolidCache::Store)
+      normalized = Rails.cache.send(:normalize_key, lock_key, nil)
+      SolidCache::Entry.lock_and_write(normalized) do |raw|
+        if raw && Rails.cache.send(:deserialize_entry, raw)&.value.to_s == token.to_s
+          SolidCache::Entry.delete_by_key(normalized)
+        end
+        nil
+      end
+    else
+      Rails.cache.delete(lock_key) if Rails.cache.read(lock_key).to_s == token.to_s
     end
   end
 end
