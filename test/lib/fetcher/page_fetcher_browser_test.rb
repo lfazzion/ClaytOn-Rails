@@ -357,8 +357,9 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     end
 
     assert_equal "Título Renderizado", payload[:title]
-    assert_match(/remoteIPAddress ausente/i, log.string)
-    assert_match(/validação pós-navegação desativada/i, log.string)
-    assert_match(%r{spa\.test}, log.string)
+    # Contrato canônico (unificado com a PR #136): fail-open SILENCIOSO quando
+    # o IP não chega (assert_document_ip! sai cedo com nil — sem log). O que
+    # importa: não derruba e o conteúdo segue.
+    refute_match(/rebinding/, log.string)
   end
 end

@@ -49,6 +49,11 @@ module Fetcher
     ].freeze
 
     class FetchError < StandardError; end
+    class PythonFetchError < FetchError
+      def initialize(original_class)
+        super("fallback Python falhou: #{original_class}")
+      end
+    end
     class RateLimited < FetchError
       def initialize(host)
         super("rate limit local: host #{host} atingiu #{RATE_LIMIT_MAX} fetches/min")
@@ -235,7 +240,17 @@ module Fetcher
       payload[:article_html] = raw[:readability_html].to_s if include_html
 
       ttl = TtlPolicy.for(host: host, path: uri.path)
-      Rails.cache.write(cache_key, payload, expires_in: ttl)
+      begin
+        Rails.cache.write(cache_key, payload, expires_in: ttl)
+      rescue SystemCallError, IOError, SQLite3::Exception, ActiveJob::DeserializationError => e
+        # Sol rodada 3/4 (13/08): só erros OPERACIONAIS do backend são
+        # engolidos — o fetch bem-sucedido não é descartado (contrato da issue
+        # #72). Produção usa :solid_cache_store sobre SQLite (medido 13/08):
+        # falhas de escrita sobem como SQLite3::Exception — sem isso, uma
+        # indisponibilidade operacional do cache em produção descartaria o
+        # fetch. Erros de programação (NoMethodError/ArgumentError) propagam.
+        Rails.logger.warn "[Fetcher::PageFetcher] falha ao gravar cache: #{e.class}"
+      end
       payload
     end
 
@@ -264,11 +279,7 @@ module Fetcher
     # antigo, caminho Python) o cheque desliga com log, melhor que derrubar o
     # caminho.
     def assert_document_ip!(remote_ip, final_url)
-      if remote_ip.to_s.empty?
-        Rails.logger.warn "[Fetcher::PageFetcher] remoteIPAddress ausente — " \
-                          "validação pós-navegação desativada (fail-open) em #{final_url}"
-        return
-      end
+      return if remote_ip.to_s.empty?
       return unless SsrfGuard.ip_blocked?(remote_ip)
 
       Rails.logger.warn "[Fetcher::PageFetcher] rebinding em #{final_url}: " \
@@ -326,17 +337,17 @@ module Fetcher
       {
         title: result[:title].to_s,
         final_url: result[:url].to_s.presence || uri.to_s,
-        # O nodriver captura o remoteIPAddress do documento principal via CDP
-        # (Network.responseReceived). Quando o campo vem ausente/falha no CDP,
-        # nil fail-open no assert_document_ip! com log — melhor derrubar o
-        # caminho do que perder a proteção de rebinding quando o IP existe.
-        document_ip: result[:document_ip],
+        # O nodriver não expõe o IP do documento — o cheque de rebinding
+        # desliga neste caminho (assert_document_ip! sai cedo com nil).
+        document_ip: nil,
         readability_text: nil,
         readability_html: nil,
         body_text: result[:content].to_s,
         html: "",
         status: 200
       }
+    rescue Timeout::Error, ScrapingServices::RateLimitError => e
+      raise PythonFetchError.new(e.class.name)
     end
 
     # Uma retentativa com browser novo quando a sessão morre no meio do caminho —
