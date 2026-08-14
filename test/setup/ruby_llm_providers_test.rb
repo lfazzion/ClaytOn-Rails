@@ -100,14 +100,23 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     # nil (ver ruby_llm-1.14.0/lib/ruby_llm/provider.rb:247-252). Os stubs abaixo
     # satisfazem a presença exigida pela gem (o require do provider só checa
     # presença, não validade) sem alterar a asserção sobre o papel da mensagem.
-    tinha_poolside_key = ENV.key?("POOLSIDE_API_KEY")
-    tinha_nous_key     = ENV.key?("NOUS_API_KEY")
-    poolside_key_antigo = RubyLLM.config.poolside_api_key
-    nous_key_antigo     = RubyLLM.config.nous_api_key
-    ENV["POOLSIDE_API_KEY"] ||= "chave-teste-invalida"
-    ENV["NOUS_API_KEY"]     ||= "chave-teste-invalida"
-    RubyLLM.config.poolside_api_key = ENV["POOLSIDE_API_KEY"]
-    RubyLLM.config.nous_api_key     = ENV["NOUS_API_KEY"]
+    # O laço abaixo instancia TRÊS provedores, inclusive :openrouter, mas os
+    # stubs originais cobriam só poolside e nous — daí o
+    # `ConfigurationError: Missing configuration for OpenRouter` no container e
+    # em qualquer ambiente sem OPENROUTER_API_KEY. Só a lista de stubs estava
+    # incompleta; a asserção sobre o papel da mensagem não muda.
+    tinha_poolside_key   = ENV.key?("POOLSIDE_API_KEY")
+    tinha_nous_key       = ENV.key?("NOUS_API_KEY")
+    tinha_openrouter_key = ENV.key?("OPENROUTER_API_KEY")
+    poolside_key_antigo   = RubyLLM.config.poolside_api_key
+    nous_key_antigo       = RubyLLM.config.nous_api_key
+    openrouter_key_antigo = RubyLLM.config.openrouter_api_key
+    ENV["POOLSIDE_API_KEY"]   ||= "chave-teste-invalida"
+    ENV["NOUS_API_KEY"]       ||= "chave-teste-invalida"
+    ENV["OPENROUTER_API_KEY"] ||= "chave-teste-invalida"
+    RubyLLM.config.poolside_api_key   = ENV["POOLSIDE_API_KEY"]
+    RubyLLM.config.nous_api_key       = ENV["NOUS_API_KEY"]
+    RubyLLM.config.openrouter_api_key = ENV["OPENROUTER_API_KEY"]
 
     begin
       %i[poolside nous openrouter].each do |slug|
@@ -119,10 +128,12 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     ensure
       # Restaura o estado global (ENV + config): o ||= só seta quando a chave
       # faltava, e sem o ensure a chave fake vaza para os testes seguintes.
-      ENV.delete("POOLSIDE_API_KEY") unless tinha_poolside_key
-      ENV.delete("NOUS_API_KEY")     unless tinha_nous_key
-      RubyLLM.config.poolside_api_key = poolside_key_antigo
-      RubyLLM.config.nous_api_key     = nous_key_antigo
+      ENV.delete("POOLSIDE_API_KEY")   unless tinha_poolside_key
+      ENV.delete("NOUS_API_KEY")       unless tinha_nous_key
+      ENV.delete("OPENROUTER_API_KEY") unless tinha_openrouter_key
+      RubyLLM.config.poolside_api_key   = poolside_key_antigo
+      RubyLLM.config.nous_api_key       = nous_key_antigo
+      RubyLLM.config.openrouter_api_key = openrouter_key_antigo
     end
   end
 end
