@@ -30,8 +30,6 @@ class DiscoveryJob < ApplicationJob
     end
   rescue Llm::BaseClient::QuotaExceededError => e
     Rails.logger.warn "[DiscoveryJob] Quota LLM esgotada ao processar #{profile.platform_username}: #{e.message}"
-  rescue StandardError => e
-    Rails.logger.error "[DiscoveryJob] Erro ao processar perfil #{profile.id}: #{e.message}"
   end
 
   def save_discovered_profile(result, source_profile)

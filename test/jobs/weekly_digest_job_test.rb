@@ -66,6 +66,8 @@ class WeeklyDigestJobTest < ActiveSupport::TestCase
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
 
     DiscordApiClient.stubs(:get_bot_guilds).returns([{ 'id' => 'guild123' }])
+    # DigestChannel (rodada 10): verifica canais existentes antes de criar
+    DiscordApiClient.stubs(:get_guild_channels).returns([])
     DiscordApiClient.stubs(:create_text_channel).returns({ 'id' => 'channel456' })
     sent_messages = []
     DiscordApiClient.stubs(:send_message).with do |_channel_id, msg|

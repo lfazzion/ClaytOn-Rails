@@ -72,6 +72,33 @@ class ChromeWsConnectorLibTest < ActiveSupport::TestCase
     assert_raises(ChromeWsConnector::Error) { ChromeWsConnector.fetch_ws_url }
   end
 
+  test "fetch_ws_url should raise Error on 200 with HTML response" do
+    stub_request(:get, "http://#{@chrome_host}:#{@chrome_port}/json/version")
+      .with(headers: { "Host" => "localhost" })
+      .to_return(status: 200, body: "<!DOCTYPE html><html><body>Not JSON</body></html>", headers: { "Content-Type" => "text/html" })
+
+    exception = assert_raises(ChromeWsConnector::Error) { ChromeWsConnector.fetch_ws_url }
+    assert_kind_of JSON::ParserError, exception.cause
+  end
+
+  test "fetch_ws_url should raise Error on 200 with empty response body" do
+    stub_request(:get, "http://#{@chrome_host}:#{@chrome_port}/json/version")
+      .with(headers: { "Host" => "localhost" })
+      .to_return(status: 200, body: "", headers: { "Content-Type" => "application/json" })
+
+    exception = assert_raises(ChromeWsConnector::Error) { ChromeWsConnector.fetch_ws_url }
+    assert_kind_of JSON::ParserError, exception.cause
+  end
+
+  test "fetch_ws_url should raise Error on 200 with malformed JSON" do
+    stub_request(:get, "http://#{@chrome_host}:#{@chrome_port}/json/version")
+      .with(headers: { "Host" => "localhost" })
+      .to_return(status: 200, body: "{invalid json,,,", headers: { "Content-Type" => "application/json" })
+
+    exception = assert_raises(ChromeWsConnector::Error) { ChromeWsConnector.fetch_ws_url }
+    assert_kind_of JSON::ParserError, exception.cause
+  end
+
   test "ChromeWsConnector::Error should be a StandardError" do
     assert ChromeWsConnector::Error < StandardError
   end

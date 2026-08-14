@@ -105,6 +105,26 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
 
     assert_nil Fetcher::Channels::X.call(url: "https://x.com/jack")
   end
+
+  # Deduplicacao ocorre antes da canonicalizacao do permalink: variantes que
+  # apontam para o mesmo post (query de rastreio, host legado, sufixo de media)
+  # devem colapsar em um unico item canonico e nao antecipar o limite.
+  test "deduplicacao canonaliza permalink antes de contar itens unicos" do
+    Kernel.stubs(:sleep)
+    lotes = [
+      [
+        raw_post(id: 1001, extras: { "url" => "https://x.com/jack/status/1001?s=20" }),
+        raw_post(id: 1001, extras: { "url" => "https://twitter.com/jack/status/1001" }),
+        raw_post(id: 1001, extras: { "url" => "https://x.com/jack/status/1001/photo/1", "text" => "dup do photo" }),
+        raw_post(id: 2002)
+      ]
+    ]
+    itens = from_timeline(lotes, limit: 10)
+
+    assert_equal 2, itens.size, "duplicatas colapsam em um unico item canonico"
+    assert_equal "https://x.com/jack/status/1001", itens.first["url"]
+    assert_equal "https://x.com/jack/status/2002", itens.last["url"]
+  end
   # A regressao que isto guarda: o fixture original supunha `raw_text` String, o
   # teste passava, e a chamada real morria em `undefined method 'strip' for Hash`.
   test "aceita raw_text como objeto, como String, e ausente" do

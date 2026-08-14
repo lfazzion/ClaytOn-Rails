@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "timeout"
 require Rails.root.join("lib/fetcher/cookie_jar")
 require Rails.root.join("lib/fetcher/channels/youtube")
 
@@ -69,8 +70,11 @@ class RefreshSessionCookiesJob < ApplicationJob
         "Precisa de exportação nova, e o PROCEDIMENTO importa: #{PROCEDIMENTO}")
   rescue Fetcher::CookieJar::Expired
     log("ERRO: sessão de youtube.com já estava expirada — precisa de exportação nova")
+  rescue Timeout::Error
+    log("ERRO: renovação de cookie excedeu o timeout (#{TIMEOUT}s)")
   rescue StandardError => e
-    log("falhou: #{e.class}: #{e.message}")
+    Rails.logger.error "[RefreshSessionCookiesJob] Erro inesperado ao renovar cookie de youtube.com: #{e.class}: #{e.message}"
+    raise
   end
 
   private

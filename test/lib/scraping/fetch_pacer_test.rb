@@ -57,4 +57,18 @@ class FetchPacerTest < ActiveSupport::TestCase
     assert_equal 1000.0, Rails.cache.read('fetch_pacer:youtube.com')
     assert_equal 1000.0, Rails.cache.read('fetch_pacer:twitter.com')
   end
+
+  # Rodada 2 (sol 13/08): release_pacer_lock só remove o lock se o token for
+  # exatamente o do dono (compare-delete). Com FileStore (testes), o melhor
+  # possível sem CAS: verificação de igualdade exata antes do delete.
+  test 'release_pacer_lock não remove lock de outro dono (FileStore)' do
+    Rails.cache.write('fetch_pacer:lock:test', 'token_antigo', expires_in: 30)
+    Scraping::FetchPacer.release_pacer_lock('fetch_pacer:lock:test', 'token_novo')
+    assert_equal 'token_antigo', Rails.cache.read('fetch_pacer:lock:test'),
+                 "lock de outro dono não deve ser removido"
+
+    Scraping::FetchPacer.release_pacer_lock('fetch_pacer:lock:test', 'token_antigo')
+    assert_nil Rails.cache.read('fetch_pacer:lock:test'),
+               "token do dono casa — lock deve ser removido"
+  end
 end

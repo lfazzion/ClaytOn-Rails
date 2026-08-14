@@ -59,6 +59,14 @@ module ScrapingServices
         nil
       end
 
+      def parse_pub_date(value)
+        return nil if value.blank?
+
+        Time.parse(value)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
       def parse_xml(xml_content)
         doc = REXML::Document.new(xml_content)
         items = []
@@ -75,7 +83,7 @@ module ScrapingServices
             title: title&.strip,
             source_url: link&.strip,
             description: description&.strip,
-            start_date: pub_date ? Time.parse(pub_date).to_date : nil
+            pub_date: parse_pub_date(pub_date)
           }
         end
 

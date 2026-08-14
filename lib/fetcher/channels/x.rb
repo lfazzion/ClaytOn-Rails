@@ -395,7 +395,7 @@ module Fetcher
             vazio_detectado ||= lote_data[:empty]
 
             antes = vistos.size
-            lote.each { |bruto| vistos[bruto.is_a?(Hash) ? (bruto["url"] || bruto) : bruto] ||= bruto }
+            lote.each { |bruto| vistos[dedup_key(bruto)] ||= bruto }
             # `vistos.any?` no meio da condição é o conserto de 05/08: com a lista
             # AINDA vazia, "a contagem não cresceu" não significa que acabou —
             # significa que a página não hidratou. Ver `aguardar_hidratacao`.
@@ -504,6 +504,23 @@ module Fetcher
           ["https://#{CANONICAL_HOST}/#{casou[:user]}/status/#{casou[:id]}", casou[:user]]
         rescue URI::InvalidURIError, URI::InvalidComponentError
           nil
+        end
+
+        # Chave privada de deduplicação: para Hashes, canoncaliza a URL via
+        # `permalink` de modo que variantes como `x.com/user/status/123?s=20`,
+        # `twitter.com/user/status/123` e `/photo/1` colapsem para a mesma chave —
+        # evitando devolver o mesmo post mais de uma vez e atingir o limite
+        # prematuramente. Só recorre à URL bruta ou ao próprio objeto quando
+        # não há permalink válido, preservando o comportamento de que "não é
+        # do perfil" e "não deu para ler" continuem contando como artigo visto.
+        def dedup_key(bruto)
+          return bruto unless bruto.is_a?(Hash)
+
+          raw_url = bruto["url"]
+          return bruto if raw_url.nil?
+
+          canonical = permalink(raw_url)&.first
+          canonical || raw_url
         end
 
         def iso8601(bruto)

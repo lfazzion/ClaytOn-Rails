@@ -33,7 +33,7 @@ class CollectIgdbCatalogJob < ApplicationJob
 
     release_date = item["first_release_date"] ? Time.at(item["first_release_date"]).to_date : nil
 
-    igdb_status = item["status"].to_i
+    igdb_status = item["status"]&.to_i
     mapped_status = case igdb_status
                     when 0 then "released"
                     when 1, 2, 3 then "upcoming"

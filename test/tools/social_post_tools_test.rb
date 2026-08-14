@@ -46,6 +46,32 @@ class SocialPostToolsTest < ActiveSupport::TestCase
     assert(result[:data].all? { |p| p[:post_type] == 'image' })
   end
 
+  test 'by_type rejeita post_type invalido com lista de tipos aceitos' do
+    tool = PostsByTypeTool.new
+    result = tool.execute(username: 'testuser', platform: 'twitter', post_type: 'image_post')
+    assert_equal :error, result[:status]
+    assert_includes result[:reason], 'Tipo de post inválido'
+    assert_includes result[:reason], 'image, video, text, reel, story, short'
+  end
+
+  test 'by_type retorna sucesso para post_type short' do
+    create(:social_post, social_profile: @profile, post_type: 'short', posted_at: 1.day.ago)
+    tool = PostsByTypeTool.new
+    result = tool.execute(username: 'testuser', platform: 'twitter', post_type: 'short')
+    assert_equal :success, result[:status]
+    assert(result[:data].all? { |p| p[:post_type] == 'short' })
+  end
+
+  test 'by_type preserva filtro valido existente' do
+    create(:social_post, social_profile: @profile, post_type: 'video', posted_at: 1.day.ago)
+    create(:social_post, social_profile: @profile, post_type: 'image', posted_at: 1.day.ago)
+    tool = PostsByTypeTool.new
+    result = tool.execute(username: 'testuser', platform: 'twitter', post_type: 'video')
+    assert_equal :success, result[:status]
+    assert_equal 1, result[:data].size
+    assert_equal 'video', result[:data].first[:post_type]
+  end
+
   test 'post_engagement retorna métricas' do
     tool = PostEngagementTool.new
     result = tool.execute(username: 'testuser', platform: 'twitter', post_id: @post.id)
