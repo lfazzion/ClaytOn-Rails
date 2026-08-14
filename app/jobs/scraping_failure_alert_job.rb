@@ -6,35 +6,42 @@ class ScrapingFailureAlertJob < ApplicationJob
   include AdminAlertChannel
 
   queue_as :critical
-  def perform(scraper_name, profile_id, error_message, error_type)
-    reserved = false
 
+  def perform(scraper_name, profile_id, error_message, error_type)
     if AlertThrottler.throttle?(error_type)
       Rails.logger.warn "[ScrapingFailureAlertJob] Throttled: #{error_type}"
       return
     end
 
     channel_id = ensure_admin_channel
-    if channel_id.nil?
+    unless channel_id
       Rails.logger.warn "[ScrapingFailureAlertJob] Canal admin não configurado"
       return
     end
 
-    if AlertThrottler.reserve(error_type)
-      reserved = true
-    else
+    # reserve retorna:
+    #   nil   -> throttling desabilitado (sem reserva; nada a liberar em falha)
+    #   false -> cota excedida (aborta o envio, sem reserva)
+    #   chave -> reserva aceita (liberar apenas se o envio falhar)
+    reserved_key = AlertThrottler.reserve(error_type)
+    if reserved_key == false
       Rails.logger.warn "[ScrapingFailureAlertJob] Quota excedida: #{error_type}"
       return
     end
 
     message = build_alert_message(scraper_name, profile_id, error_message, error_type)
-    DiscordApiClient.send_message(channel_id, message)
+
+    # ACHADO A (13/08): apenas falhas NO envio liberam a reserva. O log
+    # pós-envio fica FORA do rescue, então uma falha nele não libera a reserva
+    # do alerta já entregue — caso contrário um retry reenviaria o alerta.
+    begin
+      DiscordApiClient.send_message(channel_id, message)
+    rescue StandardError
+      AlertThrottler.release(error_type, key: reserved_key) if reserved_key.is_a?(String)
+      raise
+    end
 
     Rails.logger.info "[ScrapingFailureAlertJob] Alerta enviado para #{scraper_name}/#{profile_id}"
-  rescue StandardError
-    # Em caso de falha no envio, libera a reserva somente se ela foi efetivamente aceita.
-    AlertThrottler.release(error_type) if reserved
-    raise
   end
 
   private

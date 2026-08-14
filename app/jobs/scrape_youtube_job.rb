@@ -11,16 +11,24 @@ class ScrapeYoutubeJob < ApplicationJob
 
   SNAPSHOT_DEDUP_WINDOW = 20.hours
 
-  # ACHADO D: só estas exceções (erros de rede/timeout/parser do scraper)
-  # são recuperáveis via fallback sem cookies. Bugs de programação
-  # (NoMethodError, ArgumentError, quebra de contrato) NÃO entram aqui e
-  # propagam para o handler externo do job.
+  # ACHADO D + unificação pós-revisão (13/08): só estas exceções (erros de
+  # rede/timeout/parser do scraper) são recuperáveis via fallback sem cookies.
+  # Bugs de programação (NoMethodError, ArgumentError, quebra de contrato) NÃO
+  # entram aqui e propagam para o handler externo do job.
   # `const_get` com rescue evita NameError no boot caso alguma classe de
   # stdlib (ex.: OpenURI) não esteja carregada no ambiente.
+  # União das listas das PRs #135 e #140 (COLLECT_WITH_COOKIES_FALLBACK_ERRORS
+  # ∪ RECOVERABLE_SCRAPER_ERRORS) — mesma semântica, cobertura completa.
   RECOVERABLE_SCRAPER_ERRORS = %w[
-    Errno::ECONNRESET Errno::ECONNREFUSED Errno::ETIMEDOUT
-    Net::ReadTimeout Net::OpenTimeout SocketError
+    Timeout::Error
+    Net::ReadTimeout Net::OpenTimeout Net::HTTPError
+    SocketError
     OpenURI::HTTPError URI::InvalidURIError
+    Faraday::Error
+    JSON::ParserError
+    Errno::ECONNRESET Errno::ECONNREFUSED Errno::ETIMEDOUT
+    OpenSSL::SSL::SSLError
+    ScrapingServices::RateLimitError
   ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
 
   def perform(profile_id, options = {})
