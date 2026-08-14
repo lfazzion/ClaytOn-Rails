@@ -21,7 +21,25 @@ module Fetcher
     module Rss
       MAX_ITEMS     = 30
       SUMMARY_CHARS = 600
-      ATOM_PARSERS  = %w[Feedjira::Parser::Atom Feedjira::Parser::AtomFeedBurner].freeze
+
+      # Apenas parsers top-level (Entries e RSSImage não respondem a able_to_parse?
+      # e quebram a auto-detecção) na ordem especializado -> genérico (FeedBurner
+      # precisa vir antes de Atom/RSS para resolver origLink).
+      PARSERS = [
+        Feedjira::Parser::AtomFeedBurner,
+        Feedjira::Parser::RSSFeedBurner,
+        Feedjira::Parser::Atom,
+        Feedjira::Parser::RSS
+      ].freeze
+
+      ATOM_PARSERS = %w[
+        Feedjira::Parser::Atom
+        Feedjira::Parser::AtomFeedBurner
+      ].freeze
+
+      Feedjira.configure do |config|
+        config.parsers = PARSERS
+      end
 
       class << self
         def call(url:, response: nil)
