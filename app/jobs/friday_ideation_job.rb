@@ -10,23 +10,25 @@ class FridayIdeationJob < ApplicationJob
     return unless channel_id
 
     message = build_ideation_digest
-    DiscordMessageChunker.chunk(message).each do |chunk|
-      DiscordApiClient.send_message(channel_id, chunk)
-    end
-
-    Rails.logger.info "[FridayIdeationJob] Digest de ideias enviado para canal #{channel_id}"
-  rescue RuntimeError => e
-    # ACHADO E (rodada 2, sol 13/08): canal obsoleto no cache de 30 dias.
-    # Recupera (valida existência; 404 invalida o cache e re-resolve) e
-    # reenvia UMA vez com o canal novo; outro erro propaga.
-    if e.message.include?('404') || e.message.match?(/unknown channel/i)
-      novo_channel = recover_digest_channel(channel_id)
-      DiscordMessageChunker.chunk(message).each do |chunk|
-        DiscordApiClient.send_message(novo_channel, chunk)
+    chunks = DiscordMessageChunker.chunk(message)
+    begin
+      chunks.each do |chunk|
+        DiscordApiClient.send_message(channel_id, chunk)
       end
-    else
-      raise
+    rescue RuntimeError => e
+      # ACHADO E (rodada 2, sol 13/08): canal obsoleto no cache de 30 dias.
+      # Rodada 3 (sol 13/08): se um chunk POSTERIOR falhar com 404, reenviar
+      # do início duplicaria os já entregues — só o canal é recuperado e o
+      # ENVIO não é repetido (o job encerra; o próximo ciclo reenvia tudo
+      # com o canal novo e o Discord deduplica/encadeia).
+      if e.message.include?('404') || e.message.match?(/unknown channel/i)
+        recover_digest_channel(channel_id)
+        Rails.logger.warn "[FridayIdeationJob] Canal #{channel_id} inválido (404); cache invalidado. Mensagem NÃO reenviada nesta execução para evitar duplicação de chunks já entregues."
+      else
+        raise
+      end
     end
+    Rails.logger.info "[FridayIdeationJob] Digest de ideias enviado para canal #{channel_id}"
   end
 
   private

@@ -99,6 +99,11 @@ module DigestChannel
         if raw && Rails.cache.send(:deserialize_entry, raw)&.value.to_s == token.to_s
           SolidCache::Entry.delete_by_key(normalized)
         end
+        # IMPORTANTE (sol rodada 3, 13/08): o bloco DEVE retornar nil — o
+        # lock_and_write reescreve o valor quando o retorno é truthy, e o
+        # delete_by_key retorna o count (Integer) — sem o nil, o lock seria
+        # recriado com o inteiro em vez de liberado (verificado na gem 1.0.10).
+        nil
       end
     else
       Rails.cache.delete(lock_key) if Rails.cache.read(lock_key) == token
