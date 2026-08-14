@@ -15,6 +15,18 @@ class FridayIdeationJob < ApplicationJob
     end
 
     Rails.logger.info "[FridayIdeationJob] Digest de ideias enviado para canal #{channel_id}"
+  rescue RuntimeError => e
+    # ACHADO E (rodada 2, sol 13/08): canal obsoleto no cache de 30 dias.
+    # Recupera (valida existência; 404 invalida o cache e re-resolve) e
+    # reenvia UMA vez com o canal novo; outro erro propaga.
+    if e.message.include?('404') || e.message.match?(/unknown channel/i)
+      novo_channel = recover_digest_channel(channel_id)
+      DiscordMessageChunker.chunk(message).each do |chunk|
+        DiscordApiClient.send_message(novo_channel, chunk)
+      end
+    else
+      raise
+    end
   end
 
   private

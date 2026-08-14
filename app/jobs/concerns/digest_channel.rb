@@ -86,11 +86,23 @@ module DigestChannel
   # Unlock distribuído: só remove o lock se ainda for o nosso token
   # (compare-delete). Extraído de with_digest_channel_lock para ser testável
   # isoladamente (achado F, sol 13/08) e para o fluxo de recuperação de canal
-  # (achado E) poder reusá-lo. Ver comentário de ACHADO A acima sobre a
-  # ausência de CAS no cache.
+  # (achado E) poder reusá-lo. Rodada 2 (sol 13/08): quando o backend é
+  # SolidCache (produção), o release é ATÔMICO via lock_and_write (FOR
+  # UPDATE) — verifica o token sob lock e deleta na mesma operação; sem a
+  # janela read→delete. Para outros stores (teste FileStore) fica o
+  # compare-delete simples, que é o melhor possível sem CAS.
   def release_digest_channel_lock(guild_id, token)
     lock_key = "#{LOCK_KEY_PREFIX}:#{guild_id}"
-    Rails.cache.delete(lock_key) if Rails.cache.read(lock_key) == token
+    if Rails.cache.is_a?(SolidCache::Store)
+      normalized = Rails.cache.send(:normalize_key, lock_key, nil)
+      SolidCache::Entry.lock_and_write(normalized) do |raw|
+        if raw && Rails.cache.send(:deserialize_entry, raw)&.value.to_s == token.to_s
+          SolidCache::Entry.delete_by_key(normalized)
+        end
+      end
+    else
+      Rails.cache.delete(lock_key) if Rails.cache.read(lock_key) == token
+    end
   end
 
   def resolve_digest_channel(guild_id)
@@ -128,8 +140,8 @@ module DigestChannel
     # Valida a existência do canal antes de confiar no cache de 30 dias.
     DiscordApiClient.get_channel(channel_id)
     channel_id
-  rescue StandardError => e
-    return channel_id unless e.message.include?('404') || e.message.match?(/unknown channel/i)
+  rescue RuntimeError => e
+    raise unless e.message.include?('404') || e.message.match?(/unknown channel/i)
 
     Rails.cache.delete(CACHED_CHANNEL_KEY)
     Rails.logger.warn "[#{self.class.name}] Canal digest #{channel_id} inválido (404); cache invalidado para re-resolver"
