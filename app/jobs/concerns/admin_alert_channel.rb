@@ -53,6 +53,12 @@ module AdminAlertChannel
       channel = DiscordApiClient.create_text_channel(guild_id, "system-alerts")
       channel_id = channel["id"]
 
+      # Rodada 3 (sol 13/08): re-checa DEPOIS da chamada externa lenta — se o
+      # lease expirou durante a criação, NÃO grava o cache nem retorna o canal
+      # (o canal pode ter sido criado, mas o dono do lock não somos mais; o
+      # worker que adquiriu o lock re-checa o cache e o reutiliza por nome).
+      check_heartbeat!(heartbeat)
+
       Rails.cache.write(CACHED_CHANNEL_KEY, channel_id, expires_in: 30.days)
       Rails.logger.info "[#{self.class.name}] Canal admin criado e cacheado: #{channel_id}"
       channel_id
@@ -128,7 +134,14 @@ module AdminAlertChannel
     end
 
     state[:running] = false
-    thread.wakeup if thread.alive?
+    # Rodada 3 (sol 13/08): wakeup também pode levantar ThreadError (thread já
+    # morta entre o alive? e o wakeup) — proteger AMBOS para o release do lock
+    # nunca ficar preso.
+    begin
+      thread.wakeup if thread.alive?
+    rescue ThreadError
+      nil
+    end
     # Protege contra ThreadError (thread já morta) — não deve mascarar a
     # exceção original do heartbeat.
     thread.join(1) rescue ThreadError
