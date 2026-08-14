@@ -217,35 +217,6 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
     assert_equal "rotacionado", Fetcher::CookieJar.for("old.reddit.com").first["value"]
   end
 
-  test "refresh_for! atualiza payload e expires_at atomicamente quando fornecido" do
-    original_expires = 3.days.from_now.change(usec: 0)
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: original_expires)
-
-    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
-    novo_expires = 7.days.from_now.change(usec: 0)
-
-    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos, expires_at: novo_expires)
-
-    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
-    assert_equal "rotacionado", Fetcher::CookieJar.for("reddit.com").first["value"]
-    assert_in_delta novo_expires.to_f, registro.expires_at.to_f, 1,
-                     "expires_at atualizado junto do payload"
-  end
-
-  test "refresh_for! preserva expires_at quando omitido" do
-    original_expires = 3.days.from_now.change(usec: 0)
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: original_expires)
-
-    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
-
-    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos)
-
-    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
-    assert_equal "rotacionado", Fetcher::CookieJar.for("reddit.com").first["value"]
-    assert_in_delta original_expires.to_f, registro.expires_at.to_f, 60,
-                     "chamada sem expires_at não deve tocar o prazo existente"
-  end
-
   # O MESMO bug do `RefreshSessionCookiesJob`, no caminho do NAVEGADOR. Se a sessao
   # e rejeitada durante a visita, os cookies da pagina viram o conjunto anonimo, e
   # `persist_rotation` os grava por cima do jar bom. Nao e vazio, entao o unico
@@ -291,6 +262,46 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
     refute Fetcher::CookieJar.refresh_for!("reddit.com", [])
 
     assert_equal 2, Fetcher::CookieJar.for("reddit.com").size
+  end
+
+  # Sol rodada 2/3 (13/08): o contrato novo `expires_at:` não tinha teste
+  # DIRETO — só o refresh_from_netscape! (que delega) era coberto.
+  test "refresh_for! com expires_at estende o prazo do registro" do
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 1.day.from_now)
+
+    Fetcher::CookieJar.refresh_for!("reddit.com", REDDIT_COOKIES, expires_at: 7.days.from_now)
+
+    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_operator registro.expires_at, :>, 6.days.from_now,
+                    "expires_at: 7 dias deve ESTENDER o prazo curto existente"
+    assert_equal 2, Fetcher::CookieJar.for("reddit.com").size, "payload preservado"
+  end
+
+  test "refresh_for! sem expires_at preserva o prazo existente" do
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 3.days.from_now)
+
+    Fetcher::CookieJar.refresh_for!("reddit.com", REDDIT_COOKIES)
+
+    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_in_delta 3.days.from_now.to_f, registro.expires_at.to_f, 60.0,
+                    "sem expires_at, o prazo existente deve ser preservado"
+    assert_equal 2, Fetcher::CookieJar.for("reddit.com").size
+  end
+
+  # ACHADO C (13/08, P2): o prazo solicitado é um PISO (max), não um teto —
+  # rotação com expires_at: 7 dias NÃO encurta sessão válida por 30 dias.
+  test "refresh_for! nao encurta prazo maior (trata expires_at solicitado como piso)" do
+    longo = 30.days.from_now.change(usec: 0)
+    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: longo)
+    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
+    sete_dias = 7.days.from_now.change(usec: 0)
+
+    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos, expires_at: sete_dias)
+
+    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
+    assert_operator registro.expires_at, :>, 25.days.from_now,
+                    "prazo de 30 dias não deve ser reduzido para 7"
+    assert_in_delta longo.to_f, registro.expires_at.to_f, 60
   end
 
   test "allowed_domain? aceita dominio exato, ponto inicial, subdominio legitimo, caixa diferente e rejeita sufixo enganoso" do
@@ -477,22 +488,6 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
 
     lidos = Fetcher::CookieJar.for("reddit.com")
     assert_equal 2, lidos.size
-    assert_equal "abc123", Fetcher::CookieJar.for("reddit.com").find { |c| c["name"] == "reddit_session" }&.dig("value")
-  end
-
-  # ACHADO C (13/08, P2): a rotação FORÇAVA expires_at para 7 dias, encurtando
-  # uma sessão válida por 30. O prazo solicitado deve ser um PISO (max), não um teto.
-  test "refresh_for! nao encurta prazo maior (trata expires_at solicitado como piso)" do
-    longo = 30.days.from_now.change(usec: 0)
-    Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: longo)
-    novos = [{ "name" => "reddit_session", "value" => "rotacionado", "domain" => ".reddit.com", "path" => "/" }]
-    sete_dias = 7.days.from_now.change(usec: 0)
-
-    assert Fetcher::CookieJar.refresh_for!("old.reddit.com", novos, expires_at: sete_dias)
-
-    registro = BrowserSessionCookie.find_by(domain: "reddit.com")
-    assert_operator registro.expires_at, :>, 25.days.from_now,
-                    "prazo de 30 dias não deve ser reduzido para 7"
-    assert_in_delta longo.to_f, registro.expires_at.to_f, 60
+    assert_equal "abc123", lidos.find { |c| c["name"] == "reddit_session" }&.dig("value")
   end
 end

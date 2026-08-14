@@ -179,15 +179,21 @@ module Fetcher
         record = live_record(host)
         return false if record.nil?
 
-        if expires_at
-          # ACHADO C (revisão do sol, 13/08): não FORÇAR o prazo para o valor
-          # solicitado — isso encurtava sessões válidas por 30 dias para 7. O
-          # prazo solicitado é um PISO (max), preservando o que já existia de
-          # mais longo. `record.expires_at` vem de um registro vivo, então não é nil.
-          piso = [record.expires_at, expires_at].compact.max
-          record.update!(payload: JSON.generate(filtered), expires_at: piso)
-        else
-          record.update!(payload: JSON.generate(filtered))
+        # Sol rodada 2 (13/08): o ciclo ler-expires_at→update! tinha TOCTOU —
+        # duas rotações concorrentes podiam calcular o piso sobre o MESMO valor
+        # antigo e a gravação atrasada sobrescrever o payload/prazo da outra.
+        # with_lock serializa leitura + cálculo + gravação (transação no banco).
+        record.with_lock do
+          if expires_at
+            # ACHADO C (revisão do sol, 13/08): não FORÇAR o prazo para o valor
+            # solicitado — isso encurtava sessões válidas por 30 dias para 7. O
+            # prazo solicitado é um PISO (max), preservando o que já existia de
+            # mais longo. `record.expires_at` vem de um registro vivo, então não é nil.
+            piso = [record.expires_at, expires_at].compact.max
+            record.update!(payload: JSON.generate(filtered), expires_at: piso)
+          else
+            record.update!(payload: JSON.generate(filtered))
+          end
         end
         true
       end

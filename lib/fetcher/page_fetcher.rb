@@ -242,7 +242,11 @@ module Fetcher
       ttl = TtlPolicy.for(host: host, path: uri.path)
       begin
         Rails.cache.write(cache_key, payload, expires_in: ttl)
-      rescue StandardError => e
+      rescue SystemCallError, IOError => e
+        # Sol rodada 3 (13/08): só erros OPERACIONAIS do backend (disco cheio,
+        # permissão — SystemCallError cobre todos os Errno::*; IOError) são
+        # engolidos — o fetch bem-sucedido não é descartado (contrato da issue
+        # #72). Erros de programação (NoMethodError/ArgumentError) propagam.
         Rails.logger.warn "[Fetcher::PageFetcher] falha ao gravar cache: #{e.class}"
       end
       payload
