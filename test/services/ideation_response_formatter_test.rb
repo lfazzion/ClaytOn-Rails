@@ -91,4 +91,16 @@ class IdeationResponseFormatterTest < ActiveSupport::TestCase
 
     assert_equal malformed.strip, IdeationResponseFormatter.format(malformed)
   end
+
+  # Regressão do defeito do dono (BLOCKER 1): JSON válido com array de
+  # sugestões VAZIO NUNCA deve vazar o JSON cru. O caminho é:
+  # format -> try_parse_json (JSON válido) -> format_json -> extract_items
+  # devolve [] -> hoje retorna fallback_text (o JSON cru). Corrigido para
+  # distinguir "não é JSON" (devolve texto original) de "é JSON válido mas
+  # sem itens" (devolve string vazia, sem vazar o JSON).
+  test "JSON válido com array de sugestoes vazio não vaza o JSON cru" do
+    raw_json = '{"sugestoes_de_conteudo": []}'
+
+    assert_equal "", IdeationResponseFormatter.format(raw_json)
+  end
 end

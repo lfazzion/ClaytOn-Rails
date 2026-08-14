@@ -178,5 +178,51 @@ test 'perform formata sugestoes quando LLM devolve bloco JSON' do
   ensure
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end
+
+  # Regressão do BLOCKER 2 (cabeçalho órfão): quando o formatter devolve ""
+  # (resposta nil/string vazia do LLM, ou JSON válido sem itens), o digest
+  # NÃO deve conter "**Sugestões de conteúdo:**" sozinho. O job adiciona
+  # cabeçalho + conteúdo juntos, só se houver conteúdo.
+  test 'perform não adiciona cabeçalho de sugestões quando LLM devolve nil' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+
+    mock_response = stub(content: nil)
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    sent_message = nil
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      sent_message = msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    assert_not_nil sent_message
+    refute_includes sent_message, '**Sugestões de conteúdo:**'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  test 'perform não adiciona cabeçalho de sugestões quando LLM devolve string vazia' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+
+    mock_response = stub(content: '')
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    sent_message = nil
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      sent_message = msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    assert_not_nil sent_message
+    refute_includes sent_message, '**Sugestões de conteúdo:**'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
 end
 

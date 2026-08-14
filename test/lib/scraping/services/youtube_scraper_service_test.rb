@@ -39,4 +39,60 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
            "stderr do yt-dlp NÃO foi registrado no log (registrado: #{logged.inspect})"
     assert_equal [[], true], result
   end
+
+  # Regressão do MENOR 3: o ramo de SUCESSO com stderr não-vazio também deve
+  # ser registrado (via Rails.logger.warn). Hoje só o ramo de falha era
+  # testado. Casos reais: "cookies are no longer valid" vem como WARNING mesmo
+  # com exit 0.
+  test 'execute_yt_dlp registra stderr via warn quando comando termina com sucesso (exit 0) e stderr não-vazio' do
+    # stderr de 2500 chars exercita também o truncamento (~2000) no ramo warn.
+    stderr_aviso = 'WARNING: [youtube] cookies are no longer valid ' + ('y' * 2443)
+    sucesso = stub(success?: true, exitstatus: 0)
+
+    Open3.stubs(:capture3).returns(["some output", stderr_aviso, sucesso])
+
+    warned = +""
+    Rails.logger.expects(:warn).at_least_once.with do |msg|
+      warned << msg.to_s
+      true
+    end
+    Rails.logger.expects(:error).never
+
+    result = ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+      "https://www.youtube.com/channel/UCtest", limit: 1
+    )
+
+    assert warned.include?(stderr_aviso[0, 2000]),
+           "stderr do yt-dlp (sucesso c/ aviso) NÃO foi registrado via warn (registrado: #{warned.inspect})"
+    refute warned.include?('y' * 2001),
+           "stderr no ramo warn NÃO foi truncado a ~2000 chars"
+    assert_equal [[], false], result
+  end
+
+  # Regressão do MENOR 4: o stderr logado (warn OU error) deve ser truncado a
+  # ~2000 chars — o yt-dlp despeja URLs/progresso que enchem o log. Aqui no
+  # ramo de FALHA (Rails.logger.error), com stderr de 3000 chars.
+  test 'execute_yt_dlp trunca stderr logado a ~2000 chars no ramo de falha' do
+    long_stderr = 'x' * 3000
+    falha = stub(success?: false, exitstatus: 1)
+
+    Open3.stubs(:capture3).returns(["", long_stderr, falha])
+
+    logged = +""
+    Rails.logger.expects(:error).at_least_once.with do |msg|
+      logged << msg.to_s
+      true
+    end
+
+    result = ScrapingServices::YoutubeScraperService.extract_videos_detailed(
+      "https://www.youtube.com/channel/UCtest", limit: 1
+    )
+
+    assert logged.include?('x' * 2000),
+           "stderr truncado não preserva os primeiros 2000 chars (logado: #{logged[0, 80].inspect}...)"
+    refute logged.include?('x' * 2001),
+           "stderr NÃO foi truncado a 2000 chars (vazou o char 2001+)"
+
+    assert_equal [[], true], result
+  end
 end

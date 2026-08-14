@@ -13,7 +13,7 @@ module IdeationResponseFormatter
       parsed = try_parse_json(text)
       return text unless parsed
 
-      format_json(parsed, fallback_text: text)
+      format_json(parsed)
     end
 
     private
@@ -56,9 +56,9 @@ module IdeationResponseFormatter
       nil
     end
 
-    def format_json(data, fallback_text:)
+    def format_json(data)
       items = extract_items(data)
-      return fallback_text if items.empty?
+      return "" if items.empty?
 
       formatted_items = items.each_with_index.map do |item, index|
         format_item(item, index + 1)

@@ -218,7 +218,8 @@ module ScrapingServices
         [videos_limit, limit - videos_limit]
       end
 
-      # Executa o yt-dlp e CAPTURA o stderr (3º retorno do Open3.capture3).
+      # Executa o yt-dlp e CAPTURA o stderr (2º retorno do Open3.capture3 —
+      # a assinatura é [stdout, stderr, status], então o status é o 3º).
       #
       # Incidente 14/08: o caminho anterior descartava o stderr
       # (`output, _, status = Open3.capture3(*command)`), então quando o
@@ -226,18 +227,36 @@ module ScrapingServices
       # detalhado, o ScrapingFailureAlertJob("partial_collection") disparava sem
       # NENHUMA pista do motivo (extrator JS/deno, bot-check, rate-limit, DOM
       # mudou). O diagnóstico depende exatamente desse stderr — ele é registrado
-      # em falha (e em warning quando o comando termina ok mas fala algo, ex.:
-      # "cookies are no longer valid" vem como WARNING mesmo com exit 0).
+      # em falha (Rails.logger.error) e em warning quando o comando termina ok
+      # mas fala algo, ex.: "cookies are no longer valid" vem como WARNING mesmo
+      # com exit 0. O stderr é truncado a STDERR_LOG_LIMIT chars (MENOR 4): o
+      # yt-dlp despeja URLs/progresso que enchem o log.
+      STDERR_LOG_LIMIT = 2000
+
       def execute_yt_dlp(command, timeout: 600)
         output, stderr, status = Timeout.timeout(timeout) { Open3.capture3(*command) }
 
-        if status.success?
-          Rails.logger.warn "[YoutubeScraperService] yt-dlp (ok): #{stderr.strip}" if stderr.strip.present?
-        else
-          Rails.logger.error "[YoutubeScraperService] yt-dlp falhou (exit #{status.exitstatus}): #{stderr.strip}"
+        stderr_msg = stderr.strip
+        if stderr_msg.present?
+          logged = truncate_stderr(stderr_msg)
+          if status.success?
+            Rails.logger.warn "[YoutubeScraperService] yt-dlp (ok): #{logged}"
+          else
+            Rails.logger.error "[YoutubeScraperService] yt-dlp falhou (exit #{status.exitstatus}): #{logged}"
+          end
         end
 
         [output, stderr, status]
+      end
+
+      # Trunca mensagens de stderr longas para STDERR_LOG_LIMIT chars, preservando
+      # o prefixo (onde costuma estar a causa raiz) e sinalizando o corte. O
+      # limite é inclusivo: stderr de exatamente STDERR_LOG_LIMIT chars passa
+      # íntegro; só acima disso é truncado.
+      def truncate_stderr(message)
+        return message if message.length <= STDERR_LOG_LIMIT
+
+        "#{message[0, STDERR_LOG_LIMIT]}... [truncado, #{message.length} chars]"
       end
 
       def parse_metadata(data)
