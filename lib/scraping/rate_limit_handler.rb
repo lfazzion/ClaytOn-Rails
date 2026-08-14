@@ -80,7 +80,17 @@ module ScrapingServices
       private
 
       def parse_retry_after(val)
-        return val if val.is_a?(Numeric)
+        return nil if val.nil?
+
+        if val.is_a?(Numeric)
+          # ACHADO H (P2, sol rodada 2, 13/08): `Numeric` passava SEM a
+          # validação de positividade — retry_after: 0, -1, NaN ou infinito
+          # eram truthy e classificavam como rate limit. Exigir finito e > 0
+          # também para numéricos.
+          return nil if val.is_a?(Float) && (!val.finite? || val <= 0)
+          return nil if val.is_a?(Integer) && val <= 0
+          return val
+        end
 
         num = val.to_f
         return nil if num <= 0

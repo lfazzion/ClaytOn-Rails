@@ -50,28 +50,26 @@ module Scraping
         pacer_sleep(sleep_duration) if sleep_duration > 0
         Rails.cache.write(cache_key, Time.now.to_f)
       ensure
-        # ── ACHADO A (P1, sol 13/08): unlock NÃO é compare-delete atômico ──
-        # Rails.cache não expõe CAS (compare-and-swap), e o SolidCache também
-        # não oferece delete condicional atômico na API pública usada aqui.
-        # A liberação é read + delete em duas operações separadas, então há uma
-        # janela em que o lock pode expirar entre o read e o delete: se outro
-        # worker adquiriu o lock (novo token) nesse intervalo, o delete antigo
-        # poderia apagar o lock NOVO.
-        #
-        # Mitigação feita (melhor possível com a API disponível):
-        #   1. a condição `read(lock_key) == token` GARANTE que só apagamos o
-        #      lock se ele ainda for o nosso — se o token mudou, não apagamos,
-        #      preservando o lock do novo dono (ver teste de disputa de token);
-        #   2. a janela read→delete é minimizada usando a MESMA expressão
-        #      `Rails.cache.read(lock_key) == token` (sem trabalho entre elas).
-        #
-        # Trade-off documentado: em caso de expiração exata do TTL entre o read
-        # e o delete, um worker concorrente poderia já ter escrito um novo token
-        # E o nosso read capturar esse token novo — mas isso só ocorre em uma
-        # borda de timing de milissegundos e, mesmo assim, o pior caso é um
-        # delete do lock do concorrente, que será re-adquirido no próximo wait.
-        # Não há correção estrita sem CAS no backend; o custo de adotar um
-        # backend com CAS (ex.: Redis) está fora do escopo desta correção.
+        # ── ACHADO A (P1, sol 13/08 + rodada 2) ──
+        # Quando o backend é SolidCache (produção), o unlock é ATÔMICO via
+        # lock_and_write (FOR UPDATE): verifica o token sob lock e deleta na
+        # mesma operação — sem a janela read→delete. Para outros stores
+        # (teste FileStore) fica o compare-delete com janela mínima, que é o
+        # melhor possível sem CAS.
+        release_pacer_lock(lock_key, token)
+      end
+    end
+
+    # Unlock distribuído do FetchPacer: só remove se ainda for o nosso token.
+    def self.release_pacer_lock(lock_key, token)
+      if Rails.cache.is_a?(SolidCache::Store)
+        normalized = Rails.cache.send(:normalize_key, lock_key, nil)
+        SolidCache::Entry.lock_and_write(normalized) do |raw|
+          if raw && Rails.cache.send(:deserialize_entry, raw)&.value.to_s == token.to_s
+            SolidCache::Entry.delete_by_key(normalized)
+          end
+        end
+      else
         Rails.cache.delete(lock_key) if Rails.cache.read(lock_key) == token
       end
     end

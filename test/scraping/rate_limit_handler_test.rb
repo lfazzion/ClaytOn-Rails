@@ -77,8 +77,29 @@ class RateLimitHandlerTest < ActiveSupport::TestCase
   end
 
   test 'rate_limited? does NOT match a zero retry_after context' do
-    error = StandardError.new('Connection refused')
+    error = StandardError.new('HTTP 403 Forbidden')
     refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: '0')
+  end
+
+  # ── ACHADO H (P2, sol rodada 2, 13/08): numérico inválido também não conta.
+  test 'rate_limited? does NOT match numeric zero or negative retry_after' do
+    error = StandardError.new('HTTP 403 Forbidden')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 0)
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: -1)
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: -30.5)
+  end
+
+  test 'rate_limited? does NOT match NaN or infinite retry_after' do
+    error = StandardError.new('HTTP 403 Forbidden')
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: Float::NAN)
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: Float::INFINITY)
+    refute ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: -Float::INFINITY)
+  end
+
+  test 'rate_limited? matches positive numeric retry_after' do
+    error = StandardError.new('HTTP 403 Forbidden')
+    assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 120)
+    assert ScrapingServices::RateLimitHandler.rate_limited?(error, retry_after: 1.5)
   end
 
   test 'handle_error re-raises (not RateLimitError) for invalid retry_after' do
