@@ -214,14 +214,13 @@ async def fetch(url, proxy=None):
             # o teardown, deixamos propagar (nao engolimos cancelamento).
             raise
         except Exception as exc:
-            # Achado G (rodada 2) + rodada 3 (sol 13/08): o `except Exception:
+            # Achado G (rodada 2) + rodada 3/4 (sol): o `except Exception:
             # pass` anterior engolia QUALQUER erro de limpeza. Suprimir SÓ a
-            # exceção operacional CONCRETA de encerramento que o nodriver/CDP
-            # levanta quando o browser já foi fechado (TargetClosedError).
-            # Nada de heurística por substring ("closed" na mensagem): um
-            # RuntimeError("closed state invariant broken") é erro de
-            # programação e deve propagar (falso positivo apontado pelo sol).
-            if type(exc).__name__ == "TargetClosedError" or "cdp.target" in type(exc).__module__:
+            # exceção operacional CONCRETA que o nodriver/CDP levanta quando o
+            # browser já foi fechado (TargetClosedError). Rodada 4: NADA de
+            # checagem por módulo (`"cdp.target" in __module__` suprime
+            # InvariantError, prova do sol) — só o nome EXATO da classe.
+            if type(exc).__name__ == "TargetClosedError":
                 pass
             else:
                 raise
