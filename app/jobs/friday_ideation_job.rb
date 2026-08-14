@@ -68,7 +68,8 @@ class FridayIdeationJob < ApplicationJob
     response = AiRouter.complete(prompt, context: :background)
 
     lines << '**Sugestões de conteúdo:**'
-    lines << response.content.to_s
+    formatted_suggestions = IdeationResponseFormatter.format(response.content)
+    lines << formatted_suggestions unless formatted_suggestions.empty?
 
     lines.join("\n")
   end

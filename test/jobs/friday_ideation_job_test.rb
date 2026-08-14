@@ -119,4 +119,64 @@ class FridayIdeationJobTest < ActiveSupport::TestCase
   ensure
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end
+
+test 'perform formata sugestoes quando LLM devolve bloco JSON' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+
+    json_content = <<~JSON
+      ```json
+      {
+        "sugestoes_de_conteudo": [
+          {
+            "titulo": "Top 5 Games",
+            "descricao": "Guia da semana.",
+            "formatos_sugeridos": ["Reels", "TikTok"]
+          }
+        ]
+      }
+      ```
+    JSON
+
+    mock_response = stub(content: json_content)
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    sent_message = nil
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      sent_message = msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    assert_not_nil sent_message
+    assert_includes sent_message, "**Sugestões de conteúdo:**\n1. **Top 5 Games** — Guia da semana. Formatos: Reels, TikTok"
+    refute_includes sent_message, '```json'
+    refute_includes sent_message, 'sugestoes_de_conteudo'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  test 'perform preserva sugestoes quando LLM devolve texto puro' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+
+    plain_content = "1. **Ideia Texto** — Detalhes em texto puro."
+    mock_response = stub(content: plain_content)
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    sent_message = nil
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      sent_message = msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    assert_not_nil sent_message
+    assert_includes sent_message, "**Sugestões de conteúdo:**\n1. **Ideia Texto** — Detalhes em texto puro."
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
 end
+
