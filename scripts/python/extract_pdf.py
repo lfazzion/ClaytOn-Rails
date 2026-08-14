@@ -16,10 +16,22 @@ execução do script); != 0 só para uso inválido dos args.
 """
 
 import json
+import logging
 import resource
 import sys
 
 PDF_HEADER = b"%PDF-"
+
+# Logger para stderr: erros inesperados do parser em PDFs não confiáveis
+# precisam de traceback completo para diagnosticar defeitos e regressões do
+# pypdf. O stdout só carrega o JSON sanitizado (contrato com server.py), mas o
+# traceback vai para stderr para não quebrar o parser de saída JSON.
+_log = logging.getLogger("extract_pdf")
+_log.setLevel(logging.DEBUG)
+if not _log.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(process)d] %(message)s"))
+    _log.addHandler(_handler)
 
 # B2-memória (2ª rodada de revisão): teto de memória do processo de parse. Um
 # PDF-bomba (stream comprimido que expande para GBs dentro de extract_text)
@@ -98,6 +110,11 @@ def main():
         }))
         return 0
     except Exception as exc:  # noqa: BLE001 — erro vira JSON, nunca derruba o script
+        # O traceback completo vai para stderr (logger.exception) para
+        # diagnosticar defeitos e regressões do pypdf em PDFs não confiáveis.
+        # O stdout recebe apenas o JSON sanitizado — o server.py lê stdout como
+        # contrato e stderr cai no log do sidecar via clip(stderr).
+        _log.exception("erro inesperado ao parsear PDF")
         _err_doc("erro ao ler PDF: %s" % exc)
         return 0
 

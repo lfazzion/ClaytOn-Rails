@@ -78,7 +78,7 @@ module Fetcher
       def link(node)
         text = inline(node)
         href = node["href"].to_s.strip
-        return text if href.empty? || href.start_with?("javascript:", "data:")
+        return text if href.empty? || dangerous_scheme?(href)
         return href if text.empty?
 
         "[#{text}](#{href})"
@@ -86,7 +86,13 @@ module Fetcher
 
       def image(node)
         alt = node["alt"].to_s.strip
-        alt.empty? ? "" : "![#{alt}]"
+        src = node["src"].to_s.strip
+        return "" if alt.empty? || src.empty?
+        # Allowlist explícita http/https (ACHADO E, revisão do sol, 13/08): a
+        # denylist de 3 esquemas deixava passar file:, esquemas desconhecidos e
+        # protocol-relative. Caminhos relativos (sem esquema) são seguros.
+        return "" unless safe_image_src?(src)
+        "![#{alt}](#{src})"
       end
 
       def code_block(node)
@@ -118,21 +124,57 @@ module Fetcher
       end
 
       def table(node)
-        rows = node.xpath(".//tr").map do |tr|
-          cells = tr.xpath("./th | ./td").map { |cell| inline(cell).gsub("|", "\\|") }
-          next if cells.empty?
-
-          "| #{cells.join(' | ')} |"
-        end.compact
+        rows = node.xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr").map do |tr|
+          tr.xpath("./th | ./td").map { |cell| inline(cell).gsub("|", "\\|") }
+        end
+        rows.reject!(&:empty?)
         return "" if rows.empty?
 
-        header_cells = node.xpath(".//tr").first&.xpath("./th | ./td")&.size.to_i
-        separator = "|#{Array.new([header_cells, 1].max) { ' --- ' }.join('|')}|"
-        ([rows.first, separator] + rows[1..].to_a).join("\n")
+        separator = "| #{(["---"] * rows.first.size).join(" | ")} |"
+        ([serialize_row(rows.first), separator] + rows[1..].map { |r| serialize_row(r) }).join("\n")
+      end
+
+      def serialize_row(cells)
+        "| #{cells.join(" | ")} |"
       end
 
       def escape_text(text)
         text.to_s.gsub(" ", " ")
+      end
+
+      # Bloqueia `javascript:`, `data:` e `vbscript:` independentemente de case,
+      # incluindo variantes como `java\u0009script:` ou `java\nscript:` que
+      # navegadores costumam aceitar. O case-sensitive `start_with?` original
+      # deixava passar `JavaScript:` e `Data:`.
+      DANGEROUS_SCHEMES = %w[javascript: data: vbscript:].freeze
+      private_constant :DANGEROUS_SCHEMES
+
+      # Allowlist de esquemas para imagens (ACHADO E, 13/08): só http/https
+      # explícitos passam. Caminhos relativos (sem "://", ex: "images/x.png",
+      # "/img.png") são considerados seguros e preservados. Tudo que tiver um
+      # esquema que não seja http/https — file:, ftp:, javascript:, data:,
+      # vbscript:, protocol-relative (//host) — é bloqueado.
+      def safe_image_src?(src)
+        # Protocol-relative (//host) ou esquema desconhecido (javascript:, data:).
+        scheme_sep = src.index("://")
+        # Protocol-relative: começa com "//" e não tem esquema http/https → rejeita.
+        return false if src.start_with?("//")
+        # Esquema sem "://" (ex: "javascript:alert(1)", "mailto:x") → não é http/https.
+        return false if src.include?(":") && scheme_sep.nil?
+        # Sem ":", é caminho relativo (ex: "images/x.png", "/img.png") → seguro.
+        return true unless scheme_sep
+
+        scheme = src[0, scheme_sep].gsub(/\s+/, "").downcase
+        %w[http https].include?(scheme)
+      end
+
+      def dangerous_scheme?(src)
+        # Normaliza espaçamento interno do scheme (tabs/newlines) como fazem
+        # navegadores, depois compara case-insensitivo.
+        scheme_end = src.index(":")
+        return false unless scheme_end
+        scheme = src[0, scheme_end].gsub(/\s+/, "").downcase
+        scheme.empty? || DANGEROUS_SCHEMES.any? { |s| scheme == s.chomp(":") }
       end
 
       def tidy(markdown)

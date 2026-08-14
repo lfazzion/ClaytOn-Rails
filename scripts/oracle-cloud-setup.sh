@@ -436,9 +436,6 @@ fs.inotify.max_user_watches = 524288
 # Memory — heurístico padrão, evita OOM kills agressivos
 vm.overcommit_memory = 0
 vm.panic_on_oom = 0
-
-# Chromium/Chrome headless
-kernel.core_pattern = /tmp/core.%e.%p.%t
 EOF
 
 # Carregar módulo BBR antes do sysctl — não é builtin, é módulo carregável
@@ -505,7 +502,7 @@ cat > /etc/systemd/system/docker-image-prune.timer <<'PRUNE_TMR_EOF'
 Description=Weekly Docker image cleanup
 
 [Timer]
-OnCalendar=weekly
+OnCalendar=Sun *-*-* 03:00:00
 Persistent=true
 
 [Install]

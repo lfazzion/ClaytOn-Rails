@@ -5,6 +5,8 @@ require 'json'
 require 'uri'
 
 module ScrapingServices
+  class IgdbUnauthorizedError < StandardError; end
+
   class IgdbClient
     BASE_URL = "https://api.igdb.com/v4"
     TOKEN_URL = "https://id.twitch.tv/oauth2/token"
@@ -76,7 +78,7 @@ module ScrapingServices
         end
       end
 
-      def post(path, body)
+      def post(path, body, retry_on_unauthorized: true)
         token = access_token
         return nil unless token
 
@@ -96,10 +98,17 @@ module ScrapingServices
 
         response = http.request(request)
 
+        if response.is_a?(Net::HTTPUnauthorized) && retry_on_unauthorized
+          raise IgdbUnauthorizedError
+        end
+
         return JSON.parse(response.body) if response.is_a?(Net::HTTPSuccess)
 
         Rails.logger.warn "[IgdbClient] HTTP #{response.code} em #{path}"
         nil
+      rescue IgdbUnauthorizedError
+        reset_access_token
+        post(path, body, retry_on_unauthorized: false)
       rescue StandardError => e
         Rails.logger.error "[IgdbClient] Erro: #{e.message}"
         nil

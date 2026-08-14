@@ -29,6 +29,65 @@ class SocialProfileTest < ActiveSupport::TestCase
     assert_includes @profile.errors[:platform_username], "can't be blank"
   end
 
+  test "twitter platform_username should reject path traversal" do
+    profile = build(:social_profile, :twitter, platform_username: '../etc/passwd')
+    assert_not profile.valid?
+    assert_includes profile.errors[:platform_username],
+                    "must be a valid Twitter handle (letters, numbers, underscores only)"
+  end
+
+  test "twitter platform_username should reject slash" do
+    profile = build(:social_profile, :twitter, platform_username: 'foo/bar')
+    assert_not profile.valid?
+    assert_includes profile.errors[:platform_username],
+                    "must be a valid Twitter handle (letters, numbers, underscores only)"
+  end
+
+  test "twitter platform_username should reject backslash" do
+    profile = build(:social_profile, :twitter, platform_username: 'foo\\bar')
+    assert_not profile.valid?
+    assert_includes profile.errors[:platform_username],
+                    "must be a valid Twitter handle (letters, numbers, underscores only)"
+  end
+
+  test "twitter platform_username should reject query string" do
+    profile = build(:social_profile, :twitter, platform_username: 'foo?bar=1')
+    assert_not profile.valid?
+    assert_includes profile.errors[:platform_username],
+                    "must be a valid Twitter handle (letters, numbers, underscores only)"
+  end
+
+  test "twitter platform_username should reject fragment" do
+    profile = build(:social_profile, :twitter, platform_username: 'foo#fragment')
+    assert_not profile.valid?
+    assert_includes profile.errors[:platform_username],
+                    "must be a valid Twitter handle (letters, numbers, underscores only)"
+  end
+
+  test "twitter platform_username should accept valid handle" do
+    profile = build(:social_profile, :twitter, platform_username: 'john_doe123')
+    assert profile.valid?, "expected valid handle to pass: #{profile.errors.full_messages}"
+  end
+
+  test "twitter platform_username should accept handle after @ strip" do
+    profile = build(:social_profile, :twitter, platform_username: '@john_doe')
+    profile.valid?
+    assert_equal 'john_doe', profile.platform_username
+    assert profile.valid?
+  end
+
+  test "non-twitter platform should not apply twitter handle validation" do
+    profile = build(:social_profile, :instagram, platform_username: 'foo/bar')
+    assert profile.valid?, "non-twitter platforms should not enforce twitter handle pattern"
+  end
+
+  test "twitter platform_username should reject handle over 15 chars" do
+    profile = build(:social_profile, :twitter, platform_username: 'a' * 16)
+    assert_not profile.valid?
+    assert_includes profile.errors[:platform_username],
+                    "must be a valid Twitter handle (letters, numbers, underscores only)"
+  end
+
   test "platform_user_id should be present" do
     @profile.platform_user_id = nil
     assert_not @profile.valid?

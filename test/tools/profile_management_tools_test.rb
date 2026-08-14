@@ -467,4 +467,148 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     result = tool.execute(discovered_profile_id: 999_999)
     assert_equal :error, result[:status]
   end
+
+  # ── 6. Corrida de criação (RecordNotUnique) ──────────────────────────────────
+
+  test 'add_profile em race retorna already_monitored com vencedor e sem enqueue duplicado' do
+    metadata = {
+      channel_id: 'UC_RACE_ID',
+      title: 'Canal Race',
+      subscriber_count: 1_000
+    }
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+
+    winner = create(:social_profile, platform: 'youtube', platform_username: 'racechannel',
+                                     platform_user_id: 'UC_RACE_ID', display_name: 'Canal Race',
+                                     monitoring_status: 'active', collection_status: 'pending',
+                                     followers_count: 1_000)
+
+    tool = AddProfileTool.new
+    # Primeira chamada (pre-check): nil — nenhum duplicado.
+    # Segunda chamada (via find_winner após RecordNotUnique): o vencedor.
+    tool.stubs(:find_duplicate).with('youtube', 'racechannel').returns(nil, winner)
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate'))
+    ScrapeYoutubeJob.expects(:perform_later).never
+
+    result = tool.execute(platform: 'youtube', handle: 'racechannel')
+
+    assert_equal :already_monitored, result[:status]
+    expected = tool.send(:format_profile, winner)
+    assert_equal expected, result[:data]
+  end
+
+  test 'add_profile em race por platform_user_id com handles diferentes retorna already_monitored com vencedor' do
+    metadata = {
+      channel_id: 'UC_DIFF_HANDLE_ID',
+      title: 'Canal YouTube',
+      subscriber_count: 5_000
+    }
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+
+    winner = create(:social_profile, platform: 'youtube', platform_username: 'handle_antigo',
+                                     platform_user_id: 'UC_DIFF_HANDLE_ID', display_name: 'Canal YouTube',
+                                     monitoring_status: 'active', collection_status: 'pending',
+                                     followers_count: 5_000)
+
+    tool = AddProfileTool.new
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate user_id'))
+    ScrapeYoutubeJob.expects(:perform_later).never
+
+    result = tool.execute(platform: 'youtube', handle: 'handle_novo')
+
+    assert_equal :already_monitored, result[:status]
+    expected = tool.send(:format_profile, winner)
+    assert_equal expected, result[:data]
+  end
+
+  test 'promote_prospect em race retorna already_monitored com vencedor e sem enqueue duplicado' do
+    dp = create(:discovered_profile, platform: 'twitter', username: 'prospect_race')
+
+    winner = create(:social_profile, platform: 'twitter', platform_username: 'prospect_race',
+                                     platform_user_id: 'UC_WIN_ID',
+                                     monitoring_status: 'active', collection_status: 'pending_validation')
+
+    tool = PromoteProspectTool.new
+    # Primeira chamada (pre-check): nil. Segunda chamada (recovery): winner.
+    tool.stubs(:find_duplicate).with('twitter', 'prospect_race').returns(nil, winner)
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate'))
+    ScrapeTwitterJob.expects(:perform_later).never
+
+    result = tool.execute(discovered_profile_id: dp.id)
+
+    assert_equal :already_monitored, result[:status]
+    expected = tool.send(:format_profile, winner)
+    assert_equal expected, result[:data]
+  end
+
+  test 'add_profile em race por platform_user_id em perfil arquivado reativa o perfil e retorna reactivated' do
+    metadata = {
+      channel_id: 'UC_ARCHIVED_HANDLE_ID',
+      title: 'Canal YouTube',
+      subscriber_count: 5_000
+    }
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+
+    winner = create(:social_profile, platform: 'youtube', platform_username: 'handle_antigo',
+                                     platform_user_id: 'UC_ARCHIVED_HANDLE_ID', display_name: 'Canal YouTube',
+                                     monitoring_status: 'paused', archived_at: 1.day.ago)
+
+    tool = AddProfileTool.new
+
+    SocialProfile.expects(:create!).raises(ActiveRecord::RecordNotUnique.new('duplicate user_id'))
+
+    result = tool.execute(platform: 'youtube', handle: 'handle_novo')
+
+    assert_equal :reactivated, result[:status]
+    assert_nil winner.reload.archived_at
+    assert_equal 'active', winner.monitoring_status
+    assert_equal winner.id, result[:data][:id]
+  end
+
+  # ── 7. Deduplicação de channel ID (case sensível) ───────────────────────────
+
+  test 'channel IDs que diferem apenas em caixa são tratados como perfis distintos' do
+    create(:social_profile, platform: 'youtube', platform_username: 'UCn8SzhX6Z1qW9_123456789',
+                            platform_user_id: 'UC_ORIG_ID', display_name: 'Original')
+    create(:social_profile, platform: 'youtube', platform_username: 'UCN8SZHX6Z1QW9_123456789',
+                            platform_user_id: 'UC_OTHER_ID', display_name: 'Outro case')
+
+    tool = AddProfileTool.new
+    dup = tool.send(:find_duplicate, 'youtube', 'UCn8SzhX6Z1qW9_123456789')
+    assert_equal 'UCn8SzhX6Z1qW9_123456789', dup.platform_username
+
+    dup_lower = tool.send(:find_duplicate, 'youtube', 'UCN8SZHX6Z1QW9_123456789')
+    assert_equal 'UCN8SZHX6Z1QW9_123456789', dup_lower.platform_username
+  end
+
+  test 'find_profile diferencia channel IDs do YouTube por caixa exata em SetProfileMonitoringTool e RemoveProfileTool' do
+    orig = create(:social_profile, platform: 'youtube', platform_username: 'UCn8SzhX6Z1qW9_123456789',
+                                  platform_user_id: 'UCn8SzhX6Z1qW9_123456789', monitoring_status: 'active')
+    other = create(:social_profile, platform: 'youtube', platform_username: 'UCN8SZHX6Z1QW9_123456789',
+                                   platform_user_id: 'UCN8SZHX6Z1QW9_123456789', monitoring_status: 'active')
+
+    set_tool = SetProfileMonitoringTool.new
+    set_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789', status: 'paused')
+
+    assert_equal 'paused', orig.reload.monitoring_status
+    assert_equal 'active', other.reload.monitoring_status
+
+    remove_tool = RemoveProfileTool.new
+    res = remove_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789')
+
+    assert_equal :success, res[:status]
+    refute SocialProfile.exists?(orig.id)
+    assert SocialProfile.exists?(other.id)
+  end
+
+  test 'handle com deduplicação case-insensitive mantém comportamento existente' do
+    create(:social_profile, platform: 'twitter', platform_username: 'casehandle')
+    tool = AddProfileTool.new
+    dup = tool.send(:find_duplicate, 'twitter', 'CaseHandle')
+    assert_not_nil dup
+    assert_equal 'casehandle', dup.platform_username
+  end
 end

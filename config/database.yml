@@ -1,5 +1,5 @@
 # Backup seguro: usar sqlite3 .backup API (WAL-safe).
-# Script: bin/backup — executa `sqlite3 DB ".backup FILE"` e rotaciona backups.
+# Script: bin/backup — executa `sqlite3 DB \".backup FILE\"` e rotaciona backups.
 # Job: SqliteBackupJob roda diariamente às 3am via recurring.yml.
 default: &default
   adapter: sqlite3
@@ -23,6 +23,8 @@ production:
     <<: *default
     database: storage/production.sqlite3
     pool: <%= ENV.fetch("PRIMARY_POOL") { 10 } %>
+    migrations_paths:
+      - db/migrate
     pragmas:
       journal_mode: wal
       synchronous: normal
@@ -30,13 +32,17 @@ production:
       cache_size: 10000
   queue:
     <<: *default
-    database: storage/production.sqlite3
+    database: storage/production_queue.sqlite3
+    pool: <%= ENV.fetch("SOLID_QUEUE_POOL") { 10 } %>
+    migrations_paths:
+      - db/queue_migrate
     pragmas:
       journal_mode: wal
-    pool: <%= ENV.fetch("SOLID_QUEUE_POOL") { 10 } %>
   cache:
     <<: *default
-    database: storage/production.sqlite3
+    database: storage/production_cache.sqlite3
+    pool: <%= ENV.fetch("SOLID_CACHE_POOL") { 5 } %>
+    migrations_paths:
+      - db/cache_migrate
     pragmas:
       journal_mode: wal
-    pool: <%= ENV.fetch("SOLID_CACHE_POOL") { 5 } %>

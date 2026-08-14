@@ -87,15 +87,20 @@ class PostsByTypeTool < ToolBase
         desc: 'Plataforma do perfil no banco local: twitter, instagram, youtube ou tiktok — ' \
               'X/Twitter é "twitter" aqui ("x" só existe como valor em platform_search).',
         required: true
-  param :post_type, type: :string, desc: 'Tipo de post (image/video/text/reel/story)', required: true
+  param :post_type, type: :string, desc: 'Tipo de post (image/video/text/reel/story/short)', required: true
   param :limit, type: :integer, desc: 'Número máximo de resultados (padrão 10)', required: false
 
   def run(username:, platform:, post_type:, limit: 10)
+    normalized_type = post_type.to_s.strip.downcase
+    unless SocialPost::POST_TYPES.include?(normalized_type)
+      return error("Tipo de post inválido: #{post_type}. Tipos aceitos: #{SocialPost::POST_TYPES.join(', ')}")
+    end
+
     profile = SocialProfile.where(platform: platform).where('LOWER(platform_username) = LOWER(?)', username).first
     return error("Perfil não encontrado: #{username} em #{platform}") unless profile
 
     limit = clamp(limit, 1, 50)
-    posts = profile.social_posts.by_type(post_type).recent(30).limit(limit)
+    posts = profile.social_posts.by_type(normalized_type).recent(30).limit(limit)
 
     success(posts.map { |p| format_post(p) })
   end

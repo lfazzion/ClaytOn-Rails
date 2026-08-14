@@ -1,14 +1,19 @@
 #!/bin/bash
 set -e
 
-DB_PATH="${1:-/rails/storage/production.sqlite3}"
-BACKUP_DIR="${2:-/rails/storage/backups}"
-KEEP_DAYS="${3:-7}"
+# Uso: bin/backup <db_path> <backup_dir> <label> <keep_days>
+# O label identifica qual banco está sendo backupado (primary, queue, cache),
+# gerando arquivos de backup e rotacionando-os separadamente.
+
+DB_PATH="${1:?db_path obrigatório}"
+BACKUP_DIR="${2:?backup_dir obrigatório}"
+LABEL="${3:-primary}"
+KEEP_DAYS="${4:-7}"
 
 mkdir -p "$BACKUP_DIR"
 
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_FILE="$BACKUP_DIR/production_${TIMESTAMP}.sqlite3"
+BACKUP_FILE="$BACKUP_DIR/${LABEL}_${TIMESTAMP}.sqlite3"
 
 echo "[backup] Iniciando backup de $DB_PATH para $BACKUP_FILE"
 
@@ -21,7 +26,8 @@ else
   exit 1
 fi
 
-find "$BACKUP_DIR" -name "production_*.sqlite3" -mtime +$KEEP_DAYS -delete
-echo "[backup] Backups anteriores a $KEEP_DAYS dias removidos"
+# Rotaciona apenas backups deste banco (identificados pelo label).
+find "$BACKUP_DIR" -name "${LABEL}_*.sqlite3" -mtime +$KEEP_DAYS -delete
+echo "[backup] Backups anteriores a $KEEP_DAYS dias removidos (label: $LABEL)"
 
 exit 0
