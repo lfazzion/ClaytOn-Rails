@@ -51,9 +51,14 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
         pass
 
     class FakeFrameNavigated:
+        # API real (nodriver 0.50.3, verificado 13/08): FrameNavigated.params
+        # é um objeto Frame com `id_` e `parent_id` — não campos no params.
         def __init__(self, frame_id, parent_id=None):
-            self.frame_id = frame_id
-            self.parent_id = parent_id
+            class Frame:
+                pass
+            self.frame = Frame()
+            self.frame.id_ = frame_id
+            self.frame.parent_id = parent_id
 
     def _network_enable():
         return NetworkEnableCommand()
@@ -61,11 +66,14 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     class Network:
         ResourceType = ResourceType
         ResponseReceived = ResponseReceived
-        FrameNavigated = FakeFrameNavigated
         enable = staticmethod(_network_enable)
+
+    class Page:
+        FrameNavigated = FakeFrameNavigated
 
     class cdp:
         network = Network
+        page = Page
 
     class FakeResponse:
         def __init__(self, ip):
@@ -174,20 +182,16 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
             # os eventos ResponseReceived sejam emitidos no handler correto.
             return await self.main_tab.get(url)
 
-        async def stop(self):
-            # Achado G: a API real do nodriver e ASSINCRONA (`await
-            # browser.stop()`). O fake antigo implementava stop SINCRONO, o que
-            # fazia o `except Exception` da producao engolir qualquer TypeError
-            # de `await` sobre corotina/callable. O fake agora modela a API
-            # real (stop eh coroutine) e registra que foi de fato aguardado.
-            # Escrevemos um sentinela em arquivo para o teste comprovar que o
-            # stop assincrono foi DE FATO aguardado (nao apenas referenciado).
+        def stop(self):
+            # API real (nodriver 0.50.3, verificado 13/08): Browser.stop é
+            # SÍNCRONO (retorna None) — `await browser.stop()` levantaria
+            # TypeError em produção. O fake modela a API real; o script chama
+            # browser.stop() sem await.
             self.stop_called = True
-            self.stop_awaited = True
             sentinel = os.environ.get("DOC_STOP_SENTINEL")
             if sentinel:
                 with open(sentinel, "w") as fh:
-                    fh.write("awaited")
+                    fh.write("called")
             # Modo de injecao de erro: simula um erro de limpeza REAL que a
             # producao nao deve mascarar com `except Exception: pass` amplo.
             if os.environ.get("DOC_STOP_RAISE") == "1":
@@ -290,22 +294,19 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     FileUtils.remove_entry(dir) if dir
   end
 
-  test "browser.stop() assincrono e de fato aguardado (nao mascarado por except amplo)" do
-    # Achado G: producao faz `await browser.stop()`; o fake antigo tinha stop
-    # SINCRONO, entao o `except Exception` da producao engolia o TypeError de
-    # `await` sobre um metodo que nao e coroutine. O fake agora modela a API
-    # real (stop assincrono) e o teste confere que o stop foi AGUARDADO de
-    # verdade: um sentinela so e escrito quando a coroutine roda. Se a producao
-    # chamasse `browser.stop()` sem `await` (ou causasse TypeError engolido), a
-    # coroutine nunca executaria e o sentinela nao existiria.
+  test "browser.stop() sincrono e de fato chamado (API real nodriver 0.50.3)" do
+    # API real (verificado 13/08 no nodriver 0.50.3): Browser.stop é SÍNCRONO
+    # (retorna None) — `await browser.stop()` levantaria TypeError e todo fetch
+    # falharia. O script chama browser.stop() sem await; o sentinela só é
+    # escrito quando o stop roda de verdade.
     sentinel = File.join(Dir.tmpdir, "nodriver_stop_sentinel_#{Process.pid}.txt")
     FileUtils.rm_f(sentinel)
     dir, env = build_fake_env("DOC_STOP_SENTINEL" => sentinel)
     _, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
 
     assert status.success?, "script falhou com status #{status.exitstatus}: #{stderr}"
-    assert File.exist?(sentinel), "browser.stop() assincrono nao foi aguardado: sentinela ausente (TypeError de await engolido?)"
-    assert_equal "awaited", File.read(sentinel).strip
+    assert File.exist?(sentinel), "browser.stop() não foi chamado: sentinela ausente"
+    assert_equal "called", File.read(sentinel).strip
   ensure
     FileUtils.rm_f(sentinel) if sentinel
     FileUtils.remove_entry(dir) if dir

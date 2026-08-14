@@ -156,11 +156,14 @@ async def fetch(url, proxy=None):
 
         def on_frame_navigated(params, *args, **kwargs):
             nonlocal main_frame_id
-            # O evento FrameNavigated do frame principal traz `parent_id` nulo.
-            if getattr(params, "parent_id", None) is None:
-                main_frame_id = getattr(params, "frame_id", None)
+            # API real (nodriver 0.50.3): FrameNavigated.params.frame é um
+            # objeto Frame com `id_` e `parent_id` (não campos no params —
+            # verificado 13/08). Frame principal = parent_id nulo.
+            frame = getattr(params, "frame", None)
+            if frame is not None and getattr(frame, "parent_id", None) is None:
+                main_frame_id = getattr(frame, "id_", None)
 
-        page.add_handler(uc.cdp.network.FrameNavigated, on_frame_navigated)
+        page.add_handler(uc.cdp.page.FrameNavigated, on_frame_navigated)
 
         try:
             # browser.get navega o primeiro tab usando cdp.page.navigate;
@@ -180,7 +183,7 @@ async def fetch(url, proxy=None):
                 uc.cdp.network.ResponseReceived, on_response_received
             )
             page.remove_handler(
-                uc.cdp.network.FrameNavigated, on_frame_navigated
+                uc.cdp.page.FrameNavigated, on_frame_navigated
             )
 
         html = await page.get_content()
@@ -199,7 +202,7 @@ async def fetch(url, proxy=None):
         }
     finally:
         try:
-            await browser.stop()
+            browser.stop()
         except asyncio.CancelledError:
             # CancelledError ja foi relancado no polling; se chegou aqui durante
             # o teardown, deixamos propagar (nao engolimos cancelamento).
