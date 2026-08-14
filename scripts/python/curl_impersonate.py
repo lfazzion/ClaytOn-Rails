@@ -48,7 +48,6 @@ def do_request(url, method="GET", profile="chrome", proxy=None, headers=None, bo
     kwargs = {
         "impersonate": fp["impersonate"],
         "timeout": timeout,
-        "verify": False,
     }
 
     if proxy:
@@ -68,11 +67,26 @@ def do_request(url, method="GET", profile="chrome", proxy=None, headers=None, bo
     try:
         resp = requests.request(method, url, **kwargs)
 
-        rate_limit_codes = [403, 429, 503]
-        if resp.status_code in rate_limit_codes:
+        if resp.status_code == 429:
             return {
                 "success": False,
-                "error": f"rate_limit_{resp.status_code}",
+                "error": "rate_limit_429",
+                "status_code": resp.status_code,
+                "body": resp.text[:500],
+            }
+
+        if resp.status_code == 403:
+            return {
+                "success": False,
+                "error": "blocked_403",
+                "status_code": resp.status_code,
+                "body": resp.text[:500],
+            }
+
+        if resp.status_code == 503:
+            return {
+                "success": False,
+                "error": "unavailable_503",
                 "status_code": resp.status_code,
                 "body": resp.text[:500],
             }

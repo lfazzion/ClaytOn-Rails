@@ -379,6 +379,27 @@ class Fetcher::CookieJarTest < ActiveSupport::TestCase
     assert_equal "abc123", Fetcher::CookieJar.for("reddit.com").first["value"]
   end
 
+  test "o payload bruto no banco nao contem o token e record.payload devolve o JSON original" do
+    Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES, expires_at: 7.days.from_now)
+
+    record = BrowserSessionCookie.find_by(domain: "youtube.com")
+    # `select_value` com SQL sanitizado via sanitize_sql_array faz o bind
+    # tipado do placeholder — ao contrário de `connection.execute(sql, id)`,
+    # onde o segundo argumento é o NOME DO LOG, não o valor do placeholder.
+    raw = BrowserSessionCookie
+      .connection
+      .select_value(
+        BrowserSessionCookie.sanitize_sql_array(
+          ["SELECT payload FROM browser_session_cookies WHERE id = ?", record.id]
+        )
+      )
+
+    assert_not_includes raw, "abc123", "token encontrado no dado bruto do banco"
+
+    parsed = JSON.parse(record.payload)
+    assert_equal "abc123", parsed.first["value"], "record.payload deve devolver o JSON original"
+  end
+
   test "conjunto vazio apos filtro nao sobrescreve o jar" do
     Fetcher::CookieJar.store!(domain: "reddit.com", cookies: REDDIT_COOKIES, expires_at: 7.days.from_now)
     so_estrangeiros = [

@@ -35,9 +35,10 @@ module ScrapingServices
       end
 
       # Busca uma URL arbitrária via Nodriver (fallback Python para domínios hard-blocked).
-      # Retorna hash { title:, url:, content:, html_bytes: } ou nil em falha.
-      # PLANEJADO, desligado neste branch: o chamador (`Fetcher::PageFetcher` +
-      # `config/hard_domains.yml`) é de outro PR e ainda não existe aqui.
+      # Retorna hash { title:, url:, content:, html_bytes:, document_ip: } ou nil em falha.
+      # O `document_ip` é o remoteIPAddress do documento principal capturado via CDP
+      # pelo script Python — permite o assert_document_ip! pós-navegação fechar a
+      # janela de DNS rebinding no caminho Python (igual ao caminho Chrome/Ferrum).
       def fetch_page(url, proxy: nil)
         args = [url]
         args += ['--proxy', proxy] if proxy
@@ -45,7 +46,11 @@ module ScrapingServices
         result = execute('nodriver_fetch.py', args)
         return nil if result.nil?
 
-        result.deep_symbolize_keys
+        deep = result.deep_symbolize_keys
+        # Compatibilidade com scripts Python que ainda não retornam document_ip:
+        # nil → string vazia, o assert_document_ip! fail-open com log quando ausente.
+        deep[:document_ip] = deep[:document_ip].presence || nil
+        deep
       end
 
       private

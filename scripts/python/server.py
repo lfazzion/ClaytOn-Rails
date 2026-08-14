@@ -13,13 +13,13 @@ Contrato preservado do Open3:
 O timeout autoritativo é do lado Ruby; o daqui é só um teto de segurança.
 
 Rotas:
-  GET  /health -> {"status": "ok", "scripts": [...]}
+  GET  /health -> {"status": "ok", "scripts": [...]}  (200) ou
+                  {"status": "unavailable", "unavailable_scripts": [...], "unavailable_imports": [...]} (503)
   POST /run    -> {"script": "<allowlist>", "args": [...], "timeout": <s>}
-
-Stdlib apenas — sem framework, sem dependência nova na imagem.
 """
 
 import hmac
+import importlib
 import json
 import os
 import signal
@@ -41,6 +41,17 @@ ALLOWED_SCRIPTS = frozenset(
         "curl_impersonate.py",
     ]
 )
+
+# Imports essenciais validados uma única vez na inicialização. Cada entry
+# mapeia o nome canônico do módulo Python para a allowlist de scripts que o
+# consomem — usado para relacionar "import ausente" ao script impactado no
+# healthcheck. Não inicia navegadores: só verifica disponibilidade do módulo.
+REQUIRED_IMPORTS = {
+    "nodriver": ("nodriver_fetch.py", "nodriver_instagram.py", "nodriver_twitter.py"),
+    "camoufox": ("camoufox_scrape.py",),
+    "curl_cffi": ("curl_impersonate.py",),
+    "pypdf": (),
+}
 
 MAX_BODY_BYTES = 256 * 1024
 MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -72,6 +83,35 @@ class BadRequest(Exception):
         super().__init__(message)
         self.message = message
         self.status = status
+
+
+def check_startup_health():
+    """Valida uma única vez na inicialização a presença dos scripts permitidos
+    e dos imports essenciais (nodriver, camoufox, curl_cffi, pypdf).
+
+    Não inicia navegadores — só verifica disponibilidade do módulo via
+    importlib.util.find_spec, que não executa código do package.
+    """
+    import importlib.util
+
+    unavailable_scripts = []
+    for script in sorted(ALLOWED_SCRIPTS):
+        path = os.path.join(SCRIPTS_DIR, script)
+        if not os.path.isfile(path):
+            unavailable_scripts.append(script)
+
+    unavailable_imports = []
+    for module_name, _scripts in REQUIRED_IMPORTS.items():
+        if importlib.util.find_spec(module_name) is None:
+            unavailable_imports.append(module_name)
+
+    return unavailable_scripts, unavailable_imports
+
+
+# Resultado da validação de startup, calculado uma única vez. O /health não
+# repete a checagem em cada request — falha de import é um erro de imagem,
+# constante durante o ciclo de vida do container.
+_UNAVAILABLE_SCRIPTS, _UNAVAILABLE_IMPORTS = check_startup_health()
 
 
 def authorized(header_value):
@@ -187,8 +227,8 @@ def run_pdf_extractor(tmp_path):
     """Roda extract_pdf.py como subprocesso matável (timeout + killpg).
 
     B2 (revisão Opus): o mesmo padrão do run_script para /run — nunca parsear
-    entrada hostil na thread do ThreadingHTTPServer sem timeout. O script fica
-    no MESMO diretório do server.py (o container monta scripts/python).
+    entrada hostil na thread do ThreadingHTTPServer sem timeout. O
+    server.py executa este script e aplica timeout/killpg nele.
     """
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extract_pdf.py")
     if not os.path.isfile(script):
@@ -211,12 +251,13 @@ def run_pdf_extractor(tmp_path):
         proc.communicate()  # reap do grupo morto (evita zombie)
         return {"error_kind": "unavailable", "error": "timeout de %ds no parse do PDF" % PDF_PARSE_TIMEOUT}
 
-    data = try_parse(stdout)
+    data = clip(stdout)
+    data = try_parse(data)
     if proc.returncode != 0 or not isinstance(data, dict):
         detail = clip(stderr).strip() or ("exit %s" % proc.returncode)
         # Falha de execução do script é problema de infra/parse, não do documento:
         # o consumidor decide como nomear (parse mantém "deste PDF" como defeito
-        # do documento apenas quando o PRÓPRIO script reporta error_kind parse).
+        # do documento apenas quando o PRÓPRPIO script reporta error_kind parse).
         kind = "parse" if isinstance(data, dict) and data.get("error_kind") in ("parse", "invalid") else "unavailable"
         return {"error_kind": kind, "error": "erro ao ler PDF: %s" % detail}
     return data
@@ -253,7 +294,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] != "/health":
             self.discard_unread_body()
             return self.send_json(404, {"error": "rota inexistente"})
-        self.send_json(200, {"status": "ok", "scripts": sorted(ALLOWED_SCRIPTS)})
+
+        # Healthcheck: responde 503 listando dependências indisponíveis quando
+        # algum script permitido ou import essencial estiver ausente. A checagem
+        # é feita uma única vez na importação do módulo (check_startup_health);
+        # aqui apenas lê os resultados já calculados — sem I/O de disco nem
+        # importação de navegador em cada request.
+        if _UNAVAILABLE_SCRIPTS or _UNAVAILABLE_IMPORTS:
+            self.send_json(503, {
+                "status": "unavailable",
+                "unavailable_scripts": _UNAVAILABLE_SCRIPTS,
+                "unavailable_imports": _UNAVAILABLE_IMPORTS,
+            })
+        else:
+            self.send_json(200, {"status": "ok", "scripts": sorted(ALLOWED_SCRIPTS)})
 
     def do_POST(self):
         path = self.path.split("?")[0]
@@ -355,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
 def require_token_or_die():
     """Recusa subir sem token, em vez de degradar permissivo em runtime.
 
-    Um env_file esquecido, um typo no nome da variável ou um deploy parcial não
+    Um env_file esquecado, um typo no nome da variável ou um deploy parcial não
     podem virar "autenticação desligada em silêncio": este container roda
     engines de evasão contra sites hostis e fica na mesma rede que o chrome
     (CDP sem senha) e o searxng. Falha barulhenta no deploy > auth ausente.
@@ -372,8 +426,21 @@ def require_token_or_die():
     sys.exit(1)
 
 
+def report_startup_health():
+    """Loga o resultado da validação de startup (scripts e imports)."""
+    if _UNAVAILABLE_SCRIPTS or _UNAVAILABLE_IMPORTS:
+        sys.stderr.write(
+            "[scraper-api] WARN: dependências indisponíveis — "
+            "unavailable_scripts=%s unavailable_imports=%s\n"
+            % (_UNAVAILABLE_SCRIPTS, _UNAVAILABLE_IMPORTS)
+        )
+    else:
+        sys.stderr.write("[scraper-api] startup health OK: todos os scripts e imports presentes\n")
+
+
 def main():
     require_token_or_die()
+    report_startup_health()
 
     host = os.environ.get("SCRAPER_BIND", "0.0.0.0")
     port = int(os.environ.get("SCRAPER_PORT", "8080"))
