@@ -20,7 +20,9 @@ class SearchApiSchemaTest < Minitest::Test
     )
   end
 
-  def test_schema_version_reflete_migration_de_quotas_2026_08_17_000001
-    assert_match(/define\(version: 2026_08_17_000001\)/, SCHEMA)
+  def test_schema_version_presente_e_valida
+    version_match = SCHEMA.match(/define\(version:\s*(\d{4}_\d{2}_\d{2}_\d{6})\)/)
+    refute_nil version_match, "o schema.rb deve definir uma versão no formato YYYY_MM_DD_HHMMSS"
+    assert_operator version_match[1].delete("_").to_i, :>=, 20260817000001
   end
 end

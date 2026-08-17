@@ -155,9 +155,10 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
   end
 
   # ── Linkup HTTP 200 com raw results=[] (JSON vazio cru) ─────────────────
-  # Nova ordem de fallback (decisão dono + Grok 17/08): Linkup primeiro.
-  # Linkup 200 com results=[] cru = sucesso vazio, NÃO cai em Exa/Tavily.
-  def test_attempt_linkup_raw_results_vazio_devolve_empty_sucesso_incrementa_cota_e_nao_cai_em_fallback
+  # Contrato por especialidade (Item A):
+  # 200 vazio de um provider = miss da especialidade (incrementa cota).
+  # Continua a cascata para o próximo provider SÓ SE a query casar com a especialidade do próximo.
+  def test_attempt_linkup_raw_results_vazio_devolve_empty_sucesso_incrementa_cota
     fake_body = {
       "results" => [],
       "sources" => []
@@ -173,19 +174,97 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
     end
 
     result, reason = SearchApiRouter.attempt(:linkup, "rails", 5, nil, Date.today, score_threshold: 0.7)
-    refute_nil result, "Linkup 200 com results=[] cru deve retornar sucesso vazio (não nil)"
+    refute_nil result, "Linkup 200 com results=[] cru deve retornar hash válido"
     assert_nil reason, "não deve haver reason de falha quando a API respondeu 200"
     assert_equal "linkup", result[:engine]
     assert_equal [], result[:results]
     assert quota_called, "quota deve ser incrementada mesmo com results=[] cru (API respondeu 200)"
   end
 
-  def test_call_linkup_raw_results_vazio_retorna_results_empty_e_nao_chama_exa_nem_tavily
+  def test_call_linkup_200_vazio_continua_para_exa_em_query_de_papers
     calls = []
-    fake_linkup = {
-      "results" => [],
-      "sources" => []
+    fake_linkup = { "results" => [], "sources" => [] }
+    fake_exa = {
+      "results" => [{ "title" => "E1", "url" => "https://exa.ai/paper1", "highlights" => ["attention"] }]
     }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :linkup
+        { ok: true, body: fake_linkup, reason: nil, retryable: false }
+      else
+        { ok: true, body: fake_exa, reason: nil, retryable: false }
+      end
+    end
+    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
+      # no-op
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "papers sobre machine learning", limit: 5)
+      refute_nil result, "deve obter resultado do Exa após miss vazio do Linkup em query de papers"
+      assert_equal "exa", result[:engine]
+      assert_equal 1, result[:results].size
+      assert_equal [:linkup, :exa], calls, "deve tentar Linkup e depois Exa (especialidade da query)"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  def test_call_linkup_200_vazio_continua_para_tavily_em_query_de_lookup_pulando_exa
+    calls = []
+    fake_linkup = { "results" => [], "sources" => [] }
+    fake_tavily = {
+      "results" => [{ "title" => "T1", "url" => "https://tavily.com/doc", "content" => "c", "score" => 0.9 }],
+      "usage" => { "credits" => 1 }
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :linkup
+        { ok: true, body: fake_linkup, reason: nil, retryable: false }
+      else
+        { ok: true, body: fake_tavily, reason: nil, retryable: false }
+      end
+    end
+    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
+      # no-op
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "como instalar rails", limit: 5)
+      refute_nil result, "deve obter resultado do Tavily após miss vazio do Linkup em query de lookup"
+      assert_equal "tavily", result[:engine]
+      assert_equal 1, result[:results].size
+      assert_equal [:linkup, :tavily], calls, "deve pular Exa e ir direto para Tavily (especialidade lookup)"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  def test_call_linkup_200_vazio_para_cascata_em_query_factual_generica
+    calls = []
+    fake_linkup = { "results" => [], "sources" => [] }
 
     SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
       calls << provider
@@ -204,11 +283,9 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
       ENV["EXA_API_KEY"] = "ex"
       ENV["LINKUP_API_KEY"] = "lk"
 
-      result = SearchApiRouter.call(query: "rails", limit: 5)
-      refute_nil result, "SearchApiRouter.call deve retornar hash válido"
-      assert_equal "linkup", result[:engine]
-      assert_equal [], result[:results]
-      assert_equal [:linkup], calls, "não deve tentar Exa ou Tavily quando Linkup respondeu 200 com results=[]"
+      result = SearchApiRouter.call(query: "preço do bitcoin hoje", limit: 5)
+      assert_nil result, "query factual genérica com miss no Linkup deve parar a cascata e retornar nil"
+      assert_equal [:linkup], calls, "não deve gastar cota de Exa ou Tavily em query factual genérica"
     ensure
       ENV["TAVILY_API_KEY"] = orig_tv
       ENV["EXA_API_KEY"] = orig_ex

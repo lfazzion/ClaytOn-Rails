@@ -150,34 +150,52 @@ class SearchApiRouterTest < ActiveSupport::TestCase
     assert_equal "tavily", out[:engine]
   end
 
-  # ── Linkup 200 com results=[] para a cascata e não cai em Exa nem Tavily ───
-  test "Linkup 200 com results vazio retorna results vazio e não cai em Exa nem Tavily" do
+  # ── Linkup 200 com results=[]: continua por especialidade ou para em factual ──
+  test "Linkup 200 com results vazio em query de papers continua para Exa" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    ENV["EXA_API_KEY"] = "ex"
+    stub_request(:post, "https://api.linkup.so/v1/search")
+      .with(body: hash_including(q: "papers sobre machine learning"))
+      .to_return(status: 200, body: { results: [] }.to_json, headers: { "Content-Type" => "application/json" })
+    stub_exa_success("papers sobre machine learning", [{ title: "E1", url: "https://e1.com", text: "c" }])
+
+    out = SearchApiRouter.call(query: "papers sobre machine learning", limit: 5)
+    refute_nil out
+    assert_equal "exa", out[:engine]
+    assert_equal 1, out[:results].size
+    assert_equal 1, SearchApiQuota.find_by(api_name: "linkup", month: SearchApiRouter.current_month).count
+  end
+
+  test "Linkup 200 com results vazio em query de lookup continua para Tavily pulando Exa" do
     ENV["LINKUP_API_KEY"] = "lk"
     ENV["EXA_API_KEY"] = "ex"
     ENV["TAVILY_API_KEY"] = "tv"
     stub_request(:post, "https://api.linkup.so/v1/search")
-      .with(body: hash_including(q: "rails"))
+      .with(body: hash_including(q: "como instalar rails"))
+      .to_return(status: 200, body: { results: [] }.to_json, headers: { "Content-Type" => "application/json" })
+    stub_request(:post, "https://api.exa.ai/search").to_raise("Exa não devia ser chamada para lookup")
+    stub_tavily_success("como instalar rails", [{ title: "T1", url: "https://t1.com", content: "c", score: 0.9 }])
+
+    out = SearchApiRouter.call(query: "como instalar rails", limit: 5)
+    refute_nil out
+    assert_equal "tavily", out[:engine]
+    assert_equal 1, out[:results].size
+    assert_equal 1, SearchApiQuota.find_by(api_name: "linkup", month: SearchApiRouter.current_month).count
+  end
+
+  test "Linkup 200 com results vazio em query factual generica para a cascata e retorna nil" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    ENV["EXA_API_KEY"] = "ex"
+    ENV["TAVILY_API_KEY"] = "tv"
+    stub_request(:post, "https://api.linkup.so/v1/search")
+      .with(body: hash_including(q: "preço do bitcoin hoje"))
       .to_return(status: 200, body: { results: [] }.to_json, headers: { "Content-Type" => "application/json" })
     stub_request(:post, "https://api.exa.ai/search").to_raise("Exa não devia ser chamada")
     stub_request(:post, "https://api.tavily.com/search").to_raise("Tavily não devia ser chamada")
 
-    out = SearchApiRouter.call(query: "rails", limit: 5)
-    refute_nil out
-    assert_equal "linkup", out[:engine]
-    assert_equal [], out[:results]
+    out = SearchApiRouter.call(query: "preço do bitcoin hoje", limit: 5)
+    assert_nil out
     assert_equal 1, SearchApiQuota.find_by(api_name: "linkup", month: SearchApiRouter.current_month).count
-  end
-
-  # ── Tavily 200 com scores abaixo do threshold ───────────────────────────────
-  test "Tavily 200 com todos scores abaixo do threshold retorna results vazio" do
-    ENV["TAVILY_API_KEY"] = "tv"
-    stub_tavily_success("rails", [{ title: "R1", url: "https://r1.com", content: "c", score: 0.1 }])
-
-    out = SearchApiRouter.call(query: "rails", limit: 5)
-    refute_nil out
-    assert_equal "tavily", out[:engine]
-    assert_equal [], out[:results]
-    assert_equal 1, SearchApiQuota.find_by(api_name: "tavily", month: SearchApiRouter.current_month).count
   end
 
   private

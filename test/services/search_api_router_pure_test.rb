@@ -219,4 +219,35 @@ class SearchApiRouterPureTest < Minitest::Test
     )
     assert_equal %i[linkup exa], available
   end
+
+  # ── Classificador de especialidade (Item A) ──────────────────────────────
+  def test_specialty_for_exa_queries
+    assert_equal :exa, SearchApiRouter.specialty_for("papers sobre machine learning")
+    assert_equal :exa, SearchApiRouter.specialty_for("arxiv transformers attention")
+    assert_equal :exa, SearchApiRouter.specialty_for("pubmed covid vaccine")
+    assert_equal :exa, SearchApiRouter.specialty_for("o que é Ruby on Rails")
+    assert_equal :exa, SearchApiRouter.specialty_for("o que e machine learning")
+    assert_equal :exa, SearchApiRouter.specialty_for("termo semelhante a Kubernetes")
+    assert_equal :exa, SearchApiRouter.specialty_for("pesquisa sobre IA")
+    assert_equal :exa, SearchApiRouter.specialty_for("artigo conceitual")
+  end
+
+  def test_specialty_for_tavily_queries
+    assert_equal :tavily, SearchApiRouter.specialty_for("como instalar rails")
+    assert_equal :tavily, SearchApiRouter.specialty_for("gem install devise")
+    assert_equal :tavily, SearchApiRouter.specialty_for("ruby 3.4 pattern matching")
+    assert_equal :tavily, SearchApiRouter.specialty_for("documentação do postgres")
+    assert_equal :tavily, SearchApiRouter.specialty_for("documentacao do redis")
+    assert_equal :tavily, SearchApiRouter.specialty_for("lookup de DNS")
+    assert_equal :tavily, SearchApiRouter.specialty_for("instalação do docker")
+    assert_equal :tavily, SearchApiRouter.specialty_for("instalacao do docker")
+  end
+
+  def test_specialty_for_generic_factual_returns_nil
+    assert_nil SearchApiRouter.specialty_for("preço do bitcoin hoje")
+    assert_nil SearchApiRouter.specialty_for("qual o custo da OpenAI em 2025")
+    assert_nil SearchApiRouter.specialty_for("quantos habitantes tem o Japão")
+    assert_nil SearchApiRouter.specialty_for("company profile OpenAI")
+    assert_nil SearchApiRouter.specialty_for("")
+  end
 end

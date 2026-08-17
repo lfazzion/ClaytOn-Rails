@@ -6,10 +6,10 @@ require "date"
 
 # Roteador de busca multi-API (Linkup → Exa → Tavily) para fallback do SearXNG.
 #
-# CONTEXTO (decisão do dono): o WebSearchTool busca via SearXNG local. Quando o
-# SearXNG falha (erro HTTP, engines fora do ar, zero resultados), este router é
-# chamado ANTES de devolver o erro — ele tenta as APIs externas em ordem de
-# fallback. Se alguma servir, o resultado entra como success normal.
+# Contexto: o WebSearchTool busca via SearXNG local. Quando o SearXNG falha
+# (erro HTTP, engines fora do ar, zero resultados), este router é chamado
+# ANTES de devolver o erro — ele tenta as APIs externas em ordem de fallback.
+# Se alguma servir, o resultado entra como success normal.
 #
 # POR QUE NÃO RELEVANCEGUARD AQUI: o RelevanceGuard do WebSearchTool existe para
 # proteger contra envenenamento de engines scraper do SearXNG (caso Roblox/Pokémon
@@ -25,10 +25,7 @@ require "date"
 # cabe ao LLM via múltiplas tool calls / multi-turn.
 class SearchApiRouter
   # ── Configuração via ENV (Spec 1.c / 1.d) ─────────────────────────────────
-  # Ordem de fallback: Linkup (melhor factualidade single-hop, SimpleQA 91%) →
-  # Exa (busca neural, entidades, papers) → Tavily (lookup rápido, estável).
-  # Decisão do dono + revisão Grok 4.6 medium (17/08): cada API foca na sua
-  # especialidade, sem gastar cota desnecessariamente.
+  # Ordem de especialidade: Linkup (factual single-hop) → Exa (semântico/papers) → Tavily (lookup rápido).
   PROVIDERS = %i[linkup exa tavily].freeze
 
   DEFAULT_QUOTA = {
@@ -52,6 +49,10 @@ class SearchApiRouter
   SCORE_THRESHOLD_ENV = "SEARCH_API_SCORE_THRESHOLD"
   DEFAULT_SCORE_THRESHOLD = 0.7
 
+  # Regexes de especialidade para continuação de cascata após 200 vazio (miss).
+  EXA_SPECIALTY_PATTERN = /paper|arxiv|pubmed|semelhante|o que [eé]|conceitual|machine learning|pesquisa/i
+  TAVILY_SPECIALTY_PATTERN = /como instalar|gem install|pattern matching|documenta[cç][aã]o|lookup|instala[cç][aã]o/i
+
   # Timeout idêntico ao do WebSearchTool (Spec 1.a).
   OPEN_TIMEOUT = 5
   READ_TIMEOUT = 20
@@ -60,37 +61,71 @@ class SearchApiRouter
   # Mapa de time_range (day/week/month/year) → dias para recuar a data inicial.
   TIME_RANGE_DAYS = { "day" => 1, "week" => 7, "month" => 30, "year" => 365 }.freeze
 
+  # ── Classificador de especialidade ─────────────────────────────────────────
+
+  # Identifica a especialidade da query para decidir se continua a cascata após miss vazio.
+  # @return [:exa, :tavily, nil]
+  def self.specialty_for(query)
+    q = query.to_s
+    if q.match?(EXA_SPECIALTY_PATTERN)
+      :exa
+    elsif q.match?(TAVILY_SPECIALTY_PATTERN)
+      :tavily
+    else
+      nil
+    end
+  end
+
+  def self.current_date
+    if defined?(Time.current) && Time.current
+      Time.current.in_time_zone("America/Sao_Paulo").to_date
+    else
+      Date.today
+    end
+  end
+
   # ── API pública (usada pelo WebSearchTool#run) ─────────────────────────────
 
   # Tenta as APIs externas em ordem de fallback.
   # @return [Hash, nil] { results:, engine:, cost: } em sucesso, ou nil se todas falharem.
-  def self.call(query:, limit: 5, time_range: nil)
+  def self.call(query:, limit: 5, time_range: nil, today: current_date)
     providers = ordered_providers
     return nil if providers.empty? # sem nenhuma chave → router desligado (Spec 1.d)
 
     limit = clamp_limit(limit)
     tr = time_range if TIME_RANGE_DAYS.key?(time_range.to_s)
-    today = Date.today
     reasons = []
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-    providers.each do |provider|
+    query_specialty = specialty_for(query)
+    providers_to_try = providers.dup
+
+    until providers_to_try.empty?
+      provider = providers_to_try.shift
       next if quota_exceeded?(provider) # cota do mês esgotada → pula direto
 
       result, reason = attempt(provider, query, limit, tr, today)
       elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
-      if result
-        # Log estruturado: regra, provider, custo, latência — para auditoria do roteador.
+      if result && result[:results].any?
         Rails.logger.info(
           "[SearchApiRouter] #{provider} serviu a busca por #{query.inspect}" \
-          " (regra: default, custo: #{result[:cost]}, latência: #{elapsed_ms}ms)"
+          " (custo: #{result[:cost]}, latência: #{elapsed_ms}ms)"
         )
         return result
+      elsif result
+        # 200 com results=[] -> miss da especialidade (cota já foi incrementada no attempt).
+        # Continua a cascata para o próximo provider SÓ SE a query casar com a especialidade do próximo.
+        if query_specialty
+          providers_to_try.select! { |p| p == query_specialty }
+        else
+          providers_to_try.clear
+        end
+        reasons << "#{provider}: 200 vazio (miss)"
+      else
+        reasons << "#{provider}: #{reason}"
+        Rails.logger.warn("[SearchApiRouter] #{provider} falhou para #{query.inspect}: #{reason}")
       end
-
-      reasons << "#{provider}: #{reason}"
-      Rails.logger.warn("[SearchApiRouter] #{provider} falhou para #{query.inspect}: #{reason}")
     end
 
     Rails.logger.warn("[SearchApiRouter] todas as APIs falharam para #{query.inspect}: #{reasons.join(' | ')}")
@@ -171,7 +206,7 @@ class SearchApiRouter
   #   Exa    → startPublishedDate ISO 8601 (hoje menos N dias)
   #   Linkup → fromDate ISO 8601 (hoje menos N dias)
   # `today:` permite teste determinístico.
-  def self.time_filter_for(provider, time_range, today: Date.today)
+  def self.time_filter_for(provider, time_range, today: current_date)
     days = TIME_RANGE_DAYS[time_range.to_s]
     return nil if days.nil?
 
@@ -192,20 +227,13 @@ class SearchApiRouter
 
   # ── Internals de rede e cota (cobertos pelos testes Rails/WebMock) ──────────
 
-  # Tenta UMA API: 1 retry só em timeout/5xx (Refinamento SOTA 3); 401/400/429/
-  # cota esgotada NÃO retry — o fallback é o tratamento.
-  #
-  # `score_threshold:` é recebido explicitamente (e não lido de ENV dentro do
-  # método) para poder ser testado de forma isolada e determinística — ver
-  # /test/services/search_api_router_fallback_pure_test.rb (Defeito 2). O default
-  # chama a classe (SearchApiRouter.score_threshold) para não criar referência
-  # circular ao próprio parâmetro.
+  # Tenta UMA API: 1 retry só em timeout/5xx; 401/400/429/cota esgotada NÃO retry.
   def self.attempt(provider, query, limit, time_range, today, score_threshold: SearchApiRouter.score_threshold, retried: false)
     time_filter = time_filter_for(provider, time_range, today: today)
     response = http_post(provider, query, limit, time_filter)
 
     unless response[:ok]
-      # 429/401/400 → pula (sem retry). timeout/5xx → 1 retry (Refinamento SOTA 3).
+      # 429/401/400 → pula (sem retry). timeout/5xx → 1 retry.
       retryable = response[:retryable]
       if retryable && !retried
         Rails.logger.warn("[SearchApiRouter] #{provider} retryável (#{response[:reason]}); 1 retry")
@@ -216,11 +244,6 @@ class SearchApiRouter
 
     normalized = normalize_results(provider, response[:body], score_threshold: score_threshold)
     if normalized.empty?
-      # HTTP 200, mas 0 resultados úteis (seja JSON results=[] vazio cru da API,
-      # seja todos os resultados filtrados por score/lixo). Em ambos os casos a API
-      # respondeu 200 com sucesso: incrementamos a cota, devolvemos {results: [],
-      # engine: provider.to_s, cost:}, e NÃO caímos em fallback para Exa/Linkup.
-      # O WebSearchTool preservará o erro original do SearXNG sem cachear sucesso.
       Rails.logger.info("[SearchApiRouter] #{provider} 200, 0 resultados úteis (vazio ou filtrados por score)")
     end
 
@@ -232,6 +255,8 @@ class SearchApiRouter
   end
 
   # Executa o POST HTTP da API. Devolve {ok:, body:, reason:, retryable:}.
+  # Net::HTTP cru com endpoint constante (não é URL fornecida pelo usuário, risco SSRF baixo)
+  # pois Fetcher::SafeHttpClient hoje é apenas GET.
   def self.http_post(provider, query, limit, time_filter)
     uri, req = build_request(provider, query, limit, time_filter)
     http = Net::HTTP.new(uri.host, uri.port)
@@ -329,7 +354,7 @@ class SearchApiRouter
 
   # ── Cota mensal por API (Spec 1.b / Refinamento SOTA 3) ────────────────────
   # Tabela `search_api_quotas` (api_name, month 'YYYY-MM', count) com find_or_create
-  # + increment DENTRO de with_lock (padrão validado pelo sol — ver cookie_jar.rb).
+  # + increment DENTRO de with_lock para serializar concorrência.
 
   def self.current_month
     if defined?(Time.current) && Time.current

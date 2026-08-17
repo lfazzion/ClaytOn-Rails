@@ -28,8 +28,12 @@ assert_nil = ->(q) {
   end
 }
 assert_nil.call("site:reddit.com ruby performance")
+assert_nil.call("site:reddit.com/r/ruby")
+assert_nil.call("www.reddit.com ruby")
 assert_nil.call("site:x.com EXM7777")
+assert_nil.call("site:x.com/user/foo")
 assert_nil.call("site:twitter.com typescript")
+assert_nil.call("site:twitter.com/bar")
 
 # ── 2. Todas as demais queries com todas as chaves ativas → :linkup (ordem fixa) ──
 assert_linkup = ->(q) {
@@ -100,10 +104,11 @@ end
 # ── 6. golden_stats ──────────────────────────────────────────────────────────
 stats = GoldenSet.golden_stats
 expected_stats = {
-  total: 17,
+  total: 21,
   labeled: 14,
-  redirected: 3,
-  by_provider: { linkup: 14, nil => 3 }
+  redirected: 7,
+  by_provider: { nil => 7, :linkup => 14 },
+  on_empty_linkup: { nil => 13, :exa => 5, :tavily => 3 }
 }
 if stats == expected_stats
   passed += 1

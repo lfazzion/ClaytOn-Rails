@@ -351,5 +351,72 @@ class WebSearchToolFallbackPureTest < Minitest::Test
     assert_equal "https://x.community/p", res[:data].first[:url]
     assert_equal 1, router_calls.size, "site:x.community não é site:x.com e deve chamar o router em fallback"
   end
+
+  # ── Novos casos de plataforma: path, www, fronteira esquerda (Item B) ───────
+  def test_query_com_site_reddit_com_com_subpath_bloqueia_fallback
+    with_fetch(nil)
+    set_fallback(fallback([{ title: "F", url: "https://f.com", content: "c" }]))
+
+    res = @tool.run(query: "site:reddit.com/r/ruby performance")
+
+    assert_equal :error, res[:status]
+    assert_equal "busca indisponível", res[:reason]
+    assert_empty router_calls, "site:reddit.com/r/... deve bloquear o router"
+  end
+
+  def test_query_com_site_x_com_com_subpath_bloqueia_fallback
+    with_fetch(nil)
+    set_fallback(fallback([{ title: "F", url: "https://f.com", content: "c" }]))
+
+    res = @tool.run(query: "site:x.com/user/foo tweet")
+
+    assert_equal :error, res[:status]
+    assert_equal "busca indisponível", res[:reason]
+    assert_empty router_calls, "site:x.com/user/... deve bloquear o router"
+  end
+
+  def test_query_com_site_twitter_com_com_subpath_bloqueia_fallback
+    with_fetch(nil)
+    set_fallback(fallback([{ title: "F", url: "https://f.com", content: "c" }]))
+
+    res = @tool.run(query: "site:twitter.com/bar status")
+
+    assert_equal :error, res[:status]
+    assert_equal "busca indisponível", res[:reason]
+    assert_empty router_calls, "site:twitter.com/bar deve bloquear o router"
+  end
+
+  def test_query_com_www_reddit_com_bloqueia_fallback
+    with_fetch(nil)
+    set_fallback(fallback([{ title: "F", url: "https://f.com", content: "c" }]))
+
+    res = @tool.run(query: "www.reddit.com ruby")
+
+    assert_equal :error, res[:status]
+    assert_equal "busca indisponível", res[:reason]
+    assert_empty router_calls, "www.reddit.com deve bloquear o router"
+  end
+
+  def test_query_com_site_www_reddit_com_bloqueia_fallback
+    with_fetch(nil)
+    set_fallback(fallback([{ title: "F", url: "https://f.com", content: "c" }]))
+
+    res = @tool.run(query: "site:www.reddit.com/r/ruby")
+
+    assert_equal :error, res[:status]
+    assert_equal "busca indisponível", res[:reason]
+    assert_empty router_calls, "site:www.reddit.com/r/ruby deve bloquear o router"
+  end
+
+  def test_query_com_fakesite_reddit_com_nao_bloqueia_fallback
+    with_fetch(nil)
+    set_fallback(fallback([{ title: "Fake", url: "https://fake.com", content: "c", engine: "tavily" }]))
+
+    res = @tool.run(query: "fakesite:reddit.com algo")
+
+    assert_equal :success, res[:status]
+    assert_equal "https://fake.com", res[:data].first[:url]
+    assert_equal 1, router_calls.size, "fakesite:reddit.com não é site:reddit.com e deve chamar o router"
+  end
 end
 

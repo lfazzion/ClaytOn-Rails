@@ -51,9 +51,8 @@ class WebSearchTool < ToolBase
 
   # Hint de plataforma: Reddit/X/Twitter não são indexados pelas APIs externas
   # pagas (Linkup/Exa/Tavily). Queries com esses operadores NÃO devem gastar cota
-  # no fallback externo quando o SearXNG falhar. Âncora de token evita falsos
-  # positivos em subdomínios/TLDs superpostos (ex: site:x.com.br, site:x.community).
-  PLATFORM_FALLBACK_BLOCK_PATTERN = /(?:site:reddit\.com|site:x\.com|site:twitter\.com)(?:\s|$)/i
+  # no fallback externo quando o SearXNG falhar.
+  PLATFORM_FALLBACK_BLOCK_PATTERN = /(?:\A|\s)(?:site:)?(?:www\.)?(?:reddit\.com|x\.com|twitter\.com)(?:\/[^\s]*)?(?:\s|$)/i
 
   def run(query:, limit: 5, time_range: nil)
     q = query.to_s.strip
@@ -69,18 +68,8 @@ class WebSearchTool < ToolBase
     return success(cached).merge(unresponsive: nil) if cached
 
     payload = fetch(q, limit, tr)
-    # fetch nil = "busca indisponível". results vazio COM engine caída =
-    # "busca não aconteceu". Nestes dois casos o SearXNG não serviu e tentamos
-    # o fallback externo (Linkup → Exa → Tavily, ordem de especialidade —
-    # decisão do dono + Grok 4.6 medium 17/08) ANTES de desistir.
-    #
-    # GATING (Defeito 1): o router SÓ é chamado quando o SearXNG falha. Em
-    # sucesso do SearXNG (results não vazio, ou vazio sem engine caída) o router
-    # NUNCA é chamado — o custo de cota externa é evitado e o caminho do
-    # RelevanceGuard fica vivo (ele NÃO se aplica aos resultados externos).
-    #
-    # Hint de plataforma: queries com site:reddit.com/site:x.com/site:twitter.com
-    # NÃO chamam o SearchApiRouter em falha para economizar cota paga.
+    # Router só acionado quando o SearXNG falha: sucesso local nunca gasta cota externa.
+    # Queries direcionadas a Reddit/X/Twitter bloqueiam fallback externo (plataformas não indexadas).
     if !platform_query?(q) && (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
       fallback = begin
         SearchApiRouter.call(query: q, limit: limit, time_range: tr)
@@ -211,7 +200,7 @@ class WebSearchTool < ToolBase
     text.length > CONTENT_MAX_CHARS ? "#{text[0, CONTENT_MAX_CHARS]}…" : text
   end
 
-  # Guarda lexical de relevância — Ruby puro, sem rede e sem modelo (decisão do dono).
+  # Guarda lexical de relevância — Ruby puro, sem rede e sem modelo.
   #
   # Motivo: em 05/08/2026 a query "reddit ruby performance" voltou com páginas de login do
   # Roblox e cartas Pokémon (bug conhecido do bing, issue #4964 do SearXNG) e a tool as

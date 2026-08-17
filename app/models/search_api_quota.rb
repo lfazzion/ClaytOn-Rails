@@ -1,10 +1,6 @@
 # frozen_string_literal: true
 
 # Cota mensal por API de busca externa (Linkup/Exa/Tavily).
-#
-# Padrão validado pelo sol (ver lib/fetcher/cookie_jar.rb): tabela + with_lock
-# serializando leitura + cálculo + gravação. Índice único (api_name, month) evita
-# duplicatas concorrentes. O mês novo reseta porque a contagem é por `month`.
 class SearchApiQuota < ApplicationRecord
   self.table_name = "search_api_quotas"
 
@@ -21,9 +17,16 @@ class SearchApiQuota < ApplicationRecord
 
   # Cota esgotada se a contagem do mês >= teto.
   # Teto zero (ou negativo) bloqueia mesmo sem registro existente.
+  # Executa com lock para serializar verificação e evitar TOCTOU sob concorrência.
   def self.exceeded?(api_name, ceiling, month: current_month)
+    return true if ceiling <= 0
+
     rec = find_by(api_name: api_name, month: month)
-    (rec&.count || 0) >= ceiling
+    return false unless rec
+
+    rec.with_lock do
+      rec.count >= ceiling
+    end
   end
 
   # Incrementa a contagem do mês DENTRO de with_lock (transação serializa
