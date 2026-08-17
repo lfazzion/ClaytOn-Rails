@@ -4,7 +4,7 @@ ruby '~> 4.0'
 
 gem 'rails', '~> 8.1.0'
 gem 'sqlite3', '~> 2.9'
-gem 'puma', '~> 6.0'
+gem 'puma', '~> 8.0'
 gem 'solid_queue', '~> 1.6'
 gem 'solid_cache', '~> 1.0'
 gem 'redis', '>= 4.0.1'
