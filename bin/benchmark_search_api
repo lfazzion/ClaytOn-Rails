@@ -1,0 +1,52 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require "optparse"
+
+options = {
+  queries: [],
+  providers: SearchApiRouter::PROVIDERS,
+  limit: 5,
+  format: :json
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Uso: bin/rails runner bin/benchmark_search_api [opcoes]"
+
+  opts.on("-q", "--query QUERY", "Adiciona uma consulta (pode ser usado múltiplas vezes)") do |q|
+    options[:queries] << q
+  end
+
+  opts.on("-p", "--providers p1,p2", Array, "Provedores para testar (padrão: #{SearchApiRouter::PROVIDERS.join(',')})") do |p|
+    options[:providers] = p.map(&:to_sym)
+  end
+
+  opts.on("-l", "--limit LIMIT", Integer, "Limite de resultados por provedor (padrão: 5)") do |l|
+    options[:limit] = l
+  end
+
+  opts.on("-f", "--format FORMAT", "Formato de saída: json ou jsonl (padrão: json)") do |f|
+    options[:format] = f.to_sym
+  end
+
+  opts.on("-h", "--help", "Mostra esta mensagem de ajuda") do
+    puts opts
+    puts "\nAVISO: A execução deste benchmark consumirá a quota real das APIs."
+    puts "O benchmark não faz chamadas em paralelo e não usa fallback."
+    exit
+  end
+end.parse!
+
+if options[:queries].empty?
+  puts "ERRO: Informe pelo menos uma consulta com -q."
+  puts "Exemplo: bin/rails runner bin/benchmark_search_api -q 'ruby on rails'"
+  exit 1
+end
+
+SearchApiBenchmark.run(
+  queries: options[:queries],
+  providers: options[:providers],
+  limit: options[:limit],
+  output_format: options[:format]
+)
