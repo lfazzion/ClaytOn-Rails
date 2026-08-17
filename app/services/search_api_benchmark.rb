@@ -32,13 +32,13 @@ class SearchApiBenchmark
         started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         # using the public attempt method from SearchApiRouter
         success_data, error_reason = SearchApiRouter.attempt(
-          provider_sym, 
-          query, 
-          SearchApiRouter.clamp_limit(limit), 
-          time_range, 
+          provider_sym,
+          query,
+          SearchApiRouter.clamp_limit(limit),
+          time_range,
           SearchApiRouter.current_date
         )
-        
+
         elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
         result_entry[:latency_ms] = elapsed_ms
 

@@ -34,7 +34,7 @@ class SearchApiBenchmarkTest < ActiveSupport::TestCase
       )
 
     results = SearchApiBenchmark.run(queries: ["rails"], providers: [:tavily], limit: 5)
-    
+
     assert_equal 1, results.size
     res = results.first
     assert_equal "tavily", res[:provider]
@@ -49,12 +49,12 @@ class SearchApiBenchmarkTest < ActiveSupport::TestCase
 
   test "handles quota exceeded explicitly without calling API" do
     ENV["SEARCH_API_QUOTA_EXA"] = "0"
-    
+
     # Exa should not be called
     stub_request(:post, "https://api.exa.ai/search").to_raise("Exa called but quota is 0")
 
     results = SearchApiBenchmark.run(queries: ["test"], providers: [:exa], limit: 5)
-    
+
     res = results.first
     assert_equal "exa", res[:provider]
     assert_equal "quota_exceeded", res[:status]
@@ -67,7 +67,7 @@ class SearchApiBenchmarkTest < ActiveSupport::TestCase
       .to_return(status: 500, body: "Secret server error")
 
     results = SearchApiBenchmark.run(queries: ["test"], providers: [:linkup], limit: 5)
-    
+
     res = results.first
     assert_equal "linkup", res[:provider]
     assert_equal "error", res[:status]
@@ -110,13 +110,13 @@ class SearchApiBenchmarkTest < ActiveSupport::TestCase
       .to_return(status: 200, body: { results: [{ title: "T1", url: "https://t1.com", content: "c", score: 0.9 }], usage: { credits: 1 } }.to_json, headers: { "Content-Type" => "application/json" })
 
     results = SearchApiBenchmark.run(queries: ["test_iso"], providers: [:linkup, :exa, :tavily], limit: 5)
-    
+
     assert_requested req_linkup, times: 1
     assert_requested req_exa, times: 1
     assert_requested req_tavily, times: 1
 
     assert_equal 3, results.size
-    
+
     res_linkup = results.find { |r| r[:provider] == "linkup" }
     assert_equal "error", res_linkup[:status]
     assert_nil res_linkup[:results]
