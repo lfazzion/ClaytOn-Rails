@@ -1,0 +1,339 @@
+# frozen_string_literal: true
+
+# Testes PUROS do SearchApiRouter para os Defeitos 2 e 3:
+#  - Defeito 2: `attempt` recebe score_threshold e uma chamada Tavily bem-sucedida
+#    normaliza e devolve engine :tavily (sem ActiveRecord/WebMock).
+#  - Defeito 3: o body Tavily enviado inclui chunks_per_source=1,
+#    auto_parameters=false e mantém include_answer=false (refinamentos SOTA).
+
+require "minitest/autorun"
+require "net/http"
+require "json"
+require "date"
+
+unless defined?(Rails)
+  module Rails
+  end
+end
+
+unless Rails.respond_to?(:logger) && Rails.logger
+  def Rails.logger
+    @logger ||= Object.new.tap do |l|
+      l.define_singleton_method(:info)  { |*| }
+      l.define_singleton_method(:warn)  { |*| }
+      l.define_singleton_method(:error) { |*| }
+    end
+  end
+end
+
+unless defined?(Rails::PureMemoryCacheStore)
+  module Rails
+    class PureMemoryCacheStore
+      def initialize
+        @data = {}
+      end
+
+      def read(key)
+        @data[key]
+      end
+
+      def write(key, value, **_options)
+        @data[key] = value
+      end
+
+      def clear
+        @data.clear
+      end
+    end
+  end
+end
+
+unless Rails.respond_to?(:cache) && Rails.cache
+  def Rails.cache
+    @pure_cache_instance ||= Rails::PureMemoryCacheStore.new
+  end
+end
+
+require_relative "../../app/services/search_api_router"
+
+class SearchApiRouterFallbackPureTest < Minitest::Test
+  SEARCH_API_ENVS = %w[
+    TAVILY_API_KEY
+    EXA_API_KEY
+    LINKUP_API_KEY
+    SEARCH_API_QUOTA_TAVILY
+    SEARCH_API_QUOTA_EXA
+    SEARCH_API_QUOTA_LINKUP
+    SEARCH_API_SCORE_THRESHOLD
+  ].freeze
+
+  # O stub substitui os métodos singleton `http_post`, `increment_quota` e `quota_exceeded?`.
+  # Guardamos as implementações ORIGINAIS no setup e restauramos em teardown
+  # para não vazar stubs para outros testes em ordem aleatória.
+  def setup
+    @original_http_post = SearchApiRouter.singleton_class.instance_method(:http_post)
+    @original_increment_quota = SearchApiRouter.singleton_class.instance_method(:increment_quota)
+    @original_quota_exceeded = SearchApiRouter.singleton_class.instance_method(:quota_exceeded?)
+    @original_rails_logger = Rails.singleton_class.instance_method(:logger) if Rails.respond_to?(:logger)
+    @original_rails_cache = Rails.singleton_class.instance_method(:cache) if Rails.respond_to?(:cache)
+    @saved_env = SEARCH_API_ENVS.to_h { |k| [k, ENV[k]] }
+    SEARCH_API_ENVS.each { |k| ENV.delete(k) }
+  end
+
+  def teardown
+    SearchApiRouter.singleton_class.send(:define_method, :http_post, @original_http_post)
+    SearchApiRouter.singleton_class.send(:define_method, :increment_quota, @original_increment_quota)
+    SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?, @original_quota_exceeded)
+    if defined?(@original_rails_logger) && @original_rails_logger
+      Rails.singleton_class.send(:define_method, :logger, @original_rails_logger)
+      @original_rails_logger = nil
+    end
+    if defined?(@original_rails_cache) && @original_rails_cache
+      Rails.singleton_class.send(:define_method, :cache, @original_rails_cache)
+      @original_rails_cache = nil
+    end
+    @saved_env.each do |k, v|
+      v.nil? ? ENV.delete(k) : ENV[k] = v
+    end
+  end
+
+  # Substitui http_post por um stub que captura o body montado em build_request
+  # e devolve um payload Tavily de sucesso.
+  def capture_tavily_attempt(time_filter, fake_body)
+    captured = {}
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      _uri, req = SearchApiRouter.send(:build_request, provider, query, limit, tf)
+      captured[:body] = JSON.parse(req.body)
+      { ok: true, body: fake_body, reason: nil, retryable: false }
+    end
+    out = SearchApiRouter.attempt(:tavily, "rails", 5, time_filter, Date.today, score_threshold: 0.7)
+    [out, captured]
+  end
+
+  def test_attempt_tavily_bem_sucedida_normaliza_e_devolve_engine_tavily_defeito_2
+    fake_body = {
+      "results" => [{ "title" => "R1", "url" => "https://r1.com", "content" => "c", "score" => 0.9 }],
+      "usage" => { "credits" => 1 }
+    }
+    out, = capture_tavily_attempt(nil, fake_body)
+    result, _reason = out
+
+    assert_equal "tavily", result[:engine]
+    assert_equal 1, result[:results].size
+    assert_equal "https://r1.com", result[:results].first[:url]
+    assert_equal 1, result[:cost], "custo Tavily vem de usage.credits"
+  end
+
+  # ── Regressão: engine deve ser String (não Symbol) no retorno de attempt ─────
+  # A suíte Rails (search_api_router_test.rb) asserta engine como "tavily"
+  # (String), mas o attempt devolvia `provider` (Symbol :tavily). Correção
+  # mínima: provider.to_s. Este teste puro trava o contrato para não regressar.
+  def test_engine_retornado_como_string_nao_symbol_defeito_1
+    fake_body = {
+      "results" => [{ "title" => "R1", "url" => "https://r1.com", "content" => "c", "score" => 0.9 }],
+      "usage" => { "credits" => 1 }
+    }
+    out, = capture_tavily_attempt(nil, fake_body)
+    result, _reason = out
+
+    assert_kind_of String, result[:engine], "engine deve ser String, não Symbol (Defeito 1)"
+    assert_equal "tavily", result[:engine], "engine deve normalizar para string 'tavily'"
+  end
+
+  def test_body_tavily_sota_inclui_chunks_per_source_e_auto_parameters_false_defeito_3
+    fake_body = {
+      "results" => [{ "title" => "R1", "url" => "https://r1.com", "content" => "c", "score" => 0.9 }]
+    }
+    _, captured = capture_tavily_attempt(nil, fake_body)
+    body = captured[:body]
+
+    assert_equal 1, body["chunks_per_source"], "SOTA: chunks_per_source deve ser 1"
+    assert_equal false, body["auto_parameters"], "SOTA: auto_parameters nunca true"
+    assert_equal false, body["include_answer"], "include_answer deve permanecer false"
+    assert_equal "basic", body["search_depth"], "search_depth fixo em basic"
+    assert_equal true, body["include_usage"], "SOTA: include_usage deve ser true para receber usage.credits"
+  end
+
+  # ── Linkup HTTP 200 com raw results=[] (JSON vazio cru) ─────────────────
+  # Nova ordem de fallback (decisão dono + Grok 17/08): Linkup primeiro.
+  # Linkup 200 com results=[] cru = sucesso vazio, NÃO cai em Exa/Tavily.
+  def test_attempt_linkup_raw_results_vazio_devolve_empty_sucesso_incrementa_cota_e_nao_cai_em_fallback
+    fake_body = {
+      "results" => [],
+      "sources" => []
+    }
+
+    quota_called = false
+    SearchApiRouter.define_singleton_method(:increment_quota) do |_provider|
+      quota_called = true
+    end
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      { ok: true, body: fake_body, reason: nil, retryable: false }
+    end
+
+    result, reason = SearchApiRouter.attempt(:linkup, "rails", 5, nil, Date.today, score_threshold: 0.7)
+    refute_nil result, "Linkup 200 com results=[] cru deve retornar sucesso vazio (não nil)"
+    assert_nil reason, "não deve haver reason de falha quando a API respondeu 200"
+    assert_equal "linkup", result[:engine]
+    assert_equal [], result[:results]
+    assert quota_called, "quota deve ser incrementada mesmo com results=[] cru (API respondeu 200)"
+  end
+
+  def test_call_linkup_raw_results_vazio_retorna_results_empty_e_nao_chama_exa_nem_tavily
+    calls = []
+    fake_linkup = {
+      "results" => [],
+      "sources" => []
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      { ok: true, body: fake_linkup, reason: nil, retryable: false }
+    end
+    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
+      # no-op
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "rails", limit: 5)
+      refute_nil result, "SearchApiRouter.call deve retornar hash válido"
+      assert_equal "linkup", result[:engine]
+      assert_equal [], result[:results]
+      assert_equal [:linkup], calls, "não deve tentar Exa ou Tavily quando Linkup respondeu 200 com results=[]"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  def test_call_linkup_falha_http_500_cai_em_exa_diferenciando_de_results_vazio
+    calls = []
+    fake_exa = {
+      "results" => [{ "title" => "E1", "url" => "https://exa.com/1", "text" => "c" }]
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :linkup
+        { ok: false, body: nil, reason: "HTTP 500", retryable: false }
+      else
+        { ok: true, body: fake_exa, reason: nil, retryable: false }
+      end
+    end
+    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
+      # no-op
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "rails", limit: 5)
+      refute_nil result
+      assert_equal "exa", result[:engine]
+      assert_equal [:linkup, :exa], calls, "falha HTTP 500 no Linkup deve cair para Exa"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  # ── (2) Tavily HTTP 200 com todos scores abaixo do threshold ─────────────────
+  # O filtro de score é EXCLUSIVO do Tavily (apply_score_filter só roda para
+  # :tavily). Linkup/Exa não expõem score comparável — não há filtro para eles.
+  # Score baixo no Tavily NÃO é falha: a API respondeu 200. Deve devolver
+  # resultado válido com results=[] e engine string, incrementar a cota e NÃO
+  # cair para os outros providers.
+  def test_attempt_tavily_todos_scores_abaixo_threshold_devolve_results_empty_e_engine_tavily
+    fake_body = {
+      "results" => [{ "title" => "R1", "url" => "https://r1.com", "content" => "c", "score" => 0.1 }],
+      "usage" => { "credits" => 1 }
+    }
+    out, = capture_tavily_attempt(nil, fake_body)
+    result, reason = out
+
+    refute_nil result, "Tavily 200 com score baixo não deve cair para nil (fallback)"
+    assert_nil reason, "não deve haver reason quando a API respondeu 200"
+    assert_equal "tavily", result[:engine]
+    assert_equal [], result[:results], "results deve ser [] quando todos os scores ficam abaixo do threshold"
+  end
+
+  def test_attempt_tavily_score_baixo_incrementa_cota_mesmo_com_results_empty
+    fake_body = {
+      "results" => [{ "title" => "R1", "url" => "https://r1.com", "content" => "c", "score" => 0.1 }],
+      "usage" => { "credits" => 1 }
+    }
+
+    quota_called = false
+    SearchApiRouter.define_singleton_method(:increment_quota) do |_provider|
+      quota_called = true
+    end
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      { ok: true, body: fake_body, reason: nil, retryable: false }
+    end
+
+    result, _reason = SearchApiRouter.attempt(:tavily, "rails", 5, nil, Date.today, score_threshold: 0.7)
+    assert result, "deve devolver resultado válido (não nil)"
+    assert_equal [], result[:results]
+    assert quota_called, "quota deve ser incrementada mesmo com results vazio (API respondeu 200)"
+  end
+
+  def test_call_linkup_scores_nao_filtram_porque_linkup_nao_expoe_score
+    calls = []
+    fake_linkup = {
+      "results" => [{ "name" => "R1", "url" => "https://r1.com", "content" => "c" }],
+      "sources" => []
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      { ok: true, body: fake_linkup, reason: nil, retryable: false }
+    end
+    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
+      # no-op
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "rails", limit: 5)
+      refute_nil result, "SearchApiRouter.call deve retornar hash válido"
+      assert_equal "linkup", result[:engine]
+      assert_equal 1, result[:results].size,
+                   "Linkup não tem filtro de score — item sem score NÃO é descartado"
+      assert_equal [:linkup], calls, "não deve tentar Exa ou Tavily quando Linkup respondeu 200"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+
+  def test_current_month_formato_yyyy_mm
+    assert_match(/\A\d{4}-\d{2}\z/, SearchApiRouter.current_month)
+  end
+end

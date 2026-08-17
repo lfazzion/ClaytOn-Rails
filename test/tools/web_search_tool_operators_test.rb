@@ -31,6 +31,19 @@ class WebSearchToolOperatorsTest < ActiveSupport::TestCase
     assert_requested stub
   end
 
+  test "query com site de plataforma nao gasta cota de router externo em falha de rede" do
+    stub = stub_request(:get, "http://searxng:8080/search")
+           .with(query: hash_including(q: "site:reddit.com ruby"))
+           .to_return(status: 500)
+
+    SearchApiRouter.expects(:call).never
+
+    result = WebSearchTool.new.execute(query: "site:reddit.com ruby")
+    assert_requested stub
+    assert_equal :error, result[:status]
+    assert_equal "busca indisponível", result[:reason]
+  end
+
   test "o token do operador nao conta como termo significativo" do
     termos = WebSearchTool::RelevanceGuard.significant_terms("site:x.com EXM7777")
     refute_includes termos, "site"

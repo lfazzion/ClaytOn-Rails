@@ -49,6 +49,12 @@ class WebSearchTool < ToolBase
   OPERATOR_PATTERN  = /(?:\A|\s)(?:#{DOMAIN_OPERATORS.join("|")}):/i
   NARROW_CATEGORIES = "general"
 
+  # Hint de plataforma: Reddit/X/Twitter não são indexados pelas APIs externas
+  # pagas (Linkup/Exa/Tavily). Queries com esses operadores NÃO devem gastar cota
+  # no fallback externo quando o SearXNG falhar. Âncora de token evita falsos
+  # positivos em subdomínios/TLDs superpostos (ex: site:x.com.br, site:x.community).
+  PLATFORM_FALLBACK_BLOCK_PATTERN = /(?:site:reddit\.com|site:x\.com|site:twitter\.com)(?:\s|$)/i
+
   def run(query:, limit: 5, time_range: nil)
     q = query.to_s.strip
     return error("query vazia") if q.empty?
@@ -63,6 +69,41 @@ class WebSearchTool < ToolBase
     return success(cached).merge(unresponsive: nil) if cached
 
     payload = fetch(q, limit, tr)
+    # fetch nil = "busca indisponível". results vazio COM engine caída =
+    # "busca não aconteceu". Nestes dois casos o SearXNG não serviu e tentamos
+    # o fallback externo (Linkup → Exa → Tavily, ordem de especialidade —
+    # decisão do dono + Grok 4.6 medium 17/08) ANTES de desistir.
+    #
+    # GATING (Defeito 1): o router SÓ é chamado quando o SearXNG falha. Em
+    # sucesso do SearXNG (results não vazio, ou vazio sem engine caída) o router
+    # NUNCA é chamado — o custo de cota externa é evitado e o caminho do
+    # RelevanceGuard fica vivo (ele NÃO se aplica aos resultados externos).
+    #
+    # Hint de plataforma: queries com site:reddit.com/site:x.com/site:twitter.com
+    # NÃO chamam o SearchApiRouter em falha para economizar cota paga.
+    if !platform_query?(q) && (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
+      fallback = begin
+        SearchApiRouter.call(query: q, limit: limit, time_range: tr)
+      rescue StandardError => e
+        Rails.logger.error "[WebSearchTool] SearchApiRouter falhou: #{e.class}: #{e.message}"
+        nil
+      end
+
+      if fallback && fallback[:results]&.any?
+        fallback_results = fallback[:results].first(limit).map do |r|
+          r.merge(content: truncate(r[:content]))
+        end
+        # Refinamento SOTA 5: o resultado do fallback passa pelo MESMO fluxo de
+        # cache do run() (a cache_key foi calculada antes do fetch). Gravamos
+        # aqui para que a próxima chamada igual acerte o cache e não gaste cota.
+        # `unresponsive` reflete a falha do SearXNG quando houve (nil se fetch nil).
+        Rails.cache.write(cache_key, fallback_results, expires_in: CACHE_TTL)
+        return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
+      end
+    end
+
+    # fetch nil → "busca indisponível" (e erro original preservado se o router
+    # também falhou — não dereferenciamos o nil do fallback acima).
     return error("busca indisponível") if payload.nil?
 
     results     = payload[:results]
@@ -74,6 +115,9 @@ class WebSearchTool < ToolBase
     if results.empty?
       if unreachable.any?
         Rails.logger.warn "[WebSearchTool] busca sem resultados com engines fora do ar: #{unreachable.join(', ')}"
+
+        # Aqui chegamos só quando o fallback externo também falhou (ou não há
+        # chave). Mantém o erro original do SearXNG; o router já foi tentado.
         return error("busca não aconteceu: engines fora do ar (#{unreachable.join(', ')}) e nenhum " \
                      "resultado devolvido — tente de novo em alguns minutos")
       end
@@ -91,12 +135,19 @@ class WebSearchTool < ToolBase
                    "reformule a query")
     end
 
+    # Resultados do SearXNG aprovados pela guarda. (Os resultados do fallback
+    # externo NÃO passam pelo RelevanceGuard — ver comentário no SearchApiRouter
+    # e no retorno de fallback acima: as APIs ranqueiam por relevância própria.)
     data = verdict.approved.first(limit)
     Rails.cache.write(cache_key, data, expires_in: CACHE_TTL)
     success(data).merge(unresponsive: unreachable)
   end
 
   private
+
+  def platform_query?(query)
+    query.to_s.match?(PLATFORM_FALLBACK_BLOCK_PATTERN)
+  end
 
   def categories_for(query)
     query.to_s.match?(OPERATOR_PATTERN) ? NARROW_CATEGORIES : CATEGORIES

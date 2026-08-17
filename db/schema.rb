@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_13_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_17_000001) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -120,6 +120,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_13_000001) do
     t.index ["link"], name: "index_news_articles_on_link", unique: true
     t.index ["pub_date"], name: "index_news_articles_on_pub_date"
     t.index ["source"], name: "index_news_articles_on_source"
+  end
+
+  create_table "search_api_quotas", force: :cascade do |t|
+    t.string "api_name", null: false
+    t.string "month", null: false
+    t.integer "count", null: false, default: 0
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["api_name", "month"], name: "index_search_api_quotas_on_api_name_and_month", unique: true
   end
 
   create_table "post_snapshots", force: :cascade do |t|

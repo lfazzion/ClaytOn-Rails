@@ -1,0 +1,222 @@
+# frozen_string_literal: true
+
+require "minitest/autorun"
+
+# Testes PUROS do SearchApiRouter — rodáveis com `ruby` puro (sem Rails/docker).
+# Cobrem a lógica que NÃO depende de ActiveRecord/Net::HTTP:
+#   normalização por API, dedupe por URL canônica, filtro de score (Tavily),
+#   mapeamento de time_range e ordenação de fallback.
+#
+# O stub mínimo de Rails abaixo evita que o `require` do router quebre em ruby puro;
+# não sobrescreve Rails.cache, Rails.logger ou Rails.env quando a suíte Rails estiver carregada.
+unless defined?(Rails)
+  module Rails
+  end
+end
+
+unless Rails.respond_to?(:logger) && Rails.logger
+  def Rails.logger
+    @logger ||= Object.new.tap do |l|
+      def l.info(*) = nil
+      def l.warn(*) = nil
+      def l.error(*) = nil
+    end
+  end
+end
+
+unless defined?(Rails::PureMemoryCacheStore)
+  module Rails
+    class PureMemoryCacheStore
+      def initialize
+        @data = {}
+      end
+
+      def read(key)
+        @data[key]
+      end
+
+      def write(key, value, **_options)
+        @data[key] = value
+      end
+
+      def clear
+        @data.clear
+      end
+    end
+  end
+end
+
+unless Rails.respond_to?(:cache) && Rails.cache
+  def Rails.cache
+    @pure_cache_instance ||= Rails::PureMemoryCacheStore.new
+  end
+end
+
+unless Rails.respond_to?(:env)
+  def Rails.env
+    "test"
+  end
+end
+
+require_relative "../../app/services/search_api_router"
+
+class SearchApiRouterPureTest < Minitest::Test
+  SEARCH_API_ENVS = %w[
+    TAVILY_API_KEY
+    EXA_API_KEY
+    LINKUP_API_KEY
+    SEARCH_API_QUOTA_TAVILY
+    SEARCH_API_QUOTA_EXA
+    SEARCH_API_QUOTA_LINKUP
+    SEARCH_API_SCORE_THRESHOLD
+  ].freeze
+
+  def setup
+    @saved_env = SEARCH_API_ENVS.to_h { |k| [k, ENV[k]] }
+    SEARCH_API_ENVS.each { |k| ENV.delete(k) }
+  end
+
+  def teardown
+    @saved_env.each do |k, v|
+      v.nil? ? ENV.delete(k) : ENV[k] = v
+    end
+  end
+  # ── Normalização Tavily (payload real da doc) ──────────────────────────────
+  def test_normaliza_payload_real_do_tavily_com_engine_e_campos_mapeados
+    raw = {
+      "results" => [
+        { "title" => "T1", "url" => "https://ex.com/a", "content" => "snippet", "score" => 0.9 },
+        { "title" => "T2", "url" => "https://ex.com/b", "content" => "outro", "score" => 0.8 }
+      ],
+      "usage" => { "credits" => 2 }
+    }
+    out = SearchApiRouter.normalize_results(:tavily, raw, score_threshold: 0.7)
+    assert_equal 2, out.size
+    assert_equal "tavily", out.first[:engine]
+    assert_equal "T1", out.first[:title]
+    assert_equal "https://ex.com/a", out.first[:url]
+    assert_equal "snippet", out.first[:content]
+  end
+
+  def test_filtro_de_score_descarta_resultados_tavily_abaixo_do_threshold
+    raw = {
+      "results" => [
+        { "title" => "Alto", "url" => "https://ex.com/a", "content" => "c", "score" => 0.9 },
+        { "title" => "Baixo", "url" => "https://ex.com/b", "content" => "c", "score" => 0.4 }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:tavily, raw, score_threshold: 0.7)
+    assert_equal 1, out.size
+    assert_equal "Alto", out.first[:title]
+  end
+
+  def test_filtro_de_score_so_se_aplica_ao_tavily
+    exa_raw = {
+      "results" => [
+        { "title" => "X", "url" => "https://ex.com/x", "text" => "corpo" }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:exa, exa_raw, score_threshold: 0.99)
+    assert_equal 1, out.size, "Exa não deve perder resultado por falta de score"
+  end
+
+  # ── Normalização Exa ──────────────────────────────────────────────────────
+  def test_normaliza_exa_usando_highlights_quando_presente
+    raw = {
+      "results" => [
+        { "title" => "H", "url" => "https://ex.com/h", "highlights" => ["trecho destacado"], "text" => "corpo longo" },
+        { "title" => "T", "url" => "https://ex.com/t", "text" => "só texto" }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:exa, raw, score_threshold: 0.7)
+    assert_equal 2, out.size
+    assert_equal "exa", out.first[:engine]
+    assert_equal "trecho destacado", out.first[:content]
+    assert_equal "só texto", out.last[:content]
+  end
+
+  # ── Normalização Linkup ───────────────────────────────────────────────────
+  def test_normaliza_linkup_mapeando_name_para_title
+    raw = {
+      "results" => [
+        { "name" => "L", "url" => "https://linkup.com/l", "content" => "conteúdo" }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:linkup, raw, score_threshold: 0.7)
+    assert_equal 1, out.size
+    assert_equal "linkup", out.first[:engine]
+    assert_equal "L", out.first[:title]
+    assert_equal "https://linkup.com/l", out.first[:url]
+  end
+
+  # ── Dedupe por URL canônica (Refinamento SOTA 1) ───────────────────────────
+  def test_dedupe_por_url_canonica_remove_query_e_barra_final
+    raw = {
+      "results" => [
+        { "title" => "A", "url" => "https://ex.com/p?utm=1", "content" => "1" },
+        { "title" => "B", "url" => "https://ex.com/p/", "content" => "2" },
+        { "title" => "C", "url" => "https://ex.com/p", "content" => "3" }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:tavily, raw, score_threshold: 0.0)
+    assert_equal 1, out.size, "três URLs canônicas iguais devem virar 1"
+    assert_equal "A", out.first[:title], "mantém a primeira ocorrência"
+  end
+
+  # ── Mapeamento time_range (Spec 1.f) ───────────────────────────────────────
+  def test_time_range_tavily_vai_direto_no_body
+    assert_equal "day", SearchApiRouter.time_filter_for(:tavily, "day", today: Date.new(2026, 8, 17))
+    assert_equal "month", SearchApiRouter.time_filter_for(:tavily, "month", today: Date.new(2026, 8, 17))
+  end
+
+  def test_time_range_exa_vira_start_published_date_iso8601
+    today = Date.new(2026, 8, 17)
+    assert_equal "2026-08-16", SearchApiRouter.time_filter_for(:exa, "day", today: today)
+    assert_equal "2026-08-10", SearchApiRouter.time_filter_for(:exa, "week", today: today)
+    assert_equal "2026-07-18", SearchApiRouter.time_filter_for(:exa, "month", today: today)
+    assert_equal "2025-08-17", SearchApiRouter.time_filter_for(:exa, "year", today: today)
+  end
+
+  def test_time_range_linkup_vira_from_date_iso8601
+    today = Date.new(2026, 8, 17)
+    assert_equal "2026-08-10", SearchApiRouter.time_filter_for(:linkup, "week", today: today)
+  end
+
+  def test_time_range_nil_nao_produz_filtro
+    today = Date.new(2026, 8, 17)
+    %i[tavily exa linkup].each do |p|
+      assert_nil SearchApiRouter.time_filter_for(p, nil, today: today)
+    end
+  end
+
+  # ── Clamp de limit (Spec 1.g) ──────────────────────────────────────────────
+  def test_clamp_limit_respeita_1_a_10
+    assert_equal 1, SearchApiRouter.clamp_limit(0)
+    assert_equal 1, SearchApiRouter.clamp_limit(-5)
+    assert_equal 5, SearchApiRouter.clamp_limit(5)
+    assert_equal 10, SearchApiRouter.clamp_limit(10)
+    assert_equal 10, SearchApiRouter.clamp_limit(50)
+  end
+
+  # ── Ordenação de fallback / router desligado (Spec 1.d) ────────────────────
+  def test_sem_nenhuma_chave_providers_vazio
+    available = SearchApiRouter.ordered_providers(
+      tavily: nil, exa: nil, linkup: nil
+    )
+    assert_empty available
+  end
+
+  def test_ordem_fallback_respeita_chaves_presentes
+    available = SearchApiRouter.ordered_providers(
+      tavily: "tv_key", exa: "ex_key", linkup: nil
+    )
+    assert_equal %i[exa tavily], available
+  end
+
+  def test_linkup_sem_chave_exa_vira_primeiro
+    available = SearchApiRouter.ordered_providers(
+      tavily: nil, exa: "ex_key", linkup: "lk_key"
+    )
+    assert_equal %i[linkup exa], available
+  end
+end
