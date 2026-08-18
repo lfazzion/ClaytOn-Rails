@@ -106,8 +106,15 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   end
 
   class FakeContexts
-    def initialize(context) = @context = context
-    def create = @context
+    attr_reader :last_options
+    def initialize(context)
+      @context = context
+      @last_options = nil
+    end
+    def create(**options)
+      @last_options = options
+      @context
+    end
   end
 
   class FakeBrowser
@@ -391,5 +398,25 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
     assert_operator remaining_durante_bloco, :>, 0
     assert_operator remaining_durante_bloco, :<=, Fetcher::BrowserSession::OVERALL_TIMEOUT
     assert_equal Float::INFINITY, Fetcher::BrowserSession.remaining
+  end
+
+  test "BrowserSession contexts.create recebe disposeOnDetach: true (Item 3)" do
+    fake_contexts = FakeContexts.new(@context)
+    fake_browser = FakeBrowser.new(nil)
+    fake_browser.instance_variable_set(:@contexts, fake_contexts)
+    Fetcher::PageFetcher.stubs(:browser).returns(fake_browser)
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    assert_equal({ disposeOnDetach: true }, fake_contexts.last_options,
+                 "BrowserSession deve passar disposeOnDetach: true para contexts.create")
+  end
+
+  test "BrowserSession falha no dispose_quietly marca PageFetcher como dirty (Item 4)" do
+    @context.define_singleton_method(:dispose) { raise StandardError, "erro no dispose" }
+
+    Fetcher::PageFetcher.expects(:mark_dirty!).at_least_once
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
   end
 end

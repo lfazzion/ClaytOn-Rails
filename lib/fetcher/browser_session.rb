@@ -61,7 +61,7 @@ module Fetcher
           begin
             Timeout.timeout(OVERALL_TIMEOUT) do
               browser = PageFetcher.browser
-              context = browser.contexts.create
+              context = browser.contexts.create(disposeOnDetach: true)
               page = nil
               begin
                 begin
@@ -216,14 +216,16 @@ module Fetcher
 
       def close_quietly(page)
         page&.close
-      rescue StandardError
-        nil
+      rescue StandardError => e
+        Rails.logger.warn "[Fetcher::BrowserSession] falha ao fechar página (#{e.class}: #{e.message})"
+        PageFetcher.mark_dirty!
       end
 
       def dispose_quietly(context)
         context&.dispose
-      rescue StandardError
-        nil
+      rescue StandardError => e
+        Rails.logger.warn "[Fetcher::BrowserSession] falha ao descartar contexto (#{e.class}: #{e.message})"
+        PageFetcher.mark_dirty!
       end
     end
   end

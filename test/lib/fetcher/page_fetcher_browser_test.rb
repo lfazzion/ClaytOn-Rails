@@ -94,18 +94,42 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
   end
 
   class FakeContexts
-    def initialize(context) = @context = context
-    def create = @context
+    attr_reader :last_options, :reset_called, :contexts
+
+    def initialize(context)
+      @context = context
+      @last_options = nil
+      @reset_called = false
+      @contexts = context ? { "ctx1" => context } : {}
+    end
+
+    def create(**options)
+      @last_options = options
+      @context
+    end
+
+    def reset
+      @reset_called = true
+      @contexts.each_value { |c| c.dispose if c.respond_to?(:dispose) }
+      true
+    end
+
+    def size
+      @contexts.size
+    end
   end
 
   class FakeBrowser
-    attr_reader :contexts, :injected, :version_calls
+    attr_reader :contexts, :injected, :version_calls, :reset_called, :quit_called, :call_order
 
     def initialize(context: nil, version_error: nil)
       @contexts = FakeContexts.new(context) if context
       @injected = []
       @version_error = version_error
       @version_calls = 0
+      @reset_called = false
+      @quit_called = false
+      @call_order = []
     end
 
     def evaluate_on_new_document(source) = @injected << source
@@ -117,7 +141,18 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
       "HeadlessChrome/131.0.0.0"
     end
 
-    def quit = true
+    def reset
+      @reset_called = true
+      @call_order << :reset
+      @contexts&.reset
+      true
+    end
+
+    def quit
+      @quit_called = true
+      @call_order << :quit
+      true
+    end
   end
 
   setup do
@@ -126,11 +161,19 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     Fetcher::PageFetcher.stubs(:hard_domains).returns([])
     Fetcher::PageFetcher.instance_variable_set(:@browser, nil)
     Fetcher::PageFetcher.instance_variable_set(:@browser_started_at, nil)
+    Fetcher::PageFetcher.instance_variable_set(:@pages_since_start, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_dirty, false)
+    Fetcher::PageFetcher.instance_variable_set(:@in_flight, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@pending_discard, false)
   end
 
   teardown do
     Fetcher::PageFetcher.instance_variable_set(:@browser, nil)
     Fetcher::PageFetcher.instance_variable_set(:@browser_started_at, nil)
+    Fetcher::PageFetcher.instance_variable_set(:@pages_since_start, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_dirty, false)
+    Fetcher::PageFetcher.instance_variable_set(:@in_flight, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@pending_discard, false)
   end
 
   # ── DEFEITO 1: método chamado no objeto errado ────────────────────────────
@@ -430,5 +473,152 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     # o IP não chega (assert_document_ip! sai cedo com nil — sem log). O que
     # importa: não derruba e o conteúdo segue.
     refute_match(/rebinding/, log.string)
+  end
+
+  # ── FASE 1: ITENS 1 a 6 ───────────────────────────────────────────────────
+
+  test "create_page levanta NoSuchTargetError: context.dispose é chamado no ensure (Item 1)" do
+    fake_context = FakeContext.new(nil)
+    fake_context.define_singleton_method(:create_page) do
+      raise Ferrum::NoSuchTargetError, "target disappeared"
+    end
+    browser = FakeBrowser.new(context: fake_context)
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+
+    assert_raises(Fetcher::PageFetcher::RenderTimeout) do
+      fetcher.call("https://broken-target.test/")
+    end
+
+    assert_equal true, fake_context.disposed, "contexto deve ser descartado mesmo se create_page falhar"
+  end
+
+  test "Timeout::Error na criacao da pagina descarta o contexto (Item 1)" do
+    fake_context = FakeContext.new(nil)
+    fake_context.define_singleton_method(:create_page) do
+      raise Timeout::Error, "timeout creating page"
+    end
+    browser = FakeBrowser.new(context: fake_context)
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+
+    assert_raises(Fetcher::PageFetcher::RenderTimeout) do
+      fetcher.call("https://timeout-target.test/")
+    end
+
+    assert_equal true, fake_context.disposed, "contexto deve ser descartado no timeout de create_page"
+  end
+
+  test "discard_locked! chama reset ANTES de quit mesmo se reset levantar excecao (Item 2)" do
+    fake_browser = FakeBrowser.new
+    fake_browser.define_singleton_method(:reset) do
+      @call_order << :reset
+      raise StandardError, "falha simulada no reset"
+    end
+
+    Fetcher::PageFetcher.instance_variable_set(:@browser, fake_browser)
+    Fetcher::PageFetcher.send(:discard_locked!)
+
+    assert_equal %i[reset quit], fake_browser.call_order
+    assert_equal true, fake_browser.quit_called, "quit deve rodar mesmo se reset falhar"
+    assert_nil Fetcher::PageFetcher.instance_variable_get(:@browser)
+  end
+
+  test "contexts.create recebe disposeOnDetach: true (Item 3)" do
+    page = FakePage.new
+    fake_context = FakeContext.new(page)
+    browser = FakeBrowser.new(context: fake_context)
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    fetcher.call("https://detach-test.test/")
+
+    assert_equal({ disposeOnDetach: true }, browser.contexts.last_options,
+                 "contexts.create deve passar disposeOnDetach: true")
+  end
+
+  test "BROWSER_MAX_PAGES renders recicla browser mesmo com idade recente (Item 5)" do
+    live_browser = FakeBrowser.new
+    fresh_browser = FakeBrowser.new
+
+    Fetcher::PageFetcher.instance_variable_set(:@browser, live_browser)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_started_at, Time.current)
+    Fetcher::PageFetcher.instance_variable_set(
+      :@pages_since_start,
+      Fetcher::PageFetcher::BROWSER_MAX_PAGES
+    )
+
+    Fetcher::PageFetcher.expects(:build_browser).once.returns(fresh_browser)
+
+    assert_same fresh_browser, Fetcher::PageFetcher.browser,
+                "browser deve ser reciclado quando pages_since_start >= BROWSER_MAX_PAGES"
+  end
+
+  test "falha ao fechar pagina ou descartar contexto marca browser_dirty e proximo browser reconstroi (Item 4)" do
+    page = FakePage.new
+    page.define_singleton_method(:close) { raise StandardError, "erro fechando pagina" }
+    fake_context = FakeContext.new(page)
+    browser = FakeBrowser.new(context: fake_context)
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+    fetcher.stubs(:wait_for_body_stabilize)
+
+    # Executa com o browser factory
+    fetcher.call("https://dirty-test.test/")
+
+    assert_equal true, Fetcher::PageFetcher.browser_dirty?, "falha no close/dispose deve marcar browser_dirty"
+
+    # Agora verifica que PageFetcher.browser reconhece browser_dirty e descarta a instância atual
+    stale_browser = FakeBrowser.new
+    rebuilt_browser = FakeBrowser.new
+    Fetcher::PageFetcher.instance_variable_set(:@browser, stale_browser)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_started_at, Time.current)
+    Fetcher::PageFetcher.expects(:build_browser).once.returns(rebuilt_browser)
+
+    assert_same rebuilt_browser, Fetcher::PageFetcher.browser
+    assert_equal false, Fetcher::PageFetcher.browser_dirty?
+  end
+
+  test "semaforo MAX_INFLIGHT_PAGES limita concorrencia e o segundo espera (Item 6)" do
+    active_count = 0
+    max_active = 0
+    mutex = Mutex.new
+
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(context: FakeContext.new(FakePage.new)))
+    Fetcher::PageFetcher.any_instance.stubs(:wait_for_body_stabilize)
+
+    # Simula render rodando com tempo controlado
+    threads = Array.new(4) do
+      Thread.new do
+        Fetcher::PageFetcher.track_in_flight do
+          mutex.synchronize do
+            active_count += 1
+            max_active = [max_active, active_count].max
+          end
+          sleep 0.05
+          mutex.synchronize do
+            active_count -= 1
+          end
+        end
+      end
+    end
+
+    threads.each(&:join)
+
+    assert_operator max_active, :<=, Fetcher::PageFetcher::MAX_INFLIGHT_PAGES
+    assert_operator max_active, :>=, 1
+  end
+
+  test "browser.reset descarta contextos abertos da colecao (Item 2)" do
+    ctx1 = FakeContext.new(FakePage.new)
+    ctx2 = FakeContext.new(FakePage.new)
+    fake_contexts = FakeContexts.new(nil)
+    fake_contexts.contexts["c1"] = ctx1
+    fake_contexts.contexts["c2"] = ctx2
+
+    fake_browser = FakeBrowser.new
+    fake_browser.instance_variable_set(:@contexts, fake_contexts)
+
+    fake_browser.reset
+
+    assert_equal true, ctx1.disposed
+    assert_equal true, ctx2.disposed
   end
 end

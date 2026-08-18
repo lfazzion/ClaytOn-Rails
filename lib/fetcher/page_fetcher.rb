@@ -18,13 +18,17 @@ module Fetcher
     # corrida real — dois threads podiam criar mutex diferentes e ambos entrar
     # em `synchronize`, cada um com o próprio lock, e construir dois browsers
     # (um perdido, sem `quit`, vazando CDP) ou dar `quit` no browser alheio.
-    BROWSER_MUTEX     = Mutex.new
-    BROWSER_MAX_AGE   = 24 * 3600
+    BROWSER_MUTEX         = Mutex.new
+    BROWSER_CV            = ConditionVariable.new
+    BROWSER_MAX_AGE       = 30 * 60
+    BROWSER_MAX_PAGES     = 30
+    BROWSER_MAX_CONTEXTS  = 4
+    MAX_INFLIGHT_PAGES    = 2
     BROWSER_PROBE_TIMEOUT = 2
-    GOTO_TIMEOUT      = 20
-    OVERALL_TIMEOUT   = 25
-    IDLE_DURATION     = 0.8
-    IDLE_TIMEOUT      = 4
+    GOTO_TIMEOUT          = 20
+    OVERALL_TIMEOUT       = 25
+    IDLE_DURATION         = 0.8
+    IDLE_TIMEOUT          = 4
     BODY_STABILIZE_ATTEMPTS = 6
     BODY_STABILIZE_INTERVAL = 0.5
     TRACKING_PARAMS = %w[utm_source utm_medium utm_campaign utm_term utm_content
@@ -80,8 +84,8 @@ module Fetcher
       end
     end
     class RenderTimeout < FetchError
-      def initialize
-        super("render timeout após #{OVERALL_TIMEOUT}s")
+      def initialize(msg = nil)
+        super(msg || "render timeout após #{OVERALL_TIMEOUT}s")
       end
     end
 
@@ -92,26 +96,42 @@ module Fetcher
 
       def browser
         BROWSER_MUTEX.synchronize do
-          discard_locked! if @browser && (expired? || !alive?(@browser))
+          discard_locked! if @browser && (expired? || !alive?(@browser) || browser_dirty?)
 
           @browser ||= begin
             @browser_started_at = Time.current
+            @pages_since_start = 0
+            @browser_dirty = false
             build_browser
           end
         end
       end
 
-      def track_in_flight
+      def track_in_flight(timeout: OVERALL_TIMEOUT)
+        acquired = false
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
         BROWSER_MUTEX.synchronize do
+          while (@in_flight || 0) >= MAX_INFLIGHT_PAGES
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            raise RenderTimeout, "timeout aguardando semáforo de browser (#{timeout}s)" if remaining <= 0
+
+            BROWSER_CV.wait(BROWSER_MUTEX, [remaining, 0.01].max)
+          end
           @in_flight = (@in_flight || 0) + 1
+          @pages_since_start = (@pages_since_start || 0) + 1
+          acquired = true
         end
+
         yield
       ensure
-        BROWSER_MUTEX.synchronize do
-          @in_flight = [(@in_flight || 1) - 1, 0].max
-          if @pending_discard && @in_flight == 0
-            discard_locked!
-            @pending_discard = false
+        if acquired
+          BROWSER_MUTEX.synchronize do
+            @in_flight = [(@in_flight || 1) - 1, 0].max
+            BROWSER_CV.broadcast
+            if @pending_discard && @in_flight == 0
+              discard_locked!
+              @pending_discard = false
+            end
           end
         end
       end
@@ -125,6 +145,16 @@ module Fetcher
             @pending_discard = false
           end
         end
+      end
+
+      def mark_dirty!
+        BROWSER_MUTEX.synchronize do
+          @browser_dirty = true
+        end
+      end
+
+      def browser_dirty?
+        @browser_dirty == true
       end
 
       # Sonda barata de sessão viva. Sem ela, um restart do container do chrome
@@ -153,13 +183,42 @@ module Fetcher
 
       # Só chamar com BROWSER_MUTEX já retido — Mutex do Ruby não é reentrante.
       def discard_locked!
-        safe_quit(@browser) if @browser
+        if @browser
+          begin
+            @browser.reset
+          rescue StandardError => e
+            Rails.logger.warn "[Fetcher::PageFetcher] falha ao resetar browser antes do quit (#{e.class}: #{e.message})"
+          end
+          safe_quit(@browser)
+        end
         @browser = nil
         @browser_started_at = nil
+        @pages_since_start = 0
+        @browser_dirty = false
       end
 
       def expired?
-        @browser_started_at.nil? || (Time.current - @browser_started_at).to_i > BROWSER_MAX_AGE
+        return true if @browser_started_at.nil?
+        return true if (Time.current - @browser_started_at).to_i > BROWSER_MAX_AGE
+        return true if (@pages_since_start || 0) >= BROWSER_MAX_PAGES
+        return true if contexts_exceeded?(@browser)
+
+        false
+      end
+
+      def contexts_exceeded?(browser)
+        return false unless browser&.respond_to?(:contexts)
+
+        ctxs = browser.contexts
+        if ctxs.respond_to?(:size)
+          ctxs.size > BROWSER_MAX_CONTEXTS
+        elsif ctxs.respond_to?(:contexts) && ctxs.contexts.respond_to?(:size)
+          ctxs.contexts.size > BROWSER_MAX_CONTEXTS
+        else
+          false
+        end
+      rescue StandardError
+        false
       end
 
       def build_browser
@@ -390,61 +449,63 @@ module Fetcher
         Timeout.timeout(OVERALL_TIMEOUT) do
           start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           browser = @browser_factory ? @browser_factory.call : self.class.browser
-          context = browser.contexts.create
-          page    = context.create_page
-          original_timeout = (page.timeout rescue nil)
+          context = browser.contexts.create(disposeOnDetach: true)
+          page    = nil
           begin
-            page.timeout = GOTO_TIMEOUT if page.respond_to?(:timeout=)
-            document_ip = RebindingGuard.capture_document_remote_ip(page) do
-              begin
-                page.go_to(uri.to_s)
-              rescue Ferrum::TimeoutError, Ferrum::PendingConnectionsError
-                body_check = (page.evaluate("document.body ? document.body.innerText : ''") rescue "").to_s.strip
-                raise RenderTimeout if body_check.empty?
-              end
-              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
-              budget = OVERALL_TIMEOUT - elapsed
-              wait_for_idle_soft(page, budget: budget)
-              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
-              budget = OVERALL_TIMEOUT - elapsed
-              wait_for_body_stabilize(page, budget: budget)
+            begin
+              page = context.create_page
+              raise RenderTimeout, "falha ao criar página (target nil)" if page.nil?
+            rescue NoMethodError, Ferrum::NoSuchTargetError => e
+              raise RenderTimeout, "falha ao criar página: #{e.message}"
             end
 
-            pre_check_pdf!(page)
+            original_timeout = (page.timeout rescue nil)
+            begin
+              page.timeout = GOTO_TIMEOUT if page.respond_to?(:timeout=)
+              document_ip = RebindingGuard.capture_document_remote_ip(page) do
+                begin
+                  page.go_to(uri.to_s)
+                rescue Ferrum::TimeoutError, Ferrum::PendingConnectionsError
+                  body_check = (page.evaluate("document.body ? document.body.innerText : ''") rescue "").to_s.strip
+                  raise RenderTimeout if body_check.empty?
+                end
+                elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
+                budget = OVERALL_TIMEOUT - elapsed
+                wait_for_idle_soft(page, budget: budget)
+                elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
+                budget = OVERALL_TIMEOUT - elapsed
+                wait_for_body_stabilize(page, budget: budget)
+              end
 
-            status = response_status(page)
-            html   = page.body.to_s
-            title  = page.title.to_s
-            body_text = page.evaluate("document.body ? document.body.innerText : ''").to_s
-            article = extract_via_readability_js(page)
-            {
-              title: title,
-              final_url: safe_current_url(page) || uri.to_s,
-              document_ip: document_ip,
-              readability_text: article[:text],
-              readability_html: article[:html],
-              body_text: body_text,
-              html: html,
-              status: status
-            }
+              pre_check_pdf!(page)
+
+              status = response_status(page)
+              html   = page.body.to_s
+              title  = page.title.to_s
+              body_text = page.evaluate("document.body ? document.body.innerText : ''").to_s
+              article = extract_via_readability_js(page)
+              {
+                title: title,
+                final_url: safe_current_url(page) || uri.to_s,
+                document_ip: document_ip,
+                readability_text: article[:text],
+                readability_html: article[:html],
+                body_text: body_text,
+                html: html,
+                status: status
+              }
+            ensure
+              if original_timeout && page.respond_to?(:timeout=)
+                begin
+                  page.timeout = original_timeout
+                rescue StandardError
+                  nil
+                end
+              end
+            end
           ensure
-            if original_timeout && page.respond_to?(:timeout=)
-              begin
-                page.timeout = original_timeout
-              rescue StandardError
-                nil
-              end
-            end
-            begin
-              page&.close
-            rescue StandardError
-              nil
-            end
-            begin
-              context&.dispose
-            rescue StandardError
-              nil
-            end
+            close_quietly(page)
+            dispose_quietly(context)
           end
         end
       end
@@ -527,6 +588,20 @@ module Fetcher
       { text: result["text"].to_s, html: result["html"].to_s }
     rescue StandardError
       { text: "", html: "" }
+    end
+
+    def close_quietly(page)
+      page&.close
+    rescue StandardError => e
+      Rails.logger.warn "[Fetcher::PageFetcher] falha ao fechar página (#{e.class}: #{e.message})"
+      self.class.mark_dirty!
+    end
+
+    def dispose_quietly(context)
+      context&.dispose
+    rescue StandardError => e
+      Rails.logger.warn "[Fetcher::PageFetcher] falha ao descartar contexto (#{e.class}: #{e.message})"
+      self.class.mark_dirty!
     end
   end
 end
