@@ -150,6 +150,16 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
     assert_includes result[:reason], "old.reddit.com"
   end
 
+  test "timeout de render em plataforma nao vira falha inesperada" do
+    Fetcher::Channels::Reddit.stubs(:search).raises(Fetcher::BrowserSession::RenderTimeout.new("old.reddit.com"))
+
+    result = PlatformSearchTool.new.execute(query: "ruby", platform: "reddit")
+
+    assert_equal :error, result[:status]
+    assert_match(/tempo|timeout|render/i, result[:reason])
+    refute_match(/falha inesperada/i, result[:reason])
+  end
+
   test "falha inesperada nao sobe como excecao para o chat" do
     Fetcher::Channels::Youtube.stubs(:search).raises(RuntimeError, "boom")
 

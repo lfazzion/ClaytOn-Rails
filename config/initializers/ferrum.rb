@@ -52,9 +52,11 @@ module FerumConfig
   # Opções padrão para instanciar Ferrum::Browser.
   # Uso: Ferrum::Browser.new(**FerumConfig.browser_options)
   def self.browser_options
+    # timeout: 12 é o teto de um único comando CDP/wait e TEM de ser menor que
+    # PageFetcher::GOTO_TIMEOUT (20s) e OVERALL_TIMEOUT (25s).
     stealth_opts = {
       ws_url: discover_stealth_ws_url,
-      timeout: 30,
+      timeout: 12,
       process_timeout: 30,
       headless: true,
       window_size: [1366, 768]
@@ -76,7 +78,7 @@ module FerumConfig
     # Fallback: deixa o Ferrum tentar conectar diretamente (ambiente dev/test)
     {
       browser_path: ENV.fetch('CHROME_BIN', nil),
-      timeout: 30,
+      timeout: 12,
       headless: true
     }.compact
   end

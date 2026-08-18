@@ -102,4 +102,29 @@ class FerrumHostHeaderBypassTest < ActiveSupport::TestCase
     assert_kind_of Hash, options
     assert_equal true, options[:headless]
   end
+
+  test "hierarquia de timeouts respeita invariante permanente da spec" do
+    mock_response = {
+      "webSocketDebuggerUrl" => "ws://127.0.0.1:9222/devtools/browser/abc123"
+    }.to_json
+
+    stub_request(:get, "http://#{@chrome_host}:#{@chrome_port}/json/version")
+      .with(headers: { "Host" => "localhost" })
+      .to_return(status: 200, body: mock_response, headers: { "Content-Type" => "application/json" })
+
+    ferrum_timeout = FerumConfig.browser_options[:timeout]
+    goto_timeout = Fetcher::PageFetcher::GOTO_TIMEOUT
+    overall_timeout = Fetcher::PageFetcher::OVERALL_TIMEOUT
+    session_timeout = Fetcher::BrowserSession::OVERALL_TIMEOUT
+    channel_timeout = Fetcher::ExtractService::CHANNEL_TIMEOUT
+    total_per_url = Fetcher::ExtractService::TOTAL_PER_URL_TIMEOUT
+
+    assert_operator ferrum_timeout, :>, 0
+    assert_operator ferrum_timeout, :<, goto_timeout
+    assert_operator goto_timeout, :<, overall_timeout
+    assert_operator overall_timeout, :<, session_timeout
+    assert_operator session_timeout, :<, channel_timeout
+    assert_equal channel_timeout, total_per_url
+    assert_operator total_per_url, :<, 90
+  end
 end

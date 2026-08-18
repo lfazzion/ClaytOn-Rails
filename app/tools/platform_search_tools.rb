@@ -95,6 +95,9 @@ class PlatformSearchTool < ToolBase
     Rails.logger.warn "[PlatformSearchTool] sessão de #{e.domain} expirada"
     error("sessão de #{e.domain} ausente ou expirada — o dono precisa renovar o cookie desse domínio " \
           "antes de ler dentro dessa plataforma")
+  rescue Fetcher::BrowserSession::RenderTimeout, Fetcher::PageFetcher::RenderTimeout => e
+    Rails.logger.warn "[PlatformSearchTool] timeout de render em #{nome}: #{e.message}"
+    error("leitura em #{nome} estourou o tempo de render (#{Fetcher::BrowserSession::OVERALL_TIMEOUT}s) — tente de novo")
   rescue Fetcher::Channels::Error => e
     # Falha prevista de canal (rate limit, busca sem resposta, timeline
     # ilegível): mensagem limpa, já escrita pelo canal.

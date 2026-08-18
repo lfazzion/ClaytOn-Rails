@@ -29,7 +29,8 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
   end
 
   class FakePage
-    attr_reader :visited, :closed
+    attr_reader :visited, :closed, :timeout_during_goto
+    attr_accessor :timeout
 
     def initialize(body_text: "conteúdo renderizado por javascript", status: 200,
                    content_type: "text/html", document_remote_ip: nil)
@@ -39,10 +40,13 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
       @closed = false
       @document_remote_ip = document_remote_ip
       @listeners = {}
+      @timeout = 12
+      @timeout_during_goto = nil
     end
 
     def go_to(url)
       @visited << url
+      @timeout_during_goto = @timeout
       # O Ferrum emite Network.responseReceived do documento durante o go_to;
       # o dublê emite na mesma hora para o assinante do RebindingGuard pegar.
       return unless @document_remote_ip
@@ -260,6 +264,71 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     Fetcher::PageFetcher.expects(:reset_browser!).at_least_once
 
     assert_raises(Fetcher::PageFetcher::RenderTimeout) { fetcher.call("https://lento.test/") }
+  end
+
+  test "Ferrum::TimeoutError no go_to com body vazio vira RenderTimeout e nao sobe cru" do
+    page = FakePage.new(body_text: "")
+    page.stubs(:go_to).raises(Ferrum::TimeoutError)
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+
+    assert_raises(Fetcher::PageFetcher::RenderTimeout) do
+      fetcher.call("https://timeout.test/")
+    end
+  end
+
+  test "GOTO_TIMEOUT e aplicado durante go_to e restaurado depois" do
+    page = FakePage.new(body_text: "conteúdo válido")
+    page.timeout = 12
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+
+    payload = fetcher.call("https://timeout-test.test/")
+
+    assert_equal Fetcher::PageFetcher::GOTO_TIMEOUT, page.timeout_during_goto
+    assert_equal 12, page.timeout
+    assert_equal "Título Renderizado", payload[:title]
+  end
+
+  test "go_to soft com body presente prossegue para extracao sem RenderTimeout" do
+    page = FakePage.new(body_text: "texto presente no body antes do timeout de load")
+    page.stubs(:go_to).raises(Ferrum::TimeoutError)
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+
+    payload = fetcher.call("https://soft-goto.test/")
+
+    assert_includes payload[:content], "texto presente no body"
+  end
+
+  test "idle e stabilize nao comecam sem budget suficiente" do
+    page = FakePage.new(body_text: "texto com pouco budget")
+    browser = FakeBrowser.new(context: FakeContext.new(page))
+    fetcher = Fetcher::PageFetcher.new(browser_factory: -> { browser })
+
+    # Simula relógio com 0.4s de budget restante
+    fetcher.expects(:wait_for_idle_soft).with(page, budget: 0.4).once
+    fetcher.expects(:wait_for_body_stabilize).with(page, budget: 0.4).once
+
+    page.network.expects(:wait_for_idle).never
+    Kernel.expects(:sleep).never
+
+    fetcher.send(:wait_for_idle_soft, page, budget: 0.4)
+    fetcher.send(:wait_for_body_stabilize, page, budget: 0.4)
+  end
+
+  test "reset_browser! nao da quit com outro render in-flight ate o segundo sair" do
+    quit_called = false
+    fake_browser = FakeBrowser.new
+    fake_browser.define_singleton_method(:quit) { quit_called = true }
+    Fetcher::PageFetcher.instance_variable_set(:@browser, fake_browser)
+
+    Fetcher::PageFetcher.track_in_flight do
+      Fetcher::PageFetcher.reset_browser!
+      assert_equal false, quit_called, "quit nao pode rodar enquanto in_flight > 0"
+    end
+
+    assert_equal true, quit_called, "quit deve rodar assim que in_flight zerar"
   end
 
   # ── DEFEITO 3: DNS rebinding no caminho Chrome ──────────────────────────

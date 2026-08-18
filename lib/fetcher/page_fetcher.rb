@@ -101,8 +101,30 @@ module Fetcher
         end
       end
 
+      def track_in_flight
+        BROWSER_MUTEX.synchronize do
+          @in_flight = (@in_flight || 0) + 1
+        end
+        yield
+      ensure
+        BROWSER_MUTEX.synchronize do
+          @in_flight = [(@in_flight || 1) - 1, 0].max
+          if @pending_discard && @in_flight == 0
+            discard_locked!
+            @pending_discard = false
+          end
+        end
+      end
+
       def reset_browser!
-        BROWSER_MUTEX.synchronize { discard_locked! }
+        BROWSER_MUTEX.synchronize do
+          if (@in_flight || 0) > 0
+            @pending_discard = true
+          else
+            discard_locked!
+            @pending_discard = false
+          end
+        end
       end
 
       # Sonda barata de sessão viva. Sem ela, um restart do container do chrome
@@ -364,71 +386,92 @@ module Fetcher
     end
 
     def render_via_ferrum(uri)
-      Timeout.timeout(OVERALL_TIMEOUT) do
-        browser = @browser_factory ? @browser_factory.call : self.class.browser
-        context = browser.contexts.create
-        page    = context.create_page
-        begin
-          # STEALTH_JS não é injetado aqui: `evaluate_on_new_document` é do
-          # Browser, e a injeção acontece em `build_browser`, uma vez por
-          # instância. Chamá-lo na Page levantava NoMethodError e matava TODA
-          # escalada antes de renderizar.
-          # O assinante de `Network.responseReceived` entra ANTES do go_to: é a
-          # única forma de pegar o remoteIPAddress do documento principal, e é
-          # ele que fecha a janela de DNS rebinding deste caminho.
-          document_ip = RebindingGuard.capture_document_remote_ip(page) do
-            page.go_to(uri.to_s)
-            wait_for_idle_soft(page)
-            wait_for_body_stabilize(page)
-          end
-
-          pre_check_pdf!(page)
-
-          status = response_status(page)
-          html   = page.body.to_s
-          title  = page.title.to_s
-          body_text = page.evaluate("document.body ? document.body.innerText : ''").to_s
-          article = extract_via_readability_js(page)
-          {
-            title: title,
-            final_url: safe_current_url(page) || uri.to_s,
-            document_ip: document_ip,
-            readability_text: article[:text],
-            readability_html: article[:html],
-            body_text: body_text,
-            html: html,
-            status: status
-          }
-        ensure
+      self.class.track_in_flight do
+        Timeout.timeout(OVERALL_TIMEOUT) do
+          start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          browser = @browser_factory ? @browser_factory.call : self.class.browser
+          context = browser.contexts.create
+          page    = context.create_page
+          original_timeout = (page.timeout rescue nil)
           begin
-            page&.close
-          rescue StandardError
-            nil
-          end
-          begin
-            context&.dispose
-          rescue StandardError
-            nil
+            page.timeout = GOTO_TIMEOUT if page.respond_to?(:timeout=)
+            document_ip = RebindingGuard.capture_document_remote_ip(page) do
+              begin
+                page.go_to(uri.to_s)
+              rescue Ferrum::TimeoutError, Ferrum::PendingConnectionsError
+                body_check = (page.evaluate("document.body ? document.body.innerText : ''") rescue "").to_s.strip
+                raise RenderTimeout if body_check.empty?
+              end
+              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
+              budget = OVERALL_TIMEOUT - elapsed
+              wait_for_idle_soft(page, budget: budget)
+              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
+              budget = OVERALL_TIMEOUT - elapsed
+              wait_for_body_stabilize(page, budget: budget)
+            end
+
+            pre_check_pdf!(page)
+
+            status = response_status(page)
+            html   = page.body.to_s
+            title  = page.title.to_s
+            body_text = page.evaluate("document.body ? document.body.innerText : ''").to_s
+            article = extract_via_readability_js(page)
+            {
+              title: title,
+              final_url: safe_current_url(page) || uri.to_s,
+              document_ip: document_ip,
+              readability_text: article[:text],
+              readability_html: article[:html],
+              body_text: body_text,
+              html: html,
+              status: status
+            }
+          ensure
+            if original_timeout && page.respond_to?(:timeout=)
+              begin
+                page.timeout = original_timeout
+              rescue StandardError
+                nil
+              end
+            end
+            begin
+              page&.close
+            rescue StandardError
+              nil
+            end
+            begin
+              context&.dispose
+            rescue StandardError
+              nil
+            end
           end
         end
       end
-    rescue Timeout::Error
+    rescue Timeout::Error, Ferrum::TimeoutError, Ferrum::PendingConnectionsError
       # Travar o timeout inteiro é a assinatura da sessão envenenada. Mesmo que a
       # sonda tenha deixado passar, o dano para aqui: a próxima chamada reconstrói.
       self.class.reset_browser! unless @browser_factory
       raise RenderTimeout
     end
 
-    def wait_for_idle_soft(page)
+    def wait_for_idle_soft(page, budget: nil)
+      return if budget && budget < IDLE_TIMEOUT
+
       page.network.wait_for_idle(duration: IDLE_DURATION, timeout: IDLE_TIMEOUT)
     rescue Ferrum::TimeoutError, StandardError
       nil
     end
 
-    def wait_for_body_stabilize(page)
+    def wait_for_body_stabilize(page, budget: nil)
+      return if budget && budget < 1.0
+
+      start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       prev = 0
       stable = 0
       BODY_STABILIZE_ATTEMPTS.times do
+        break if budget && (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start + BODY_STABILIZE_INTERVAL) > budget
+
         len = page.evaluate("document.body ? document.body.innerText.length : 0").to_i
         if prev.positive? && (len - prev).abs <= [1, (prev * 0.01).to_i].max
           stable += 1
