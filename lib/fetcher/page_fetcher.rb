@@ -96,7 +96,17 @@ module Fetcher
 
       def browser
         BROWSER_MUTEX.synchronize do
-          discard_locked! if @browser && (expired? || !alive?(@browser) || browser_dirty?)
+          if @browser && (expired? || !alive?(@browser) || browser_dirty?)
+            if (@in_flight || 0) > 0
+              # Tem render em voo usando este browser: NÃO derrubar agora.
+              # O reset+quit só acontece quando @in_flight chegar a 0, no
+              # ensure de track_in_flight (caminho já existente). Marcar o
+              # pending_discard garante o descarte não se perde.
+              @pending_discard = true
+            else
+              discard_locked!
+            end
+          end
 
           @browser ||= begin
             @browser_started_at = Time.current

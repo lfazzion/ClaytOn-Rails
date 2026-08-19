@@ -621,4 +621,73 @@ class Fetcher::PageFetcherBrowserTest < ActiveSupport::TestCase
     assert_equal true, ctx1.disposed
     assert_equal true, ctx2.disposed
   end
+
+  # ── CRITICAL (grok): browser() nao derruba o browser em uso por render in-flight ─
+  test "browser() nao chama reset+quit com render in-flight: apenas marca pending_discard (overlap via BROWSER_MAX_PAGES)" do
+    live_browser = FakeBrowser.new
+    Fetcher::PageFetcher.instance_variable_set(:@browser, live_browser)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_started_at, Time.current)
+    Fetcher::PageFetcher.instance_variable_set(:@pages_since_start, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@in_flight, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@pending_discard, false)
+
+    # Marca como expirado por pagina (BROWSER_MAX_PAGES) para forçar o caminho de descarte
+    Fetcher::PageFetcher.instance_variable_set(
+      :@pages_since_start, Fetcher::PageFetcher::BROWSER_MAX_PAGES
+    )
+
+    # Dentro de track_in_flight: @in_flight > 0 — o browser() chamado aqui (pelo
+    # render em voo) NÃO deve derrubar o browser. Apenas marcar @pending_discard.
+    result = nil
+    Fetcher::PageFetcher.track_in_flight do
+      result = Fetcher::PageFetcher.browser
+      # O browser devolvido é o MESMO que está em uso — não foi reciclado
+      assert_same live_browser, result,
+                  "browser() devolveu uma instância nova em vez do browser em uso"
+      assert_equal true, Fetcher::PageFetcher.instance_variable_get(:@pending_discard),
+                   "pending_discard deve ser marcado, mas browser não deve ser derrubado"
+      assert_equal false, live_browser.reset_called,
+                   "reset NÃO pode ser chamado enquanto há render in-flight"
+      assert_equal false, live_browser.quit_called,
+                   "quit NÃO pode ser chamado enquanto há render in-flight"
+    end
+
+    # Ao sair de track_in_flight (in_flight == 0), o pending_discard dispara o descarte
+    assert_equal true, live_browser.reset_called,
+                 "reset deve rodar ao sair do in-flight se pending_discard estava marcado"
+    assert_equal true, live_browser.quit_called,
+                 "quit deve rodar ao sair do in-flight se pending_discard estava marcado"
+    assert_equal false, Fetcher::PageFetcher.instance_variable_get(:@pending_discard),
+                 "pending_discard deve ser limpo após o descarte"
+  end
+
+  test "browser() nao derruba browser dirty com render in-flight: apenas marca pending_discard (overlap via dirty path)" do
+    live_browser = FakeBrowser.new
+    Fetcher::PageFetcher.instance_variable_set(:@browser, live_browser)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_started_at, Time.current)
+    Fetcher::PageFetcher.instance_variable_set(:@pages_since_start, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@in_flight, 0)
+    Fetcher::PageFetcher.instance_variable_set(:@pending_discard, false)
+    Fetcher::PageFetcher.instance_variable_set(:@browser_dirty, true)
+
+    result = nil
+    Fetcher::PageFetcher.track_in_flight do
+      result = Fetcher::PageFetcher.browser
+      assert_same live_browser, result,
+                  "browser() devolveu instância nova em vez do browser dirty em uso"
+      assert_equal true, Fetcher::PageFetcher.instance_variable_get(:@pending_discard),
+                   "pending_discard deve ser marcado para o browser dirty"
+      assert_equal false, live_browser.reset_called,
+                   "reset NÃO pode rodar enquanto há render in-flight"
+      assert_equal false, live_browser.quit_called,
+                   "quit NÃO pode rodar enquanto há render in-flight"
+    end
+
+    assert_equal true, live_browser.reset_called,
+                 "reset deve rodar ao sair do in-flight para browser dirty"
+    assert_equal true, live_browser.quit_called,
+                 "quit deve rodar ao sair do in-flight para browser dirty"
+    assert_equal false, Fetcher::PageFetcher.instance_variable_get(:@pending_discard),
+                 "pending_discard deve ser limpo após o descarte"
+  end
 end

@@ -56,7 +56,7 @@ module Fetcher
         # fonte nenhuma — antes de gastar browser.
         cookies, origem = SessionCookies.for(host)
 
-        PageFetcher.track_in_flight do
+        PageFetcher.track_in_flight(timeout: OVERALL_TIMEOUT) do
           Thread.current[:fetcher_deadline] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + OVERALL_TIMEOUT
           begin
             Timeout.timeout(OVERALL_TIMEOUT) do
