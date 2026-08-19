@@ -96,6 +96,7 @@ module Fetcher
     # como qualquer erro esperado — nunca um 500 no lote.
     def call(url)
       requested = url.to_s
+      @start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       extracted = Timeout.timeout(TOTAL_PER_URL_TIMEOUT) { extract(requested) }
       success(requested, extracted)
     rescue Timeout::Error
@@ -115,6 +116,13 @@ module Fetcher
     end
 
     private
+
+    def remaining_timeout
+      return TOTAL_PER_URL_TIMEOUT unless @start_time
+
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - @start_time
+      [TOTAL_PER_URL_TIMEOUT - elapsed, 0.0].max
+    end
 
     def clamp_max_chars(value)
       requested = value.to_i
@@ -197,6 +205,16 @@ module Fetcher
       # de exemplo com 1 item (bem abaixo de THIN_CONTENT_CHARS) escalava pro
       # Chrome — que não entende feed e devolveria a mesma página em HTML.
       return static if static && (channel_routed?(static) || static[:content].to_s.length >= THIN_CONTENT_CHARS)
+
+      # Se o tempo restante do TOTAL_PER_URL_TIMEOUT for menor que GOTO_TIMEOUT,
+      # não liga o Chrome (evita iniciar render fadado ao timeout).
+      remaining = remaining_timeout
+      if remaining < PageFetcher::GOTO_TIMEOUT
+        Rails.logger.info "[Fetcher::ExtractService] skip chrome, restam #{remaining.round(1)}s (< GOTO_TIMEOUT #{PageFetcher::GOTO_TIMEOUT}s)"
+        return static if static
+
+        raise static_error || SafeHttpClient::Error.new("nenhum conteúdo extraído")
+      end
 
       browser = begin
         via_browser(url)

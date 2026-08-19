@@ -88,6 +88,23 @@ class Fetcher::ExtractServiceTest < ActiveSupport::TestCase
     assert_includes result[:content], "curto"
   end
 
+  test "página magra com tempo restante menor que GOTO_TIMEOUT não liga o Chrome e devolve o estático" do
+    thin = "<html><title>T</title><body><p>curto</p></body></html>"
+    stub_page("http://spa.test/", body: thin)
+
+    service = Fetcher::ExtractService.new
+    # Simula relógio com apenas 15s restantes (< 20s GOTO_TIMEOUT)
+    service.instance_variable_set(:@start_time, Process.clock_gettime(Process::CLOCK_MONOTONIC) - (Fetcher::ExtractService::TOTAL_PER_URL_TIMEOUT - 15))
+
+    Fetcher::PageFetcher.any_instance.expects(:call).never
+
+    result = service.send(:with_escalation, "http://spa.test/")
+
+    assert_not_nil result
+    assert_includes result[:content], "curto"
+    assert_equal "static", result[:metadata]["source"]
+  end
+
   test "hard domain vai direto pro browser sem tentar o estático" do
     Fetcher::PageFetcher.stubs(:hard_domains).returns(["duro.test"])
     Fetcher::PageFetcher.any_instance.expects(:call)

@@ -407,9 +407,12 @@ module Fetcher
             # gastaria em hidratação o que deveria render posts. `SCROLL_PASSES`
             # continua sendo o teto de rolagens, que é o que custa requisição.
             if vistos.empty?
+              break if BrowserSession.remaining < HYDRATION_PAUSE
+
               aguardar_hidratacao
             else
               break if rolagens >= SCROLL_PASSES
+              break if BrowserSession.remaining < SCROLL_PAUSE
 
               rolar(page)
               rolagens += 1

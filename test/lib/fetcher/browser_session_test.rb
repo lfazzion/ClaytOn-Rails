@@ -41,18 +41,27 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   end
 
   class FakePage
-    attr_reader :cookies, :visitado, :fechada, :commands
+    attr_reader :cookies, :visitado, :fechada, :commands, :timeout_during_goto
+    attr_accessor :timeout, :body_text
 
-    def initialize(document_remote_ip: nil)
+    def initialize(document_remote_ip: nil, body_text: "conteúdo inicial")
       @cookies = FakeCookies.new
       @fechada = false
       @document_remote_ip = document_remote_ip
       @listeners = {}
       @commands = []
       @command_result = true
+      @timeout = 12
+      @timeout_during_goto = nil
+      @body_text = body_text
     end
 
     attr_accessor :command_result
+
+    def evaluate(js)
+      return @body_text if js.to_s.include?("innerText")
+      nil
+    end
 
     def command(name, params = {})
       @commands << [name, params]
@@ -61,6 +70,7 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
 
     def go_to(url)
       @visitado = url
+      @timeout_during_goto = @timeout
       return unless @document_remote_ip
 
       Array(@listeners["Network.responseReceived"]).each do |blk|
@@ -96,8 +106,15 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
   end
 
   class FakeContexts
-    def initialize(context) = @context = context
-    def create = @context
+    attr_reader :last_options
+    def initialize(context)
+      @context = context
+      @last_options = nil
+    end
+    def create(**options)
+      @last_options = options
+      @context
+    end
   end
 
   class FakeBrowser
@@ -337,5 +354,69 @@ class Fetcher::BrowserSessionTest < ActiveSupport::TestCase
       Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
     end
     assert_match(/rotação não persistida/, log_capturado)
+  end
+
+  test "create_page com target nil que levanta NoMethodError build_page vira BrowserSession::RenderTimeout" do
+    broken_context = Object.new
+    def broken_context.create_page
+      raise NoMethodError, "undefined method `build_page' for nil:NilClass"
+    end
+    def broken_context.dispose; end
+
+    Fetcher::PageFetcher.stubs(:browser).returns(FakeBrowser.new(broken_context))
+
+    assert_raises(Fetcher::BrowserSession::RenderTimeout) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+  end
+
+  test "BrowserSession mapeia Ferrum::TimeoutError no go_to com body vazio para RenderTimeout e fecha pagina e contexto" do
+    @page.body_text = ""
+    @page.stubs(:go_to).raises(Ferrum::TimeoutError)
+
+    assert_raises(Fetcher::BrowserSession::RenderTimeout) do
+      Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+    end
+    assert @page.fechada
+    assert @context.descartado
+  end
+
+  test "BrowserSession go_to soft com body presente prossegue para o bloco sem RenderTimeout" do
+    @page.body_text = "conteúdo presente no body"
+    @page.stubs(:go_to).raises(Ferrum::TimeoutError)
+
+    res = Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :bloco_executado }
+    assert_equal :bloco_executado, res
+  end
+
+  test "BrowserSession entrega remaining deadline durante execucao do bloco e limpa no ensure" do
+    remaining_durante_bloco = nil
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") do |_p|
+      remaining_durante_bloco = Fetcher::BrowserSession.remaining
+    end
+
+    assert_operator remaining_durante_bloco, :>, 0
+    assert_operator remaining_durante_bloco, :<=, Fetcher::BrowserSession::OVERALL_TIMEOUT
+    assert_equal Float::INFINITY, Fetcher::BrowserSession.remaining
+  end
+
+  test "BrowserSession contexts.create recebe disposeOnDetach: true (Item 3)" do
+    fake_contexts = FakeContexts.new(@context)
+    fake_browser = FakeBrowser.new(nil)
+    fake_browser.instance_variable_set(:@contexts, fake_contexts)
+    Fetcher::PageFetcher.stubs(:browser).returns(fake_browser)
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
+
+    assert_equal({ disposeOnDetach: true }, fake_contexts.last_options,
+                 "BrowserSession deve passar disposeOnDetach: true para contexts.create")
+  end
+
+  test "BrowserSession falha no dispose_quietly marca PageFetcher como dirty (Item 4)" do
+    @context.define_singleton_method(:dispose) { raise StandardError, "erro no dispose" }
+
+    Fetcher::PageFetcher.expects(:mark_dirty!).at_least_once
+
+    Fetcher::BrowserSession.with_page("https://www.youtube.com/watch?v=x") { |_p| :ok }
   end
 end

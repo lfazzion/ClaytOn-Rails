@@ -43,9 +43,19 @@ module ScrapingServices
     end
 
     def close
-      browser&.quit
-    rescue StandardError
-      nil
+      return unless @browser
+
+      begin
+        @browser.reset
+      rescue StandardError => e
+        Rails.logger.warn "[ScrapingServices::FerrumScraperBase] falha no browser.reset antes do quit: #{e.class}: #{e.message}"
+      ensure
+        begin
+          @browser.quit
+        rescue StandardError
+          nil
+        end
+      end
     end
 
     private

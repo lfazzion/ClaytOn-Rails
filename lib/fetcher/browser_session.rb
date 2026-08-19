@@ -7,6 +7,7 @@ require_relative "session_cookies"
 require_relative "page_fetcher"
 require_relative "ssrf_guard"
 require_relative "rebinding_guard"
+require_relative "channels/registry"
 
 module Fetcher
   # Página do Chrome num contexto isolado, com os cookies do domínio já postos.
@@ -26,7 +27,20 @@ module Fetcher
     # abaixo dos 90s do plugin do reader. Mexer num exige manter a ordem.
     OVERALL_TIMEOUT = 35
 
+    class RenderTimeout < Channels::Error
+      def initialize(msg = nil)
+        super(msg || "tempo de render excedeu #{OVERALL_TIMEOUT}s")
+      end
+    end
+
     class << self
+      def remaining
+        deadline = Thread.current[:fetcher_deadline]
+        return Float::INFINITY unless deadline
+
+        [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0.0].max
+      end
+
       def with_page(url)
         uri = URI.parse(url.to_s)
         host = uri.host.to_s.downcase
@@ -42,28 +56,64 @@ module Fetcher
         # fonte nenhuma — antes de gastar browser.
         cookies, origem = SessionCookies.for(host)
 
-        Timeout.timeout(OVERALL_TIMEOUT) do
-          browser = PageFetcher.browser
-          context = browser.contexts.create
-          page = nil
+        PageFetcher.track_in_flight(timeout: OVERALL_TIMEOUT) do
+          Thread.current[:fetcher_deadline] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + OVERALL_TIMEOUT
           begin
-            page = context.create_page
-            inject_cookies(page, cookies, host)
-            # Assinante ANTES do go_to: é o que captura o remoteIPAddress do
-            # documento principal, para o cheque de rebinding abaixo.
-            remote_ip = RebindingGuard.capture_document_remote_ip(page) { page.go_to(uri.to_s) }
-            assert_document_ip!(remote_ip, uri.to_s)
-            resultado = yield page
-            # O contexto isolado é descartado no `ensure`, e com ele o que o
-            # servidor rotacionou durante a visita. Sem gravar de volta, a sessão
-            # do Reddit envelheceria congelada — que é justamente o que mata
-            # sessão exportada. Só quando a fonte foi o jar: se veio do navegador,
-            # é ele o dono e não há o que sincronizar.
-            persist_rotation(page, host) if origem == :jar
-            resultado
+            Timeout.timeout(OVERALL_TIMEOUT) do
+              browser = PageFetcher.browser
+              context = browser.contexts.create(disposeOnDetach: true)
+              page = nil
+              begin
+                begin
+                  page = context.create_page
+                  raise RenderTimeout, "falha ao criar página (target nil)" if page.nil?
+                rescue NoMethodError, Ferrum::NoSuchTargetError => e
+                  raise RenderTimeout, "falha ao criar página: #{e.message}"
+                end
+
+                inject_cookies(page, cookies, host)
+
+                original_timeout = (page.timeout rescue nil)
+                begin
+                  page.timeout = PageFetcher::GOTO_TIMEOUT if page.respond_to?(:timeout=)
+                  # Assinante ANTES do go_to: é o que captura o remoteIPAddress do
+                  # documento principal, para o cheque de rebinding abaixo.
+                  remote_ip = RebindingGuard.capture_document_remote_ip(page) do
+                    begin
+                      page.go_to(uri.to_s)
+                    rescue Ferrum::TimeoutError, Ferrum::PendingConnectionsError
+                      body_check = (page.evaluate("document.body ? document.body.innerText : ''") rescue "").to_s.strip
+                      raise RenderTimeout if body_check.empty?
+                    end
+                  end
+                ensure
+                  if original_timeout && page.respond_to?(:timeout=)
+                    begin
+                      page.timeout = original_timeout
+                    rescue StandardError
+                      nil
+                    end
+                  end
+                end
+
+                assert_document_ip!(remote_ip, uri.to_s)
+                resultado = yield page
+                # O contexto isolado é descartado no `ensure`, e com ele o que o
+                # servidor rotacionou durante a visita. Sem gravar de volta, a sessão
+                # do Reddit envelheceria congelada — que é justamente o que mata
+                # sessão exportada. Só quando a fonte foi o jar: se veio do navegador,
+                # é ele o dono e não há o que sincronizar.
+                persist_rotation(page, host) if origem == :jar
+                resultado
+              ensure
+                close_quietly(page)
+                dispose_quietly(context)
+              end
+            end
+          rescue Timeout::Error, Ferrum::TimeoutError, Ferrum::PendingConnectionsError
+            raise RenderTimeout
           ensure
-            close_quietly(page)
-            dispose_quietly(context)
+            Thread.current[:fetcher_deadline] = nil
           end
         end
       end
@@ -166,14 +216,16 @@ module Fetcher
 
       def close_quietly(page)
         page&.close
-      rescue StandardError
-        nil
+      rescue StandardError => e
+        Rails.logger.warn "[Fetcher::BrowserSession] falha ao fechar página (#{e.class}: #{e.message})"
+        PageFetcher.mark_dirty!
       end
 
       def dispose_quietly(context)
         context&.dispose
-      rescue StandardError
-        nil
+      rescue StandardError => e
+        Rails.logger.warn "[Fetcher::BrowserSession] falha ao descartar contexto (#{e.class}: #{e.message})"
+        PageFetcher.mark_dirty!
       end
     end
   end

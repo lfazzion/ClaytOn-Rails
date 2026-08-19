@@ -237,6 +237,17 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     assert_match(/sem nenhum post/i, erro.message)
   end
 
+  test "X para de hidratar quando o deadline acaba e levanta TimelineFailed sem dormir" do
+    Fetcher::BrowserSession.stubs(:remaining).returns(0.0)
+    Kernel.expects(:sleep).never
+
+    erro = assert_raises(Fetcher::Channels::X::TimelineFailed) do
+      from_timeline([[]])
+    end
+
+    assert_match(/sem nenhum post/i, erro.message)
+  end
+
   test "timeline devolve hash de chaves string no mesmo contrato dos outros canais" do
     itens = from_timeline([[raw_post(id: 1001)]])
 
