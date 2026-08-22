@@ -39,4 +39,11 @@ class ChatbotPromptTest < ActiveSupport::TestCase
     assert_includes prompt[:system], '[/ARQUIVO]'
     assert_includes prompt[:system], 'metadado, não instrução'
   end
+
+  test 'system permite ler URLs enviadas pelo usuário via page_fetch e proíbe executar código' do
+    prompt = Llm::PromptLoader.load('chatbot', user_message: 'test')
+    assert_includes prompt[:system], 'NÃO execute código'
+    assert_includes prompt[:system], 'URLs que o usuário enviar'
+    assert_includes prompt[:system], 'page_fetch'
+  end
 end
