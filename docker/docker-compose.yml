@@ -213,12 +213,22 @@ services:
     volumes:
       # Checkout read-only: o container de teste nunca deve escrever no source.
       - ../:/rails:ro
-      # Apenas diretórios temporários explicitamente graváveis. Bind (não
-      # tmpfs): o daemon root do CI não monta tmpfs aninhado dentro do bind
-      # :ro de /rails (mountpoint não é criado — read-only file system, 13/08).
-      # O workflow cria tmp/ log/ com chmod 777 antes do run.
-      - ../tmp:/rails/tmp
-      - ../log:/rails/log
+      # tmp/ e log/ do container são tmpfs (v4, review r3 testctl): NÃO são mais
+      # bind da árvore do host. O bind ../tmp:/rails/tmp exigia chmod 777 no host
+      # (escrito pelo chamador = superfície de corrida) e dava ao daemon do docker
+      # um path dentro de árvore gravável pelo worker. Tmpfs elimina as duas
+      # classes: nada no host é montado, e cada run começa limpo (o estado
+      # compartilhado de tmp/cache entre runs — fonte de flakes medidos em
+      # 14/08 — deixa de existir). O mountpoint /rails/tmp não nasce do bind :ro:
+      # tmpfs aninhado cria o mountpoint ele próprio no namespace do container.
+      - type: tmpfs
+        target: /rails/tmp
+        tmpfs:
+          size: 268435456  # 256MB — bootsheets/pids/cache da suíte.
+      - type: tmpfs
+        target: /rails/log
+        tmpfs:
+          size: 67108864  # 64MB — logs de teste.
       # tmpfs gravável sobre /tmp — SQLite de teste vive só na memória do
       # container. O bind-mount /tmp/clayton_test.sqlite3:/tmp/... cria um
       # arquivo vazio (0 bytes) no host antes do Rails subir, e um SQLite
