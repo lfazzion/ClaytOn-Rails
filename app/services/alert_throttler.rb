@@ -1,10 +1,11 @@
 # frozen_string_literal: true
 
+require "securerandom"
+
 class AlertThrottler
   ALERT_LIMIT = 10
   WINDOW = 1.hour
   INCIDENT_PREFIX = "scraping_incident"
-  INCIDENT_TTL = 30.days
 
   class << self
     def throttle?(alert_type)
@@ -16,7 +17,7 @@ class AlertThrottler
     end
 
     # Tenta reservar atomicamente uma cota de alerta para o tipo informado.
-    # Inicializa a chave com write(until_exist) quando necessário, repete o
+    # Inicializa a chave com write(unless_exist) quando necessário, repete o
     # increment se outro processo venceu a inicialização, permite apenas
     # valores até ALERT_LIMIT. Retorna a CHAVE da janela reservada (String
     # truthy) se a reserva foi aceita, false se o limite foi excedido, ou nil
@@ -165,39 +166,58 @@ class AlertThrottler
     end
 
     # Tenta reservar atomicamente o envio para uma transição de incidente.
-    # Usa lock atômico no cache para garantir que no máximo um job envie
-    # em cenários de concorrência.
+    # Usa lock atômico no cache com token de proprietário para garantir que no
+    # máximo um job envie em cenários de concorrência.
+    # Retorna o token de proprietário (String truthy) ou false se indisponível.
     def reserve_incident(scraper_name, profile_id, error_type, error_message)
       return false unless transition?(scraper_name, profile_id, error_type, error_message)
 
+      token = SecureRandom.hex(8)
       lock = incident_lock_key(scraper_name, profile_id)
-      acquired = Rails.cache.write(lock, "1", unless_exist: true, expires_in: 5.minutes)
+      acquired = Rails.cache.write(lock, token, unless_exist: true, expires_in: 5.minutes)
       return false unless acquired
 
       # Re-checa após adquirir lock para evitar race condition TOCTOU
       unless transition?(scraper_name, profile_id, error_type, error_message)
-        release_incident(scraper_name, profile_id)
+        release_incident(scraper_name, profile_id, token: token)
         return false
       end
 
-      true
+      token
     end
 
-    # Libera o lock de processamento do incidente (usado em falha de envio ou abort)
-    def release_incident(scraper_name, profile_id)
+    # Libera o lock de processamento do incidente com compare-and-delete por token do proprietário.
+    # Se token não for fornecido, realiza delete incondicional (ex: resolve_incident).
+    def release_incident(scraper_name, profile_id, token: nil)
       lock = incident_lock_key(scraper_name, profile_id)
-      Rails.cache.delete(lock)
+      if token.present?
+        if Rails.cache.is_a?(SolidCache::Store)
+          key = Rails.cache.send(:normalize_key, lock, nil)
+          SolidCache::Entry.lock_and_write(key) do |raw|
+            current = raw ? Rails.cache.send(:deserialize_entry, raw)&.value : nil
+            SolidCache::Entry.delete_by_key(key) if current.to_s == token.to_s
+            nil
+          end
+        else
+          current = Rails.cache.read(lock)
+          Rails.cache.delete(lock) if current.to_s == token.to_s
+        end
+      else
+        Rails.cache.delete(lock)
+      end
     end
 
-    # Consolida o incidente como entregue com sucesso e libera o lock.
-    def consolidate_incident(scraper_name, profile_id, error_type, error_message)
+    # Consolida o incidente como entregue com sucesso e libera o lock do proprietário.
+    # O estado do incidente é durável (sem TTL explícito): a resolução deve ocorrer
+    # SOMENTE em resolve_incident após coleta bem-sucedida (achado 6 do sol).
+    def consolidate_incident(scraper_name, profile_id, error_type, error_message, token: nil)
       fp = normalize_fingerprint(error_message)
       data = { error_type: error_type.to_s, fingerprint: fp }
-      Rails.cache.write(incident_key(scraper_name, profile_id), data, expires_in: INCIDENT_TTL)
-      release_incident(scraper_name, profile_id)
+      Rails.cache.write(incident_key(scraper_name, profile_id), data)
+      release_incident(scraper_name, profile_id, token: token)
     end
 
-    # Resolve o incidente quando a coleta for bem-sucedida (limpa chave).
+    # Resolve o incidente quando a coleta for bem-sucedida (limpa chave durável).
     def resolve_incident(scraper_name, profile_id)
       Rails.cache.delete(incident_key(scraper_name, profile_id))
       release_incident(scraper_name, profile_id)

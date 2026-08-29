@@ -12,15 +12,16 @@ class ScrapingFailureAlertJobTest < ActiveJob::TestCase
 
   teardown do
     ENV.delete("ALERT_THROTTLE_ENABLED")
-ENV.delete("DISCORD_ADMIN_CHANNEL_ID")
+    ENV.delete("DISCORD_ADMIN_CHANNEL_ID")
     bucket = Time.current.to_i / 1.hour.to_i
     Rails.cache.delete("alert_throttle:partial_collection:#{bucket}")
     Rails.cache.delete("alert_throttle:rate_limit:#{bucket}")
     Rails.cache.delete("alert_throttle:metadata_failure:#{bucket}")
-    
+    Rails.cache.delete("alert_throttle:fatal_error:#{bucket}")
+
     (1..10).each do |pid|
       AlertThrottler.resolve_incident("youtube", pid)
-AlertThrottler.resolve_incident("twitter", pid)
+      AlertThrottler.resolve_incident("twitter", pid)
     end
   end
 
@@ -33,7 +34,7 @@ AlertThrottler.resolve_incident("twitter", pid)
       "youtube",
       1,
       "fallback: sem dados detalhados (likes/comments nil)",
-"partial_collection"
+      "partial_collection"
     )
 
     state = AlertThrottler.incident_state("youtube", 1)
@@ -66,7 +67,7 @@ AlertThrottler.resolve_incident("twitter", pid)
     DiscordApiClient.expects(:send_message).twice
 
     ScrapingFailureAlertJob.perform_now(
-"youtube",
+      "youtube",
       1,
       "fallback: sem dados detalhados (likes/comments nil)",
       "partial_collection"
@@ -93,7 +94,7 @@ AlertThrottler.resolve_incident("twitter", pid)
       "partial_collection"
     )
 
-ScrapingFailureAlertJob.perform_now(
+    ScrapingFailureAlertJob.perform_now(
       "youtube",
       1,
       "falha ao extrair shorts",
@@ -156,6 +157,55 @@ ScrapingFailureAlertJob.perform_now(
     # Incidente não foi consolidado
     assert_nil AlertThrottler.incident_state("youtube", 1)
     # Lock foi liberado
+    assert_nil Rails.cache.read(AlertThrottler.incident_lock_key("youtube", 1))
+  end
+
+  # --- ACHADO 7 & 8 (Sol): Cobertura de concorrência e exceções pré e pós-envio ---
+
+  test "job descarta envio quando lock de incidente ja esta ocupado por outro job" do
+    Rails.cache.write(AlertThrottler.incident_lock_key("youtube", 1), "lock_ativo", expires_in: 5.minutes)
+    DiscordApiClient.expects(:send_message).never
+
+    ScrapingFailureAlertJob.perform_now("youtube", 1, "erro fatal", "fatal_error")
+
+    assert_nil AlertThrottler.incident_state("youtube", 1)
+  end
+
+  test "excecao em ensure_admin_channel libera o lock do incidente e propaga o erro" do
+    ENV["DISCORD_ADMIN_CHANNEL_ID"] = nil
+    DiscordApiClient.expects(:get_bot_guilds).raises(StandardError, "Network error fetching guilds")
+    DiscordApiClient.expects(:send_message).never
+
+    assert_raises(StandardError) do
+      ScrapingFailureAlertJob.perform_now(
+        "youtube",
+        1,
+        "fallback: sem dados",
+        "partial_collection"
+      )
+    end
+
+    assert_nil AlertThrottler.incident_state("youtube", 1)
+    assert_nil Rails.cache.read(AlertThrottler.incident_lock_key("youtube", 1))
+  end
+
+  test "falha em consolidate_incident apos envio nao devolve cota horaria mas libera lock" do
+    DiscordApiClient.expects(:send_message).once
+    AlertThrottler.expects(:consolidate_incident).raises(StandardError, "Cache connection lost")
+
+    assert_raises(StandardError) do
+      ScrapingFailureAlertJob.perform_now(
+        "youtube",
+        1,
+        "fallback: sem dados",
+        "partial_collection"
+      )
+    end
+
+    # Cota horária NÃO foi devolvida (permanece consumida em 1, não 0)
+    bucket = Time.current.to_i / 1.hour.to_i
+    assert_equal 1, Rails.cache.read("alert_throttle:partial_collection:#{bucket}").to_i
+    # Lock de incidente foi liberado para não prender jobs futuros
     assert_nil Rails.cache.read(AlertThrottler.incident_lock_key("youtube", 1))
   end
 end

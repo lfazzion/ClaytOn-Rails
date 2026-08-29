@@ -10,47 +10,60 @@ class ScrapingFailureAlertJob < ApplicationJob
   def perform(scraper_name, profile_id, error_message, error_type)
     # Deduplicação por transição de estado: alerta apenas no 1º incidente,
     # em mudança de erro/fingerprint, ou após recuperação.
-    incident_reserved = AlertThrottler.reserve_incident(scraper_name, profile_id, error_type, error_message)
-    unless incident_reserved
+    incident_token = AlertThrottler.reserve_incident(scraper_name, profile_id, error_type, error_message)
+    unless incident_token
       Rails.logger.info "[ScrapingFailureAlertJob] Incidente repetido ou em andamento para #{scraper_name}/#{profile_id}: #{error_type}"
       return
     end
 
-    channel_id = ensure_admin_channel
-    unless channel_id
-      AlertThrottler.release_incident(scraper_name, profile_id)
-      Rails.logger.warn "[ScrapingFailureAlertJob] Canal admin não configurado"
-      return
-    end
+    reserved_key = nil
+    delivered = false
 
-    # reserve retorna:
-    #   nil   -> throttling desabilitado (sem reserva; nada a liberar em falha)
-    #   false -> cota excedida (aborta o envio, sem reserva)
-    #   chave -> reserva aceita (liberar apenas se o envio falhar)
-    reserved_key = AlertThrottler.reserve(error_type)
-    if reserved_key == false
-      AlertThrottler.release_incident(scraper_name, profile_id)
-      Rails.logger.warn "[ScrapingFailureAlertJob] Quota excedida: #{error_type}"
-      return
-    end
-
-    message = build_alert_message(scraper_name, profile_id, error_message, error_type)
-
-    # ACHADO A (13/08): apenas falhas NO envio liberam a reserva. O log
-    # pós-envio fica FORA do rescue, então uma falha nele não libera a reserva
-    # do alerta já entregue — caso contrário um retry reenviaria o alerta.
     begin
+      channel_id = ensure_admin_channel
+      unless channel_id
+        AlertThrottler.release_incident(scraper_name, profile_id, token: incident_token)
+        Rails.logger.warn "[ScrapingFailureAlertJob] Canal admin não configurado"
+        return
+      end
+
+      # reserve retorna:
+      #   nil   -> throttling desabilitado (sem reserva; nada a liberar em falha)
+      #   false -> cota excedida (aborta o envio, sem reserva)
+      #   chave -> reserva aceita (liberar apenas se o envio falhar)
+      reserved_key = AlertThrottler.reserve(error_type)
+      if reserved_key == false
+        AlertThrottler.release_incident(scraper_name, profile_id, token: incident_token)
+        Rails.logger.warn "[ScrapingFailureAlertJob] Quota excedida: #{error_type}"
+        return
+      end
+
+      message = build_alert_message(scraper_name, profile_id, error_message, error_type)
+
+      # Envio ao Discord: apenas falhas anteriores ou durante o envio liberam a cota horária
       DiscordApiClient.send_message(channel_id, message)
-    rescue StandardError
-      AlertThrottler.release(error_type, key: reserved_key) if reserved_key.is_a?(String)
-      AlertThrottler.release_incident(scraper_name, profile_id)
+      delivered = true
+
+      # Consolida o incidente como entregue com sucesso após o envio
+      AlertThrottler.consolidate_incident(scraper_name, profile_id, error_type, error_message, token: incident_token)
+
+      Rails.logger.info "[ScrapingFailureAlertJob] Alerta enviado para #{scraper_name}/#{profile_id}"
+    rescue StandardError => e
+      if delivered
+        # Política explícita pós-envio: A mensagem já foi aceita pelo Discord, portanto a cota horária
+        # NÃO é devolvida e nenhum retry cego deve re-enviar.
+        # Liberamos o lock do proprietário para evitar que jobs futuros fiquem bloqueados.
+        # Risco residual: sem outbox transacional entre Discord e Cache, a não persistência do estado
+        # pode gerar alerta duplicado no próximo ciclo de erro.
+        AlertThrottler.release_incident(scraper_name, profile_id, token: incident_token) rescue nil
+        Rails.logger.error "[ScrapingFailureAlertJob] Erro pós-envio ao consolidar incidente para #{scraper_name}/#{profile_id}: #{e.message}"
+      else
+        # Falhas anteriores à entrega: rollback da cota horária (se reservada) e liberação do lock
+        AlertThrottler.release(error_type, key: reserved_key) if reserved_key.is_a?(String)
+        AlertThrottler.release_incident(scraper_name, profile_id, token: incident_token)
+      end
       raise
     end
-
-    # Consolida o incidente como entregue com sucesso apenas após o envio
-    AlertThrottler.consolidate_incident(scraper_name, profile_id, error_type, error_message)
-
-    Rails.logger.info "[ScrapingFailureAlertJob] Alerta enviado para #{scraper_name}/#{profile_id}"
   end
 
   private

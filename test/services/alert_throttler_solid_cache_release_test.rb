@@ -3,6 +3,7 @@
 require "test_helper"
 require "solid_cache"
 require_relative "../../app/services/alert_throttler"
+require_relative "../../app/jobs/scraping_failure_alert_job"
 
 # Sol rodada 4 (13/08): o caminho de produção do release (SolidCache real) —
 # decremento atômico via lock_and_write (FOR UPDATE) com retorno nil.
@@ -50,7 +51,7 @@ class AlertThrottlerSolidCacheReleaseTest < ActiveSupport::TestCase
                "release sem reserva não deve criar chave"
   end
 
-  test "consolidate_incident e resolve_incident com SolidCache real persistem e limpam o estado" do
+  test "consolidate_incident e resolve_incident com SolidCache real persistem e limpam o estado duravel" do
     AlertThrottler.consolidate_incident("youtube", 42, "partial_collection", "fallback: sem dados")
     state = AlertThrottler.incident_state("youtube", 42)
     assert_equal "partial_collection", state[:error_type]
@@ -63,8 +64,39 @@ class AlertThrottlerSolidCacheReleaseTest < ActiveSupport::TestCase
   end
 
   test "reserve_incident com SolidCache real bloqueia reserva duplicada" do
-    assert_equal true, AlertThrottler.reserve_incident("youtube", 88, "scrape_error", "erro 500")
-    AlertThrottler.consolidate_incident("youtube", 88, "scrape_error", "erro 500")
+    token = AlertThrottler.reserve_incident("youtube", 88, "scrape_error", "erro 500")
+    assert token, "primeira reserva deve ser aceita"
+    AlertThrottler.consolidate_incident("youtube", 88, "scrape_error", "erro 500", token: token)
     assert_equal false, AlertThrottler.reserve_incident("youtube", 88, "scrape_error", "erro 500")
+  end
+
+  test "release_incident com SolidCache real e compare-delete respeita o token de proprietario" do
+    token = AlertThrottler.reserve_incident("youtube", 99, "scrape_error", "erro 500")
+    assert token
+
+    # Token incorreto não libera
+    AlertThrottler.release_incident("youtube", 99, token: "outro_token")
+    assert_equal false, AlertThrottler.reserve_incident("youtube", 99, "scrape_error", "erro 500")
+
+    # Token correto libera
+    AlertThrottler.release_incident("youtube", 99, token: token)
+    assert AlertThrottler.reserve_incident("youtube", 99, "scrape_error", "erro 500")
+  end
+
+  test "jobs concorrentes para o mesmo incidente com SolidCache real resultam em no maximo 1 envio ao Discord" do
+    ENV["DISCORD_ADMIN_CHANNEL_ID"] = "123456789"
+    DiscordApiClient.expects(:send_message).once
+
+    t1 = Thread.new do
+      ScrapingFailureAlertJob.perform_now("youtube", 1, "erro fatal", "fatal_error")
+    end
+    t2 = Thread.new do
+      ScrapingFailureAlertJob.perform_now("youtube", 1, "erro fatal", "fatal_error")
+    end
+    [t1, t2].each(&:join)
+
+    state = AlertThrottler.incident_state("youtube", 1)
+    assert_not_nil state
+    assert_equal "fatal_error", state[:error_type]
   end
 end
