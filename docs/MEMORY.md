@@ -10,6 +10,11 @@
 
 > O que estamos construindo / investigando nas últimas 48h.
 
+- **[2026-08-29]** Frente C — Deduplicação de alertas de scraping por transição de incidente (`AlertThrottler`, `ScrapingFailureAlertJob`, `ScrapeYoutubeJob`).
+  - Alerta por TRANSIÇÃO: notifica no 1º incidente, em alteração de causa (`error_type` ou `normalize_fingerprint(error_message)`), ou após recuperação com nova falha. Repetições diárias da mesma falha no mesmo perfil são descartadas.
+  - Estado persistido em Solid Cache (`scraping_incident:#{scraper_name}:#{profile_id}`, TTL 30d) sem migrations no banco. Lock atômico com TTL 5min e double-checked locking para concorrência.
+  - Rollback honesto de cota horária e liberação de lock em falha de envio ao Discord, canal admin não configurado ou quota horária esgotada.
+  - Resolução de incidente (`AlertThrottler.resolve_incident`) no `ScrapeYoutubeJob` ao obter `collection_status: "success"`.
 - **[2026-08-10]** Feature — Busca por assunto no X (`X.search`, `SearchFailed`, `SEARCH_BUDGET` 30/h, fronteira `@perfil`/assunto da tool `PlatformSearchTool`).
   - `Fetcher::Channels::X.search(query:, limit: 10)`: busca nativa no X com `f=live&src=typed_query`. Detecção do estado vazio legítimo via marcador `[data-testid="empty_state_header_text"]` (retorna `[]`); sem marcador, levanta `SearchFailed`. `SEARCH_BUDGET` e `TIMELINE_BUDGET` reduzidos para 30/h (4/min) mantendo teto da conta do dono em ~60/h. Mensagem de `RateLimited` inclui o escopo (`[timeline]` / `[search]`).
   - `PlatformSearchTool`: exige `@` explícito para perfis (ex: `@jack` -> `X.timeline`); termos sem `@` (frases ou palavras soltas ex: `bitcoin` ou `ruby rails`) acionam `X.search`.
@@ -130,6 +135,7 @@
 
 | Data | Padrão | Contexto |
 |------|--------|----------|
+| 2026-08-29 | Deduplicação de alertas de scraping por transição em Solid Cache | Em vez de alertar a cada execução/hora (spam diário às 9h UTC em fallbacks estruturais), o alerta só dispara na transição de estado (`reserve_incident`). Cota horária de 10/h por tipo preservada como salvaguarda anti-tempestade. |
 | 2026-08-09 | Split Gemini background/interactive + cadeia nous → poolside → openrouter | Substitui o cliente único Gemma 4 31B (`gemma_client.rb`, removido) por dois clientes Gemini por tier — `gemini_background_client.rb` (gemini-3.1-flash-lite, background) e `gemini_interactive_client.rb` (gemini-3.5-flash-lite, interactive) — e pela `ModelChain` (nous → poolside → openrouter). A `ModelChain` ainda não é consumida pelo chat: o `ChatSessionManager` passará a usá-la após o merge do PR de sessões (dependência de ordem). |
 | 2026-03-30 | Swap via zRAM (ALGO=zstd, 50%) em vez de disco físico | Poupa limite agressivo de IOPS (3000) do boot volume da OCI. Melhoria pragmática nativa via `zram-tools`. |
 | 2026-03-26 | ruby_llm ~> 1.14 (não 1.12) | Suporte a Imagen via `RubyLLM.paint` — API mudou em 1.14 |
@@ -221,6 +227,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
+| 2026-08-29 | Implementação da Frente C: deduplicação de alertas de scraping por transição de incidente (`AlertThrottler`, `ScrapingFailureAlertJob`, `ScrapeYoutubeJob`). | Contexto Ativo, Padrões Ratificados |
 | 2026-08-10 | Implementação da Tarefa F6-A (`Hackernews.search`, `Github.search`, `Polymarket.search`, pesos/aliases em `Signals`, desempate em `Scorer`). | Contexto Ativo |
 | 2026-08-10 | Implementação do pipeline F6-C (`Last30DaysTopicJob`, `Last30DaysDigestJob`, `Last30Days::MessageBuilder`, dedupe `TopicDelivery`). | Contexto Ativo |
 | 2026-08-10 | Implementação da Tarefa F3 (PostScorer, ScorePostsJob, WeeklyDigestJob reescrito com chunking, shorts em YoutubeScraperService, post_snapshots na coleta com fuso SP e poda 180d). | Contexto Ativo |

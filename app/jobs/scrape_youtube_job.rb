@@ -3,6 +3,7 @@
 require Rails.root.join("lib/fetcher/cookie_jar")
 require Rails.root.join("lib/fetcher/session_cookies")
 require Rails.root.join("lib/fetcher/channels/youtube")
+require_relative "../services/alert_throttler"
 
 class ScrapeYoutubeJob < ApplicationJob
   queue_as :scraping
@@ -78,6 +79,7 @@ class ScrapeYoutubeJob < ApplicationJob
         last_collected_at: Time.current,
         collection_status: "success"
       )
+      AlertThrottler.resolve_incident("youtube", profile.id)
     end
   rescue ScrapingServices::RateLimitError => e
     profile&.update!(collection_status: "rate_limited", blocked_until: Time.current + e.retry_after) if profile

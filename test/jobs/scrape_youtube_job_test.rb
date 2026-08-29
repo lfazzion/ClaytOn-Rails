@@ -499,5 +499,22 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
 
     assert_equal [@videos, true], result
   end
+
+  test 'should resolve incident on full success' do
+    AlertThrottler.consolidate_incident('youtube', @profile.id, 'partial_collection', 'fallback: sem dados')
+    assert_not_nil AlertThrottler.incident_state('youtube', @profile.id)
+
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt').returns([@videos, false])
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, false])
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal 'success', @profile.collection_status
+    assert_nil AlertThrottler.incident_state('youtube', @profile.id), 'sucesso na coleta deve limpar o estado do incidente'
+  end
 end
 

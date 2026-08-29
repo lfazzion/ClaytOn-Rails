@@ -3,6 +3,8 @@
 class AlertThrottler
   ALERT_LIMIT = 10
   WINDOW = 1.hour
+  INCIDENT_PREFIX = "scraping_incident"
+  INCIDENT_TTL = 30.days
 
   class << self
     def throttle?(alert_type)
@@ -108,6 +110,97 @@ class AlertThrottler
     def reset(alert_type)
       key = current_key(alert_type)
       Rails.cache.delete(key)
+    end
+
+    # --- Deduplicação por transição de incidente (Frente C) ---
+
+    def incident_key(scraper_name, profile_id)
+      "#{INCIDENT_PREFIX}:#{scraper_name}:#{profile_id}"
+    end
+
+    def incident_lock_key(scraper_name, profile_id)
+      "#{INCIDENT_PREFIX}_lock:#{scraper_name}:#{profile_id}"
+    end
+
+    # Normaliza a mensagem de erro para que variações não essenciais (timestamps,
+    # datas, ponteiros hex, UUIDs) gerem o mesmo fingerprint estável.
+    def normalize_fingerprint(message)
+      return "" if message.nil?
+
+      msg = message.to_s.dup
+      # Remove timestamps ISO/SQL completos (ex: 2026-08-29 09:00:00, 2026-08-29T09:00:00Z)
+      msg.gsub!(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/, "")
+      # Remove datas simples (ex: 2026-08-29)
+      msg.gsub!(/\b\d{4}-\d{2}-\d{2}\b/, "")
+      # Remove endereços hex/ponteiros de objetos (ex: 0x00007f9b8c012348)
+      msg.gsub!(/\b0x[0-9a-fA-F]+\b/, "")
+      # Remove UUIDs
+      msg.gsub!(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/, "")
+      # Colapsa múltiplos espaços e remove bordas
+      msg.strip.gsub(/\s+/, " ")
+    end
+
+    # Retorna o estado atual do incidente persistido no cache ou nil se nenhum.
+    def incident_state(scraper_name, profile_id)
+      key = incident_key(scraper_name, profile_id)
+      val = Rails.cache.read(key)
+      return nil unless val.is_a?(Hash)
+
+      {
+        error_type: (val[:error_type] || val["error_type"]).to_s,
+        fingerprint: (val[:fingerprint] || val["fingerprint"]).to_s
+      }
+    end
+
+    # Verifica se há transição de estado que justifique envio de alerta:
+    # - Primeiro incidente (sem estado anterior)
+    # - Mudança de error_type ou fingerprint
+    # - Retorna false quando for repetição idêntica do mesmo erro
+    def transition?(scraper_name, profile_id, error_type, error_message)
+      state = incident_state(scraper_name, profile_id)
+      return true if state.nil?
+
+      fp = normalize_fingerprint(error_message)
+      state[:error_type] != error_type.to_s || state[:fingerprint] != fp
+    end
+
+    # Tenta reservar atomicamente o envio para uma transição de incidente.
+    # Usa lock atômico no cache para garantir que no máximo um job envie
+    # em cenários de concorrência.
+    def reserve_incident(scraper_name, profile_id, error_type, error_message)
+      return false unless transition?(scraper_name, profile_id, error_type, error_message)
+
+      lock = incident_lock_key(scraper_name, profile_id)
+      acquired = Rails.cache.write(lock, "1", unless_exist: true, expires_in: 5.minutes)
+      return false unless acquired
+
+      # Re-checa após adquirir lock para evitar race condition TOCTOU
+      unless transition?(scraper_name, profile_id, error_type, error_message)
+        release_incident(scraper_name, profile_id)
+        return false
+      end
+
+      true
+    end
+
+    # Libera o lock de processamento do incidente (usado em falha de envio ou abort)
+    def release_incident(scraper_name, profile_id)
+      lock = incident_lock_key(scraper_name, profile_id)
+      Rails.cache.delete(lock)
+    end
+
+    # Consolida o incidente como entregue com sucesso e libera o lock.
+    def consolidate_incident(scraper_name, profile_id, error_type, error_message)
+      fp = normalize_fingerprint(error_message)
+      data = { error_type: error_type.to_s, fingerprint: fp }
+      Rails.cache.write(incident_key(scraper_name, profile_id), data, expires_in: INCIDENT_TTL)
+      release_incident(scraper_name, profile_id)
+    end
+
+    # Resolve o incidente quando a coleta for bem-sucedida (limpa chave).
+    def resolve_incident(scraper_name, profile_id)
+      Rails.cache.delete(incident_key(scraper_name, profile_id))
+      release_incident(scraper_name, profile_id)
     end
 
     private

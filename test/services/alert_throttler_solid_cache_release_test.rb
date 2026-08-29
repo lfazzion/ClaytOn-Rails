@@ -49,4 +49,22 @@ class AlertThrottlerSolidCacheReleaseTest < ActiveSupport::TestCase
     assert_nil @store.read(current_key("solid_ausente")),
                "release sem reserva não deve criar chave"
   end
+
+  test "consolidate_incident e resolve_incident com SolidCache real persistem e limpam o estado" do
+    AlertThrottler.consolidate_incident("youtube", 42, "partial_collection", "fallback: sem dados")
+    state = AlertThrottler.incident_state("youtube", 42)
+    assert_equal "partial_collection", state[:error_type]
+    assert_equal "fallback: sem dados", state[:fingerprint]
+    assert_equal false, AlertThrottler.transition?("youtube", 42, "partial_collection", "fallback: sem dados")
+
+    AlertThrottler.resolve_incident("youtube", 42)
+    assert_nil AlertThrottler.incident_state("youtube", 42)
+    assert_equal true, AlertThrottler.transition?("youtube", 42, "partial_collection", "fallback: sem dados")
+  end
+
+  test "reserve_incident com SolidCache real bloqueia reserva duplicada" do
+    assert_equal true, AlertThrottler.reserve_incident("youtube", 88, "scrape_error", "erro 500")
+    AlertThrottler.consolidate_incident("youtube", 88, "scrape_error", "erro 500")
+    assert_equal false, AlertThrottler.reserve_incident("youtube", 88, "scrape_error", "erro 500")
+  end
 end

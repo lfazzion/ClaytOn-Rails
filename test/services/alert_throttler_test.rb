@@ -18,6 +18,22 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     Rails.cache.delete("alert_throttle:concurrent_type:#{bucket}")
     Rails.cache.delete("alert_throttle:expiry_type")
     Rails.cache.delete("alert_throttle:expiry_type:#{bucket}")
+    Rails.cache.delete("alert_throttle:clamp_type")
+    Rails.cache.delete("alert_throttle:clamp_type:#{bucket}")
+    Rails.cache.delete("alert_throttle:rate_limit")
+    Rails.cache.delete("alert_throttle:rate_limit:#{bucket}")
+    Rails.cache.delete("alert_throttle:captcha")
+    Rails.cache.delete("alert_throttle:captcha:#{bucket}")
+    Rails.cache.delete("alert_throttle:storm_type")
+    Rails.cache.delete("alert_throttle:storm_type:#{bucket}")
+    
+    # Limpa incidentes de teste
+    (1..15).each do |pid|
+      Rails.cache.delete(AlertThrottler.incident_key("youtube", pid))
+      Rails.cache.delete(AlertThrottler.incident_lock_key("youtube", pid))
+      Rails.cache.delete(AlertThrottler.incident_key("twitter", pid))
+      Rails.cache.delete(AlertThrottler.incident_lock_key("twitter", pid))
+    end
   end
 
   def current_key(type)
@@ -74,7 +90,7 @@ class AlertThrottlerTest < ActiveSupport::TestCase
 
   # --- Semântica de reserva (CORRECAO 3) ---
 
-  test 'reserve aceita quando abaixo do limite' do
+  test 'reserve aceitaquando abaixo do limite' do
     # reserve retorna a CHAVE da janela (truthy) — não true literal (P1 do sol)
     key = AlertThrottler.reserve('test_type')
     assert key, "reserve deve retornar truthy (chave da janela)"
@@ -90,7 +106,7 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     assert_equal 10, Rails.cache.read(current_key('test_type')).to_i
   end
 
-  # ACHADO E (13/08): quando desabilitado, reserve retorna nil (não chave),
+  # ACHADO E (13/08): quando desabilitado,reserve retorna nil (não chave),
   # para que o job trate como "sem reserva" e NÃO tente liberar em falha.
   test 'reserve retorna nil (sem reserva) quando throttling desabilitado' do
     ENV['ALERT_THROTTLE_ENABLED'] = nil
@@ -124,7 +140,7 @@ class AlertThrottlerTest < ActiveSupport::TestCase
   # Rodada 2 (sol 13/08): o read→condição→decrement era TOCTOU. Com decrement
   # atômico + clamp, o contador NUNCA persiste negativo — mesmo com releases
   # duplicados concorrentes a partir de um valor pequeno.
-  test 'release duplicado em sequência nunca deixa contador negativo' do
+  test 'release duplicado em sequência nunca deixacontador negativo' do
     AlertThrottler.reserve('clamp_type')       # 1
     5.times { AlertThrottler.release('clamp_type') }
     assert_equal 0, Rails.cache.read(current_key('clamp_type')).to_i,
@@ -148,7 +164,7 @@ class AlertThrottlerTest < ActiveSupport::TestCase
     threads.each(&:join)
 
     aceitas = results.count { |r| r }   # chave (truthy) ou false
-    rejeitadas = results.count { |r| !r }
+    rejeitadas = results.count{ |r| !r }
 
     assert_equal 1, aceitas, "esperava que exatamente uma das duas reservas fosse aceita"
     assert_equal 1, rejeitadas, "esperava que uma reserva fosse rejeitada"
@@ -201,5 +217,85 @@ class AlertThrottlerTest < ActiveSupport::TestCase
 
     assert_equal 0, Rails.cache.read(key_antiga).to_i, "janela antiga deve ser liberada"
     assert_equal 1, Rails.cache.read(key_nova).to_i, "janela nova não deve ser afetada"
+  end
+
+  # --- Testes de Deduplicação por Transição de Incidente (Frente C) ---
+
+  test 'normalize_fingerprint remove timestamps, datas, hex e uuids mantendo texto estavel' do
+    msg_estavel = 'fallback: sem dados detalhados (likes/comments nil)'
+    assert_equal msg_estavel, AlertThrottler.normalize_fingerprint(msg_estavel)
+
+    msg1 = 'Connection timeout at 2026-08-29 09:00:00 on host 0x7f8a9b'
+    msg2 = 'Connection timeout at 2026-08-29 11:30:15 on host 0x9c3d2e'
+    assert_equal AlertThrottler.normalize_fingerprint(msg1), AlertThrottler.normalize_fingerprint(msg2)
+    assert_equal 'Connection timeout at on host', AlertThrottler.normalize_fingerprint(msg1)
+
+    msg_uuid = 'Error in task 12345678-1234-1234-1234-123456789abc occurred'
+    assert_equal 'Error in task occurred', AlertThrottler.normalize_fingerprint(msg_uuid)
+
+    assert_equal '', AlertThrottler.normalize_fingerprint(nil)
+    assert_equal '', AlertThrottler.normalize_fingerprint('')
+  end
+
+  test 'incident_key e incident_lock_key geram chaves com namespace correto' do
+    assert_equal 'scraping_incident:youtube:42', AlertThrottler.incident_key('youtube', 42)
+    assert_equal 'scraping_incident_lock:youtube:42', AlertThrottler.incident_lock_key('youtube', 42)
+  end
+
+  test 'transition? retorna true para primeiro incidente (sem estado anterior)' do
+    assert_equal true, AlertThrottler.transition?('youtube', 1, 'partial_collection', 'fallback: sem dados')
+  end
+
+  test 'transition? retorna false para mesmo error_type e fingerprint consolidado' do
+    AlertThrottler.consolidate_incident('youtube', 1, 'partial_collection', 'fallback: sem dados')
+    assert_equal false, AlertThrottler.transition?('youtube', 1, 'partial_collection', 'fallback: sem dados')
+  end
+
+  test 'transition? retorna true quando error_type muda' do
+    AlertThrottler.consolidate_incident('youtube', 1, 'partial_collection', 'fallback: sem dados')
+    assert_equal true, AlertThrottler.transition?('youtube', 1, 'metadata_failure', 'fallback: sem dados')
+  end
+
+  test 'transition? retorna true quando fingerprint muda' do
+    AlertThrottler.consolidate_incident('youtube', 1, 'partial_collection', 'erro 1')
+    assert_equal true, AlertThrottler.transition?('youtube', 1, 'partial_collection', 'erro 2')
+  end
+
+  test 'resolve_incident limpa estado e permite novo alerta de transicao' do
+    AlertThrottler.consolidate_incident('youtube', 1, 'partial_collection', 'fallback')
+    assert_equal false, AlertThrottler.transition?('youtube', 1, 'partial_collection', 'fallback')
+
+    AlertThrottler.resolve_incident('youtube', 1)
+    assert_nil AlertThrottler.incident_state('youtube', 1)
+    assert_equal true, AlertThrottler.transition?('youtube', 1, 'partial_collection', 'fallback')
+  end
+
+  test 'reserve_incident aceita primeira transicao e rejeita incidente consolidado' do
+    assert_equal true, AlertThrottler.reserve_incident('youtube', 1, 'partial_collection', 'msg')
+    AlertThrottler.consolidate_incident('youtube', 1, 'partial_collection', 'msg')
+    assert_equal false, AlertThrottler.reserve_incident('youtube', 1, 'partial_collection', 'msg')
+  end
+
+  test 'reserve_incident rejeita quando lock de incidente ja esta ocupado' do
+    Rails.cache.write(AlertThrottler.incident_lock_key('youtube', 1), '1', expires_in: 1.minute)
+    assert_equal false, AlertThrottler.reserve_incident('youtube', 1, 'partial_collection', 'msg')
+  end
+
+  test 'release_incident libera lock sem consolidar incidente' do
+    assert_equal true, AlertThrottler.reserve_incident('youtube', 1, 'partial_collection', 'msg')
+    AlertThrottler.release_incident('youtube', 1)
+    assert_nil AlertThrottler.incident_state('youtube', 1)
+    assert_equal true, AlertThrottler.reserve_incident('youtube', 1, 'partial_collection', 'msg')
+  end
+
+  test 'throttle horario (10/h por tipo) continua funcionando independente da dedupe de incidentes' do
+    # 10 perfis distintos falham: todos os 10 conseguem reservar cota horária
+    10.times do |i|
+      key = AlertThrottler.reserve('storm_type')
+      assert key, "perfil #{i} deve conseguir reservar cota horária"
+    end
+
+    # 11º perfil distinto com o mesmo erro é barrado pelo limite horário (proteção contra tempestade)
+    assert_equal false, AlertThrottler.reserve('storm_type')
   end
 end
