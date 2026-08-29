@@ -57,6 +57,32 @@ module Llm
     NOUS_EFFORTS = %w[none low medium high].freeze
     DEFAULT_NOUS_EFFORT = "none"
 
+    # Variável de credencial POR PROVEDOR (Sol R1-A, achado 4). O initializer
+    # `config.gemini_api_key = ENV.fetch('GOOGLE_AI_API_KEY', nil)` — NÃO
+    # `GEMINI_API_KEY`. Se um dia um provider novo entrar no YAML sem chave
+    # correspondente aqui, ele simplesmente fica sem credencial e é cortado da
+    # cadeia (em vez de mandar requisição sem auth).
+    PROVIDER_CRED_KEY = {
+      nous: "NOUS_API_KEY",
+      poolside: "POOLSIDE_API_KEY",
+      openrouter: "OPENROUTER_API_KEY",
+      nvidia: "NVIDIA_API_KEY",
+      gemini: "GOOGLE_AI_API_KEY"
+    }.freeze
+
+    # Vocabulário de `effort` ACEITO por provider, medido/contratado. Array
+    # vazio = provider NÃO suporta effort (vira nil). O Nous é o único com
+    # vocabulário próprio; Poolside RECUSA `effort: none` com HTTP 400; OpenRouter
+    # e NVIDIA não aceitam o campo; Gemini não tem contrato de effort neste bot
+    # (mantido nil até confirmar o vocabulário da gem — ver RISK no relatório).
+    PROVIDER_EFFORTS = {
+      nous: %w[none low medium high],
+      poolside: [],
+      openrouter: [],
+      nvidia: [],
+      gemini: []
+    }.freeze
+
     # O corpo que desliga o raciocínio na rota direta da Poolside. Vai por
     # `Chat#with_params`, que a gem faz deep_merge no payload — não existe
     # método de alto nível para isto, porque não é vocabulário da OpenAI.
@@ -78,6 +104,13 @@ module Llm
       #
       # Ordem da cadeia: [primary] + ([fallback] se presente e com chave).
       # NÃO altera `summarizer` nem `aggregator` — continuam como estão.
+      #
+      # CORREÇÃO Sol R1-A (achado 3): primary e fallback são construídos
+      # INDEPENDENTEMENTE. Antes, se o primary não pudesse ser construído (chave
+      # ausente) a cadeia inteira voltava `[]` — matando um fallback válido. Agora
+      # cada elo é tentado isoladamente e os indisponíveis são compactados; o
+      # fallback válido assume a ponta quando o primary cai. Cadeia vazia SÓ
+      # quando nenhum elo configurado puder ser usado.
       def links
         cfg = Llm::LlmChainLoader.new(path: CHAIN_CONFIG_PATH, logger: Rails.logger).load
         return [] if cfg.nil?
@@ -85,9 +118,6 @@ module Llm
         elos = []
         if (primary = build_link(cfg[:primary]))
           elos << primary
-        else
-          # primary sem chave => cadeia vazia (quem chama trata). Não mentimos.
-          return []
         end
 
         if cfg[:fallback] && (fb = build_link(cfg[:fallback]))
@@ -149,12 +179,17 @@ module Llm
         params = spec[:params]
         label = spec[:label] || "#{provider}:#{model}"
 
-        # Chave ausente encurta a cadeia (mesmo comportamento de antes).
-        return nil unless chave?("#{provider.to_s.upcase}_API_KEY")
+        # Chave ausente encurta a cadeia (mesmo comportamento de antes). O mapa
+        # PROVIDER_CRED_KEY garante a variável correta por provider (Gemini é
+        # GOOGLE_AI_API_KEY, não GEMINI_API_KEY — ver achado 4). Provider fora do
+        # mapa => sem credencial => cortado (não manda sem auth).
+        cred_key = PROVIDER_CRED_KEY[provider]
+        return nil if cred_key.nil? || !chave?(cred_key)
 
-        # O esforço do Nous é validado contra o vocabulário medido; inválido cai
-        # no padrão COM log (valor inválido daria HTTP 400 em TODA chamada).
-        effort = normalize_nous_effort(effort) if provider == :nous
+        # Effort validado contra o vocabulário MEDIDO do provider (achado 4).
+        # Inválido/ausente para provider sem suporte vira nil COM log quando
+        # aplicável (valor inválido daria HTTP 400 em TODA chamada daquele elo).
+        effort = normalize_effort(provider, effort)
 
         # Registra o modelo (idempotente) ANTES de devolver o Link — slug vindo
         # do YAML que não está na lista hardcoded passa a ser resolvido.
@@ -166,18 +201,30 @@ module Llm
         nil
       end
 
-      # Valida contra NOUS_EFFORTS; nil/empty passa (sem reasoning_effort). Inválido
-      # cai no padrão e LOGA (igual ao comportamento antigo do DISCORD_EFFORT_NOUS).
-      def normalize_nous_effort(effort)
+      # Valida o effort contra o vocabulário ACEITO do provider (Sol R1-A,
+      # achado 4). nil/empty passa (sem reasoning_effort). Provider cujo
+      # vocabulário é vazio (Poolside, OpenRouter, NVIDIA, Gemini) NÃO suporta o
+      # campo: qualquer valor (inclusive o `none` que a Poolside RECUSA com HTTP
+      # 400) é rejeitado e vira nil, COM log de alerta.
+      def normalize_effort(provider, effort)
         return nil if effort.nil? || effort.to_s.strip.empty?
 
+        vocabulario = PROVIDER_EFFORTS[provider] || []
         esforco = effort.to_s.strip
-        return esforco if NOUS_EFFORTS.include?(esforco)
+        return esforco if vocabulario.include?(esforco)
 
-        Rails.logger.warn "[ModelChain] effort=#{esforco.inspect} não é aceito pelo Nous " \
-                          "(aceitos: #{NOUS_EFFORTS.join(', ')}); usando #{DEFAULT_NOUS_EFFORT.inspect}. " \
-                          "Valor inválido daria HTTP 400 em TODA chamada deste elo."
-        DEFAULT_NOUS_EFFORT
+        # Fora do vocabulário: rejeita para nil e LOGA. Para o Nous, cai no
+        # padrão documentado; para os demais, avisa que o provider não suporta.
+        if provider == :nous
+          Rails.logger.warn "[ModelChain] effort=#{esforco.inspect} não é aceito pelo Nous " \
+                            "(aceitos: #{NOUS_EFFORTS.join(', ')}); usando #{DEFAULT_NOUS_EFFORT.inspect}. " \
+                            "Valor inválido daria HTTP 400 em TODA chamada deste elo."
+          DEFAULT_NOUS_EFFORT
+        else
+          Rails.logger.warn "[ModelChain] effort=#{esforco.inspect} não é suportado pelo provider " \
+                            "#{provider.inspect} (HTTP 400 em TODA chamada); desligando effort (nil)."
+          nil
+        end
       end
 
       # Tags que o gateway Nous passou a exigir (28/08): chamador com API key crua

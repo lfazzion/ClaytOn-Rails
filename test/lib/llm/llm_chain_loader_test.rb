@@ -110,6 +110,125 @@ class Llm::LlmChainLoaderTest < ActiveSupport::TestCase
     end
   end
 
+  # CASO 1 (Sol R1) — provider como mapa (Hash) levanta ConfigError (não
+  # NoMethodError em to_sym) e first-boot devolve nil.
+  test "provider como mapa (Hash) é rejeitado como ConfigError e first-boot devolve nil" do
+    yaml = "version: 1\nchat:\n  primary:\n    provider: {}\n    model: x\n"
+    arquivo_tmp(yaml) do |caminho|
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_raises(Llm::LlmChainLoader::ConfigError) { loader.send(:parse_and_validate, yaml) }
+      assert_nil loader.load
+    end
+  end
+
+  # CASO 1 (Sol R1) — model vazio (String vazia) é rejeitado como ConfigError.
+  test "model vazio é rejeitado como ConfigError e first-boot devolve nil" do
+    yaml = "version: 1\nchat:\n  primary:\n    provider: nous\n    model: \"\"\n"
+    arquivo_tmp(yaml) do |caminho|
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_raises(Llm::LlmChainLoader::ConfigError) { loader.send(:parse_and_validate, yaml) }
+      assert_nil loader.load
+    end
+  end
+
+  # CASO 1 (Sol R1) — params como String (não Hash) é rejeitado como ConfigError.
+  test "params como String é rejeitado como ConfigError e first-boot devolve nil" do
+    yaml = "version: 1\nchat:\n  primary:\n    provider: nous\n    model: x\n    params: \"nao-eh-hash\"\n"
+    arquivo_tmp(yaml) do |caminho|
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_raises(Llm::LlmChainLoader::ConfigError) { loader.send(:parse_and_validate, yaml) }
+      assert_nil loader.load
+    end
+  end
+
+  # CASO 1 (Sol R1) — params.tags com formato inválido (sem prefixo user=) é
+  # rejeitado como ConfigError.
+  test "params.tags fora do formato user= é rejeitado como ConfigError" do
+    yaml = "version: 1\nchat:\n  primary:\n    provider: nous\n    model: x\n    params:\n      tags: [\"errado\"]\n"
+    arquivo_tmp(yaml) do |caminho|
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_raises(Llm::LlmChainLoader::ConfigError) { loader.send(:parse_and_validate, yaml) }
+      assert_nil loader.load
+    end
+  end
+
+  # CASO 1 (Sol R1) — falha de tipo (provider mapa) APÓS carga válida mantém
+  # last-known-good e loga APENAS UMA VEZ.
+  test "falha de tipo (provider mapa) após carga válida mantém LKG e loga uma vez" do
+    Dir.mktmpdir do |dir|
+      caminho = File.join(dir, "llm_chain.yml")
+      File.write(caminho, YAML_VALIDO)
+      logs = []
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: ->(m) { logs << m })
+
+      assert_equal "tencent/hy3:free", loader.load[:primary][:model]
+
+      File.write(caminho, "version: 1\nchat:\n  primary:\n    provider: {}\n    model: x\n")
+      cfg = loader.load
+      assert_equal "tencent/hy3:free", cfg[:primary][:model], "mantém LKG após falha de tipo"
+      assert_equal 1, logs.count { |m| m =~ /inválido/ }, "log de tipo inválido deve ser único"
+    end
+  end
+
+  # CASO 1 (Sol R1) — model vazio APÓS carga válida mantém LKG.
+  test "model vazio após carga válida mantém LKG" do
+    Dir.mktmpdir do |dir|
+      caminho = File.join(dir, "llm_chain.yml")
+      File.write(caminho, YAML_VALIDO)
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_equal "tencent/hy3:free", loader.load[:primary][:model]
+
+      File.write(caminho, "version: 1\nchat:\n  primary:\n    provider: nous\n    model: \"\"\n")
+      cfg = loader.load
+      assert_equal "tencent/hy3:free", cfg[:primary][:model], "mantém LKG após model vazio"
+    end
+  end
+
+  # CASO 1 (Sol R1) — params String APÓS carga válida mantém LKG.
+  test "params String após carga válida mantém LKG" do
+    Dir.mktmpdir do |dir|
+      caminho = File.join(dir, "llm_chain.yml")
+      File.write(caminho, YAML_VALIDO)
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_equal "tencent/hy3:free", loader.load[:primary][:model]
+
+      File.write(caminho, "version: 1\nchat:\n  primary:\n    provider: nous\n    model: x\n    params: 123\n")
+      cfg = loader.load
+      assert_equal "tencent/hy3:free", cfg[:primary][:model], "mantém LKG após params inválido"
+    end
+  end
+
+  # CASO 1 (Sol R1) — falha de LEITURA (arquivo vira diretório => Errno::EISDIR)
+  # APÓS carga válida NUNCA derruba o turno: mantém LKG e loga uma vez.
+  test "falha de leitura (diretório) após carga válida mantém LKG e loga uma vez" do
+    Dir.mktmpdir do |dir|
+      caminho = File.join(dir, "llm_chain.yml")
+      File.write(caminho, YAML_VALIDO)
+      logs = []
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: ->(m) { logs << m })
+      assert_equal "tencent/hy3:free", loader.load[:primary][:model]
+
+      # Substitui o arquivo por um DIRETÓRIO: File.read levanta Errno::EISDIR.
+      File.delete(caminho)
+      Dir.mkdir(caminho)
+
+      cfg = loader.load
+      assert_equal "tencent/hy3:free", cfg[:primary][:model], "mantém LKG após falha de leitura"
+      assert_equal 1, logs.count { |m| m =~ /falha de leitura/ }, "log de leitura deve ser único"
+    end
+  end
+
+  # CASO 1 (Sol R1) — caminho que é um DIRETÓRIO no primeiro boot devolve nil
+  # (cadeia vazia), não levanta SystemCallError.
+  test "caminho é um diretório no primeiro boot devolve nil (não derruba)" do
+    Dir.mktmpdir do |dir|
+      caminho = File.join(dir, "llm_chain.yml")
+      Dir.mkdir(caminho) # é um diretório, não arquivo
+      loader = Llm::LlmChainLoader.new(path: caminho, logger: nil)
+      assert_nil loader.load, "sem LKG e leitura inviável => cadeia vazia"
+    end
+  end
+
   # CASO 3 (nível loader) — reescrever o arquivo entre chamadas muda a config.
   test "reescrever o arquivo muda a configuração sem reiniciar" do
     Dir.mktmpdir do |dir|

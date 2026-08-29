@@ -31,14 +31,21 @@ class ChatSessionManager
   # e que, numa cadeia de três hosts diferentes, são o caso comum.
   #
   # Listar classe-mãe em vez de subclasses é a lição de 2026-08-06 registrada em
-  # docs/MEMORY.md: `rescue` por lista de subclasses é lista de permissão, e o
-  # caso não previsto é exatamente o que fura a rede de proteção.
+  # docs/MEMORY.md: `rescue` por lista de permissão, e o caso não previsto é
+  # exatamente o que fura a rede de proteção.
   CHAIN_ERRORS = [
     RubyLLM::Error,
     RubyLLM::ConfigurationError,
     RubyLLM::ModelNotFoundError,
     Faraday::Error
   ].freeze
+
+  # Snapshot da cadeia de um turno. Tirado UMA vez no início de `ask` (dentro do
+  # lock de escopo) e passado para prepare_chat/ask_through_chain/touch_session,
+  # para que um YAML que mude NO MEIO do turno não misture o chat do elo A com a
+  # assinatura/elo B (Sol R1-A, achado 2). `links` relê o YAML a cada chamada;
+  # fixar o snapshot impede essa re-leitura pontual.
+  TurnLinks = Struct.new(:links, :primary, keyword_init: true)
 
   # Dois limites distintos, e não um. PAGE_SIZE é quantas linhas cabem numa
   # mensagem do Discord (cada linha tem ~80 chars, 20 cabem sem quebrar).
@@ -63,9 +70,19 @@ class ChatSessionManager
         begin
           conversation = conversation_for(scope)
 
-          chat = prepare_chat(scope, conversation)
+          # Snapshot ÚNICO da cadeia deste turno (Sol R1-A, achado 2): tirado uma
+          # vez aqui, dentro do lock de escopo, e passado para baixo. Se o YAML
+          # mudar no meio do turno, prepare_chat/ask_through_chain/touch_session
+          # continuam usando ESTE snapshot — o chat do elo A nunca é rotulado com
+          # a assinatura/elo B.
+          turn = TurnLinks.new(
+            links: Llm::ModelChain.links,
+            primary: Llm::ModelChain.primary
+          )
+
+          chat = prepare_chat(scope, conversation, turn)
           texto = ask_through_chain(chat, outgoing_content(conversation, content, username),
-                                    scope: scope, conversation: conversation)
+                                    scope: scope, conversation: conversation, turn: turn)
 
           if texto.blank?
             Rails.logger.info "[ChatSessionManager] ask concluído em #{format("%.1f", (Time.now - inicio))}s chars=#{texto.to_s.length}"
@@ -279,12 +296,16 @@ class ChatSessionManager
     # porque `RubyLLM.chat` pode levantar `ConfigurationError` ou
     # `ModelNotFoundError` e essas quedas têm de cair para o elo seguinte em vez
     # de derrubar o turno.
-    def prepare_chat(scope, conversation)
-      link = Llm::ModelChain.primary
-      if link && ConversationCompactor.needs_compaction?(conversation, model_id: link.model,
-                                                                       provider: link.provider)
-        compactou = ConversationCompactor.compact!(conversation, model_id: link.model,
-                                                                 provider: link.provider)
+    #
+    # `turn` é o snapshot da cadeia deste turno (Sol R1-A, achado 2); a assinatura
+    # de invalidação é derivada do primary do snapshot, NÃO de uma re-leitura do
+    # YAML.
+    def prepare_chat(scope, conversation, turn)
+      primary = turn.primary
+      if primary && ConversationCompactor.needs_compaction?(conversation, model_id: primary.model,
+                                                                       provider: primary.provider)
+        compactou = ConversationCompactor.compact!(conversation, model_id: primary.model,
+                                                                 provider: primary.provider)
         evict(scope.key) if compactou
       end
 
@@ -298,7 +319,7 @@ class ChatSessionManager
       # atual; divergência => descarta o objeto quente (a conversa está no banco,
       # só o chat é reidratado no próximo turno). Não toca em mais nada.
       cached_assinatura = cached[:assinatura_primary]
-      atual_assinatura = primary_signature
+      atual_assinatura = primary_signature(primary)
       if cached_assinatura != atual_assinatura
         Rails.logger.info "[ChatSessionManager] primary mudou (#{cached_assinatura.inspect} -> " \
                           "#{atual_assinatura.inspect}) — descartando chat quente para reidratar"
@@ -309,23 +330,25 @@ class ChatSessionManager
       cached[:chat]
     end
 
-    # Assinatura do elo primário atual: suficiente para detectar troca de modelo,
-    # rota ou params (ex.: as tags do Nous). nil quando não há primary.
-    def primary_signature
-      link = Llm::ModelChain.primary
-      return nil if link.nil?
+    # Assinatura do elo primário informado: suficiente para detectar troca de
+    # modelo, rota ou params (ex.: as tags do Nous). nil quando não há primary.
+    # Recebe o link explícito (do snapshot do turno) e NÃO relê o YAML.
+    def primary_signature(primary)
+      return nil if primary.nil?
 
-      [link.provider, link.model, link.effort, link.params].freeze
+      [primary.provider, primary.model, primary.effort, primary.params].freeze
     end
 
-    def touch_session(scope_key, chat)
+    def touch_session(scope_key, chat, turn)
+      primary = turn.primary
       mutex.synchronize do
         sessions_cache[scope_key] = {
           chat: chat,
           expires_at: Time.current + TTL_MINUTES.minutes,
-          # Assinatura do primary no momento do cache — usada por prepare_chat para
-          # detectar troca de cadeia sem esperar o TTL.
-          assinatura_primary: primary_signature
+          # Assinatura do primary do snapshot deste turno — usada por prepare_chat
+          # para detectar troca de cadeia sem esperar o TTL. Veio do snapshot, não
+          # de re-leitura do YAML (Sol R1-A, achado 2).
+          assinatura_primary: primary_signature(primary)
         }
       end
       chat
@@ -370,8 +393,8 @@ class ChatSessionManager
     # exceção — segue para o próximo. Só devolve nil (branco) quando TODOS os
     # elos vierem em branco, e quem chama (`ask`) já sabe transformar nil em
     # `BLANK_RESPONSE_WARNING`.
-    def ask_through_chain(quente, content, scope:, conversation:)
-      links = Llm::ModelChain.links
+    def ask_through_chain(quente, content, scope:, conversation:, turn:)
+      links = turn.links
       if links.empty?
         Rails.logger.error "[ChatSessionManager] Nenhum elo de LLM disponível — " \
                            "nenhuma chave configurada (POOLSIDE_API_KEY, NOUS_API_KEY, OPENROUTER_API_KEY)"
@@ -404,7 +427,7 @@ class ChatSessionManager
         # carrega o esforço daquele elo, e `with_model` não desfaz
         # `with_thinking`/`with_params` — guardá-lo levaria a configuração errada
         # para o turno seguinte, em silêncio. O preço é uma reidratação a mais.
-        touch_session(scope.key, atual) if indice.zero?
+        touch_session(scope.key, atual, turn) if indice.zero?
         return texto
       rescue *CHAIN_ERRORS => e
         proximo = indice < ultimo ? ", tentando #{links[indice + 1].label}..." : " — cadeia esgotada"

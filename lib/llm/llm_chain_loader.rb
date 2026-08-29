@@ -47,15 +47,13 @@ module Llm
     # `nil` quando a cadeia tem de ficar vazia (primeiro boot sem config válida,
     # ou arquivo ausente). YAML inválido APÓS carga válida devolve o last-known-good.
     def load
-      unless @path && File.exist?(@path)
-        if last_good
-          log_once(:missing, "config/llm_chain.yml ausente — mantendo última cadeia válida")
-          return last_good
-        end
-        return nil
-      end
+      # Falha de leitura (permissão, diretório no lugar do arquivo, erro de IO)
+      # NÃO pode derrubar o turno: é tratada como last-known-good (igual a um
+      # YAML corrompido), nunca como exceção que sobe até o chamador.
+      raw = read_raw
+      return last_good if raw == :unreadable
+      return nil if raw.nil?
 
-      raw = File.read(@path)
       digest = Digest::SHA256.hexdigest(raw)
       return last_good if last_good && digest == last_digest
 
@@ -70,6 +68,33 @@ module Llm
         log_once("firstboot:#{digest}",
                  "config/llm_chain.yml inválido no primeiro boot (#{e.message}) — cadeia vazia")
         nil
+      end
+    end
+
+    # Lê o arquivo. Devolve:
+    #   - nil          => caminho ausente/inviável E sem LKG (cadeia vazia)
+    #   - :unreadable  => falha de leitura (permissão/diretório/IO): mantém LKG
+    #   - String       => conteúdo lido
+    # SystemCallError (Errno::EACCES, Errno::EISDIR, ...) e IOError em LEITURA
+    # viram :unreadable — NUNCA derrubam o turno (Sol R1-A, achado 1).
+    def read_raw
+      return nil unless @path && File.exist?(@path)
+
+      # `File.exist?` é verdadeiro para diretórios; File.read de um diretório
+      # levanta Errno::EISDIR. Capturamos como leitura inviável.
+      begin
+        File.read(@path)
+      rescue SystemCallError, IOError => e
+        if last_good
+          log_once(:read_error, "falha de leitura de config/llm_chain.yml " \
+                                "(#{e.class}: #{e.message}) — mantendo última cadeia válida")
+          :unreadable
+        else
+          log_once("firstboot:read_error",
+                   "falha de leitura de config/llm_chain.yml no primeiro boot " \
+                   "(#{e.class}: #{e.message}) — cadeia vazia")
+          nil
+        end
       end
     end
 
@@ -127,9 +152,48 @@ module Llm
       raise ConfigError, "`#{onde}` não é um mapa" unless link.is_a?(Hash)
       raise ConfigError, "`#{onde}.provider` obrigatório" if link[:provider].nil?
       raise ConfigError, "`#{onde}.model` obrigatório" if link[:model].nil?
+
+      # Validação de TIPOS ANTES de usar os valores (Sol R1-A, achado 1):
+      # `provider: {}` produzia NoMethodError em to_sym; agora é ConfigError.
+      provider = link[:provider]
+      raise ConfigError, "`#{onde}.provider` deve ser String ou Symbol não vazio" \
+        unless provider.is_a?(String) || provider.is_a?(Symbol)
+      raise ConfigError, "`#{onde}.provider` não pode ser vazio" if provider.to_s.strip.empty?
+
+      model = link[:model]
+      raise ConfigError, "`#{onde}.model` deve ser String não vazia" unless model.is_a?(String)
+      raise ConfigError, "`#{onde}.model` não pode ser vazio" if model.to_s.strip.empty?
+
+      # label: String ou null
+      if !link[:label].nil? && !link[:label].is_a?(String)
+        raise ConfigError, "`#{onde}.label` deve ser String ou null"
+      end
+
+      # effort: String ou null
+      if !link[:effort].nil? && !link[:effort].is_a?(String)
+        raise ConfigError, "`#{onde}.effort` deve ser String ou null"
+      end
+
+      # params: Hash ou null; se params.tags presente => Array não vazio de String
+      # no formato aceito (`user=` prefix, exigido pelo gateway Nous).
+      params = link[:params]
+      if !params.nil?
+        raise ConfigError, "`#{onde}.params` deve ser um mapa ou null" unless params.is_a?(Hash)
+        if params.key?(:tags)
+          tags = params[:tags]
+          raise ConfigError, "`#{onde}.params.tags` deve ser um Array não vazio" \
+            unless tags.is_a?(Array) && !tags.empty?
+          raise ConfigError, "`#{onde}.params.tags` deve ser Array de String" \
+            unless tags.all? { |t| t.is_a?(String) }
+          raise ConfigError, "`#{onde}.params.tags` fora do formato aceito (esperado prefixo user=)" \
+            unless tags.all? { |t| t.to_s.start_with?("user=") }
+        end
+      end
+
       # `symbolize_names: true` simboliza CHAVES, não VALORES: `provider: nous`
       # chega como String. Normaliza para Símbolo aqui, de modo que primary E
-      # fallback saiam iguais do parse.
+      # fallback saiam iguais do parse. Só agora é seguro, pois os tipos foram
+      # validados acima.
       link[:provider] = link[:provider].to_sym
       # label e effort são opcionais (caem no default); params é opcional.
     end

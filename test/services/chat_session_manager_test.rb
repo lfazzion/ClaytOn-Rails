@@ -406,5 +406,46 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_equal [:nous, "tencent/hy3:free", "none", { tags: ["user=cleitin-bot"] }],
                  sess2[:assinatura_primary], "cache deve refletir a assinatura de B"
   end
+
+  # CASO 2 (Sol R1-A) — snapshot único de links por turno. A configuração do
+  # YAML não pode ser relida pontualmente no meio do turno: se ela mudar ENTRE
+  # preparar (prepare_chat) e enviar (ask_through_chain/touch_session), o chat
+  # montado para o link A NUNCA pode ser rotulado com a assinatura/elo B.
+  #
+  # Prova: `ask` tira UM snapshot de links no início. Qualquer re-leitura (caso
+  # antigo) receberia `list_evil` e usaria `link_c`. O teste garante que o turno
+  # usa o snapshot (link_a/link_b) e que `link_c` jamais é tocado — e que a
+  # assinatura guardada no cache vem do snapshot, não de re-leitura.
+  test "snapshot unico de links por turno: troca de config no meio nao contamina o turno" do
+    ConversationCompactor.stubs(:needs_compaction?).returns(false)
+
+    link_a = Llm::ModelChain::Link.new(label: "openrouter", provider: :openrouter, model: "openrouter/free")
+    link_b = Llm::ModelChain::Link.new(label: "nous", provider: :nous, model: "tencent/hy3:free",
+                                       effort: "none", params: { tags: ["user=cleitin-bot"] })
+    # O que uma re-leitura (comportamento antigo) retornaria no meio do turno.
+    link_c = Llm::ModelChain::Link.new(label: "evil", provider: :openrouter, model: "openrouter/OUTRO")
+
+    list_snapshot = [link_a, link_b]
+    list_evil = [link_c]
+
+    chat_a = stub_chat("resposta do A")
+    chat_b = stub_chat("resposta do B")
+    chat_c = mock("chat_c")
+    # link_c NUNCA deve ser usado neste turno (nem perguntado, nem construído).
+    chat_c.expects(:ask).never
+
+    Llm::ModelChain.stubs(:links).returns(list_snapshot, list_evil)
+    Llm::ModelChain.stubs(:primary).returns(link_a, link_c)
+    RubyLLM.stubs(:chat).returns(chat_a, chat_b, chat_c)
+
+    resp = ChatSessionManager.ask(scope: @scope, content: "primeiro", user_id: "101", username: "joao")
+    assert_equal "resposta do A", resp, "turno deve responder com o elo do snapshot (link_a)"
+
+    sess = ChatSessionManager.instance_variable_get(:@sessions)[@scope.key]
+    refute_nil sess, "chat de A deve estar em cache"
+    # A assinatura guardada vem de link_a (snapshot), NÃO de link_c (re-leitura).
+    assert_equal [:openrouter, "openrouter/free", nil, nil], sess[:assinatura_primary],
+                 "assinatura em cache deve vir do snapshot, não de re-leitura"
+  end
 end
 

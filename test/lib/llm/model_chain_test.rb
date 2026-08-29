@@ -9,7 +9,7 @@ class Llm::ModelChainTest < ActiveSupport::TestCase
   # Chaves que model_chain lê de ENV. Todas apagadas por padrão; o teste liga o
   # que o cenário exige. Troca ENV e devolve ao que era, inclusive no erro.
   ENV_KEYS = %w[NOUS_API_KEY OPENROUTER_API_KEY POOLSIDE_API_KEY NVIDIA_API_KEY
-                DISCORD_EFFORT_NOUS DISCORD_POOLSIDE_THINKING].freeze
+                GOOGLE_AI_API_KEY DISCORD_EFFORT_NOUS DISCORD_POOLSIDE_THINKING].freeze
 
   def com_env(valores)
     anteriores = ENV_KEYS.index_with { |chave| ENV[chave] }
@@ -176,13 +176,19 @@ class Llm::ModelChainTest < ActiveSupport::TestCase
     end
   end
 
-  # CASO 8 — chave do provider ausente encurta a cadeia.
-  test "chave de provider ausente encurta a cadeia (sem NOUS => nous some)" do
-    # Só openrouter configurado; o primary do YAML base aponta para nous => some.
+  # CASO 8 — chave do provider ausente ENCURTA a cadeia (CORREÇÃO Sol R1-A):
+  # primary nous sem chave NÃO esvazia a cadeia quando o fallback é válido —
+  # o fallback assume a ponta (CASO 3). Somente cadeia vazia se NENHUM elo
+  # tiver credencial.
+  test "primary sem chave com fallback válido encurta (fallback assume a ponta)" do
+    # Só openrouter configurado; o primary do YAML base aponta para nous => some,
+    # mas o fallback openrouter é válido e assume a ponta.
     com_env("OPENROUTER_API_KEY" => "sk-o") do
       com_yaml(YAML_BASE) do
-        # primary nous sem chave => cadeia vazia (não mente com fallback só).
-        assert_empty Llm::ModelChain.links, "primary sem chave deve esvaziar a cadeia"
+        links = Llm::ModelChain.links
+        assert_equal 1, links.size, "primary sem chave sai; fallback válido assume a ponta"
+        assert_equal %w[openrouter], links.map(&:label)
+        assert_equal "openrouter/free", links.first.model
       end
     end
 
@@ -190,6 +196,147 @@ class Llm::ModelChainTest < ActiveSupport::TestCase
     com_env("NOUS_API_KEY" => "sk-n") do
       com_yaml(YAML_BASE) do
         assert_equal %w[nous], Llm::ModelChain.links.map(&:label)
+      end
+    end
+
+    # NENHUMA chave: cadeia vazia.
+    com_env({}) do
+      com_yaml(YAML_BASE) do
+        assert_empty Llm::ModelChain.links, "sem nenhuma credencial, cadeia fica vazia"
+      end
+    end
+  end
+
+  # CASO 4 (Sol R1-A) — effort normalizado POR PROVEDOR, não só Nous.
+  # Nous: effort inválido cai no padrão 'none' com log.
+  test "nous effort inválido cai no padrão 'none' com log" do
+    com_env("NOUS_API_KEY" => "sk-n") do
+      com_yaml(YAML_BASE.sub(/effort: none/, "effort: ultra-max")) do
+        avisos = []
+        Rails.logger.stubs(:warn).with { |m| avisos << m.to_s; true }
+        primario = Llm::ModelChain.primary
+        assert_equal "none", primario.effort, "effort inválido do Nous normaliza para 'none'"
+        assert(avisos.any? { |m| m =~ /não é aceito pelo Nous/ }, "deve logar o effort inválido")
+      end
+    end
+  end
+
+  # CASO 4 (Sol R1-A) — Poolside NÃO suporta effort: 'none' (HTTP 400).
+  # O YAML que pede effort: none no Poolside deve virar nil (rejeitado).
+  test "poolside com effort: none é rejeitado e vira nil" do
+    com_env("POOLSIDE_API_KEY" => "sk-p") do
+      yaml = <<~YAML
+        version: 1
+        chat:
+          primary:
+            label: poolside
+            provider: poolside
+            model: poolside/laguna-xs-2.1
+            effort: none
+            params: null
+          fallback: null
+      YAML
+      com_yaml(yaml) do
+        primario = Llm::ModelChain.primary
+        assert_equal :poolside, primario.provider
+        assert_nil primario.effort, "effort: none do Poolside deve ser rejeitado (nil)"
+      end
+    end
+  end
+
+  # CASO 4 (Sol R1-A) — Gemini usa GOOGLE_AI_API_KEY (NÃO GEMINI_API_KEY).
+  test "gemini usa GOOGLE_AI_API_KEY e monta elo válido" do
+    com_env("GOOGLE_AI_API_KEY" => "sk-g") do
+      yaml = <<~YAML
+        version: 1
+        chat:
+          primary:
+            label: gemini
+            provider: gemini
+            model: gemini-3.1-flash-lite
+            effort: null
+            params: null
+          fallback: null
+      YAML
+      com_yaml(yaml) do
+        primario = Llm::ModelChain.primary
+        assert_equal :gemini, primario.provider
+        assert_equal "gemini-3.1-flash-lite", primario.model
+        assert_nil primario.effort, "Gemini sem effort suportado => nil"
+      end
+    end
+
+    # Sem GOOGLE_AI_API_KEY o elo Gemini é cortado (encurta a cadeia).
+    com_env({}) do
+      yaml = <<~YAML
+        version: 1
+        chat:
+          primary:
+            label: gemini
+            provider: gemini
+            model: gemini-3.1-flash-lite
+            effort: null
+            params: null
+          fallback: null
+      YAML
+      com_yaml(yaml) do
+        assert_empty Llm::ModelChain.links, "gemini sem GOOGLE_AI_API_KEY é cortado"
+      end
+    end
+  end
+
+  # CASO 4 (Sol R1-A) — OpenRouter e NVIDIA não suportam effort => nil.
+  test "openrouter e nvidia com effort vêm nil" do
+    com_env("OPENROUTER_API_KEY" => "sk-o") do
+      yaml = YAML_BASE.sub(/provider: nous/, "provider: openrouter")
+                       .sub(/model: tencent\/hy3:free/, "model: openrouter/free")
+                       .sub(/effort: none/, "effort: low")
+      com_yaml(yaml) do
+        primario = Llm::ModelChain.primary
+        assert_nil primario.effort, "OpenRouter não suporta effort => nil"
+      end
+    end
+
+    com_env("NVIDIA_API_KEY" => "sk-nv") do
+      yaml = <<~YAML
+        version: 1
+        chat:
+          primary:
+            label: nvidia
+            provider: nvidia
+            model: moonshotai/kimi-k3
+            effort: high
+            params: null
+          fallback: null
+      YAML
+      com_yaml(yaml) do
+        primario = Llm::ModelChain.primary
+        assert_equal :nvidia, primario.provider
+        assert_nil primario.effort, "NVIDIA não suporta effort => nil"
+      end
+    end
+  end
+
+  # CASO 4 (Sol R1-A) — provedor desconhecido é cortado da cadeia (não vira
+  # elo mudo nem manda requisição sem auth). Como o loader só valida TIPO
+  # (String/Symbol não vazio), o corte acontece em `links`/`build_link`, que não
+  # acha a chave de credencial para o provider no PROVIDER_CRED_KEY.
+  test "provedor desconhecido é cortado da cadeia (não vira elo mudo)" do
+    com_env("NOUS_API_KEY" => "sk-n") do
+      yaml = <<~YAML
+        version: 1
+        chat:
+          primary:
+            label: zzz
+            provider: zzz
+            model: whatever
+            effort: null
+            params: null
+          fallback: null
+      YAML
+      com_yaml(yaml) do
+        # O loader aceita o YAML (tipo ok); a cadeia corta o elo desconhecido.
+        assert_empty Llm::ModelChain.links, "provedor desconhecido não deve virar elo"
       end
     end
   end
