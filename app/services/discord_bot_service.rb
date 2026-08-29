@@ -103,9 +103,16 @@ class DiscordBotService
     end
 
     def should_handle?(event)
-      event.channel.private? ||
-        Discord::SessionScope.open_channel?(event.channel.id.to_s) ||
-        text_command?(event)
+      return true if event.channel.private?
+      return true if text_command?(event)
+
+      open_id = effective_open_channel_id(event.channel)
+      scope = Discord::SessionScope.for(
+        user_id: event.user.id.to_s,
+        channel_id: event.channel.id.to_s,
+        open_channel_id: open_id
+      )
+      scope.shared
     end
 
     # Ver o comentário acima do bot.mention: a guarda é literalmente "pule o que o
@@ -153,8 +160,10 @@ class DiscordBotService
       event.defer(ephemeral: false)
       command = Discord::CommandRouter.build(definition[:name], event.options["numero"],
                                              event.options["confirmar"])
+      open_id = effective_open_channel_id(event.channel)
       scope = Discord::SessionScope.for(user_id: event.user.id.to_s,
-                                        channel_id: event.channel.id.to_s)
+                                        channel_id: event.channel.id.to_s,
+                                        open_channel_id: open_id)
       respond_deferred(event, run_command(command, scope))
     rescue StandardError => e
       Rails.logger.error "[DiscordBotService] Slash /#{definition[:name]} falhou: #{e.message}"
@@ -167,7 +176,8 @@ class DiscordBotService
       user_id = event.user.id.to_s
       channel_id = event.channel.id.to_s
       username = display_name(event)
-      scope = Discord::SessionScope.for(user_id: user_id, channel_id: channel_id)
+      open_id = effective_open_channel_id(event.channel)
+      scope = Discord::SessionScope.for(user_id: user_id, channel_id: channel_id, open_channel_id: open_id)
       content = clean_content(event.message.content)
 
       if scope.shared && Discord::SessionScope.muted?(content)
@@ -472,6 +482,16 @@ class DiscordBotService
 
     def bot_author?(event)
       event.user.respond_to?(:bot_account?) && event.user.bot_account?
+    end
+
+    # Em thread (type 10/11/12) o ID do canal é o da PRÓPRIA thread, não do pai.
+    # O pai serve só para classificar herança de "canal aberto". `parent_id`
+    # inválido é nil OU 0 (0 é truthy em Ruby, por isso o `.to_i.positive?`):
+    # nesses casos a thread NÃO herda e usamos o próprio id. NUNCA confiamos no
+    # cache `parent` do objeto de canal — só no `parent_id` explícito.
+    def effective_open_channel_id(channel)
+      parent = channel.parent_id.to_i
+      parent.positive? ? parent : channel.id
     end
 
     # Precisa ser um comando QUE EXISTE, não só o prefixo. Testar só o `!` fazia

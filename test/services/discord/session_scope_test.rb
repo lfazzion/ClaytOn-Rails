@@ -78,4 +78,40 @@ class Discord::SessionScopeTest < ActiveSupport::TestCase
   test "muted? aceita nil" do
     assert_not Discord::SessionScope.muted?(nil)
   end
+
+  # === Missão thread-heranca (plano v2) ===
+
+  test "open_channel_id ausente assume o proprio channel_id (classificacao igual)" do
+    ENV["DISCORD_OPEN_CHANNEL_IDS"] = "9"
+    scope = Discord::SessionScope.for(user_id: "7", channel_id: "9")
+    assert_equal "9", scope.open_channel_id
+    assert_equal "9", scope.channel_id
+  end
+
+  test "open_channel_id recebe o pai em thread; channel_id mantem a identidade da thread" do
+    ENV["DISCORD_OPEN_CHANNEL_IDS"] = "9"
+    scope = Discord::SessionScope.for(user_id: "7", channel_id: "10", open_channel_id: "9")
+    assert scope.shared
+    assert_equal "c:10", scope.key
+    assert_equal "10", scope.channel_id
+    assert_equal "9", scope.open_channel_id
+    assert_nil scope.user_id
+  end
+
+  test "thread de canal nao aberto mantem escopo individual com identidade da thread" do
+    ENV["DISCORD_OPEN_CHANNEL_IDS"] = "9"
+    scope = Discord::SessionScope.for(user_id: "7", channel_id: "10", open_channel_id: "11")
+    assert_not scope.shared
+    assert_equal "u:7:c:10", scope.key
+    assert_equal "10", scope.channel_id
+    assert_equal "11", scope.open_channel_id
+    assert_equal "7", scope.user_id
+  end
+
+  test "open_channel_id nil e canal fechado nao abre nada" do
+    scope = Discord::SessionScope.for(user_id: "7", channel_id: "10", open_channel_id: nil)
+    assert_not scope.shared
+    assert_equal "u:7:c:10", scope.key
+    assert_equal "10", scope.channel_id
+  end
 end

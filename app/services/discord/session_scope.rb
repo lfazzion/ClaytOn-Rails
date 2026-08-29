@@ -6,16 +6,19 @@ module Discord
   class SessionScope
     DEFAULT_MUTE_PREFIX = "//"
 
-    Scope = Struct.new(:key, :channel_id, :user_id, :shared, keyword_init: true)
+    Scope = Struct.new(:key, :channel_id, :user_id, :shared, :open_channel_id, keyword_init: true)
 
     class << self
-      def for(user_id:, channel_id:)
+      def for(user_id:, channel_id:, open_channel_id: nil)
         channel = channel_id.to_s
-        return Scope.new(key: "c:#{channel}", channel_id: channel, user_id: nil, shared: true) if
-          open_channel?(channel)
+        abrir = (open_channel_id || channel).to_s
+        return Scope.new(key: "c:#{channel}", channel_id: channel, user_id: nil, shared: true,
+                         open_channel_id: abrir) if
+          open_channel?(abrir)
 
         user = user_id.to_s
-        Scope.new(key: "u:#{user}:c:#{channel}", channel_id: channel, user_id: user, shared: false)
+        Scope.new(key: "u:#{user}:c:#{channel}", channel_id: channel, user_id: user, shared: false,
+                  open_channel_id: abrir)
       end
 
       def open_channel?(channel_id)
