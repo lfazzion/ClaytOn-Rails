@@ -26,6 +26,7 @@ db/*.sqlite3-shm
 # Credenciais / secrets
 /config/master.key
 /config/credentials.yml.enc
+/config/llm_chain.yml
 .env
 .env.*
 !.env.example

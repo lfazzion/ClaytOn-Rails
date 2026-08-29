@@ -291,12 +291,42 @@ class ChatSessionManager
       cached = cache_read(scope.key)
       return nil unless cached && cached[:expires_at] > Time.current
 
+      # Invalidação por assinatura (29/08): trocar o YAML de cadeia NÃO trocaria
+      # o modelo em sessões já aquecidas (o cache dura 30 min e guardava só chat +
+      # expires_at) — violando "troca vale imediatamente sem restart". A assinatura
+      # do primary (provider, model, effort, params) é comparada com a config
+      # atual; divergência => descarta o objeto quente (a conversa está no banco,
+      # só o chat é reidratado no próximo turno). Não toca em mais nada.
+      cached_assinatura = cached[:assinatura_primary]
+      atual_assinatura = primary_signature
+      if cached_assinatura != atual_assinatura
+        Rails.logger.info "[ChatSessionManager] primary mudou (#{cached_assinatura.inspect} -> " \
+                          "#{atual_assinatura.inspect}) — descartando chat quente para reidratar"
+        evict(scope.key)
+        return nil
+      end
+
       cached[:chat]
+    end
+
+    # Assinatura do elo primário atual: suficiente para detectar troca de modelo,
+    # rota ou params (ex.: as tags do Nous). nil quando não há primary.
+    def primary_signature
+      link = Llm::ModelChain.primary
+      return nil if link.nil?
+
+      [link.provider, link.model, link.effort, link.params].freeze
     end
 
     def touch_session(scope_key, chat)
       mutex.synchronize do
-        sessions_cache[scope_key] = { chat: chat, expires_at: Time.current + TTL_MINUTES.minutes }
+        sessions_cache[scope_key] = {
+          chat: chat,
+          expires_at: Time.current + TTL_MINUTES.minutes,
+          # Assinatura do primary no momento do cache — usada por prepare_chat para
+          # detectar troca de cadeia sem esperar o TTL.
+          assinatura_primary: primary_signature
+        }
       end
       chat
     end

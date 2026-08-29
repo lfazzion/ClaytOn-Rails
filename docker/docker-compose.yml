@@ -37,6 +37,9 @@ services:
       # NUNCA volume nomeado: o banco de producao vive em storage/ no host
       # (CLAUDE.md: SQLite bind mount obrigatorio).
       - ../storage:/rails/storage
+      # Config da cadeia de LLM (NÃO commitado). Montado read-only: o bot relê a
+      # cada chamada (ModelChain.links) e trocar o arquivo reconfigura SEM restart.
+      - ../config/llm_chain.yml:/rails/config/llm_chain.yml:ro
     # Loopback apenas: /internal/extract é consumido pelo Hermes na mesma VM.
     # O firewall do host é uma camada só — não publicar em 0.0.0.0.
     ports:
@@ -75,6 +78,7 @@ services:
       PYTHON_SCRAPER_URL: "http://python-scraper:8080"
     volumes:
       - ../storage:/rails/storage
+      - ../config/llm_chain.yml:/rails/config/llm_chain.yml:ro
     # O `bin/jobs start` (Solid Queue supervisor) NÃO roda `db:prepare`. No
     # primeiro deploy ele abriria o `production_queue.sqlite3` vazio e reiniciaria
     # com erro de tabela inexistente. O `app` já executa `db:prepare` no seu
@@ -136,6 +140,7 @@ services:
       DISCORD_POOLSIDE_THINKING: ${DISCORD_POOLSIDE_THINKING:-}
     volumes:
       - ../storage:/rails/storage
+      - ../config/llm_chain.yml:/rails/config/llm_chain.yml:ro
     networks:
       - internal
       - browser

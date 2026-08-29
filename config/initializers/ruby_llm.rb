@@ -43,11 +43,14 @@ end
 if gem_available
   require Rails.root.join('lib/llm/providers/poolside')
   require Rails.root.join('lib/llm/providers/nous')
+  require Rails.root.join('lib/llm/providers/nvidia')
   require Rails.root.join('lib/llm/model_chain')
   require Rails.root.join('lib/llm/model_registry')
+  require Rails.root.join('lib/llm/llm_chain_loader')
 
   RubyLLM::Provider.register(:poolside, Llm::Providers::Poolside)
   RubyLLM::Provider.register(:nous, Llm::Providers::Nous)
+  RubyLLM::Provider.register(:nvidia, Llm::Providers::Nvidia)
 
   # Os modelos custom do projeto (Poolside, Nous, OpenRouter e os dois Gemini)
   # vivem em `Llm::ModelRegistry.custom_models` e são registrados por
@@ -61,6 +64,7 @@ if gem_available
     config.openrouter_api_key = ENV.fetch('OPENROUTER_API_KEY', nil)
     config.poolside_api_key = ENV.fetch('POOLSIDE_API_KEY', nil)
     config.nous_api_key = ENV.fetch('NOUS_API_KEY', nil)
+    config.nvidia_api_key = ENV.fetch('NVIDIA_API_KEY', nil)
     # Só vale para chamada sem `model:`. O chat do Discord sempre passa o modelo
     # e o provedor explicitamente, pela cadeia. `openrouter/free` exige
     # `OPENROUTER_API_KEY` — sem ela, não há rota para chamada sem `model:`.

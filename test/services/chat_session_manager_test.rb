@@ -360,5 +360,51 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_not_nil turn_durante_execucao, "cleitin_turn deve ser definido durante ask"
     assert_nil Thread.current[:cleitin_turn], "cleitin_turn deve ser limpo apos a execucao"
   end
+
+  # CASO 6 — invalidação por assinatura: trocar o primary (modelo A -> B) sem
+  # reiniciar e sem esperar o TTL de 30 min deve fazer o turno seguinte construir
+  # B, descartando o chat quente de A. Prova de que "troca vale imediatamente".
+  #
+  # O setup stuba `links`/`primary` com @link (openrouter/free). Aqui trocamos o
+  # primary para tencent/hy3:free entre dois `ask` e provamos que o segundo turno
+  # NÃO reaproveita o chat de A (RubyLLM.chat é chamado de novo e devolve B).
+  test "troca de primary A->B sem TTL faz o proximo turno construir B (invalidacao por assinatura)" do
+    ConversationCompactor.stubs(:needs_compaction?).returns(false)
+
+    link_a = Llm::ModelChain::Link.new(label: "openrouter", provider: :openrouter, model: "openrouter/free")
+    link_b = Llm::ModelChain::Link.new(label: "nous", provider: :nous, model: "tencent/hy3:free",
+                                       effort: "none", params: { tags: ["user=cleitin-bot"] })
+
+    chat_a = stub_chat("resposta do A")
+    chat_b = stub_chat("resposta do B")
+    # Cada chat só responde UMA vez — se A vazasse para o turno B, o teste quebra.
+    chat_a.expects(:ask).once.returns(stub(content: "resposta do A"))
+    chat_b.expects(:ask).once.returns(stub(content: "resposta do B"))
+
+    holder = { link: link_a }
+    Llm::ModelChain.stubs(:primary).returns(holder[:link])
+    Llm::ModelChain.stubs(:links).returns([holder[:link]])
+    RubyLLM.stubs(:chat).returns(chat_a, chat_b)
+
+    # Turno 1: aquece com A.
+    resp1 = ChatSessionManager.ask(scope: @scope, content: "primeiro", user_id: "101", username: "joao")
+    assert_equal "resposta do A", resp1
+    sess = ChatSessionManager.instance_variable_get(:@sessions)[@scope.key]
+    refute_nil sess, "chat de A deve estar em cache"
+    assert_equal [:openrouter, "openrouter/free", nil, nil], sess[:assinatura_primary]
+
+    # Troca o primary para B (sem restart, sem esperar TTL).
+    holder[:link] = link_b
+    Llm::ModelChain.stubs(:primary).returns(holder[:link])
+    Llm::ModelChain.stubs(:links).returns([holder[:link]])
+
+    # Turno 2: prepare_chat detecta assinatura divergente e descarta o quente;
+    # o turno reconstrói com B.
+    resp2 = ChatSessionManager.ask(scope: @scope, content: "segundo", user_id: "101", username: "joao")
+    assert_equal "resposta do B", resp2
+    sess2 = ChatSessionManager.instance_variable_get(:@sessions)[@scope.key]
+    assert_equal [:nous, "tencent/hy3:free", "none", { tags: ["user=cleitin-bot"] }],
+                 sess2[:assinatura_primary], "cache deve refletir a assinatura de B"
+  end
 end
 

@@ -35,6 +35,30 @@ module Llm
         end
       end
 
+      # Registro DINÂMICO (desde 29/08): um slug vindo do config/llm_chain.yml que
+      # não está na lista hardcoded é resolvido assim que a cadeia é montada.
+      #
+      # Antes disto, um modelo novo no YAML levantava ModelNotFoundError no
+      # primeiro uso do chat, porque a gem só conhece o models.json congelado.
+      # Idempotente: pula se já existe (id + provider). `effort`/`params` do YAML
+      # NÃO são campos do Model::Info — só guardamos metadados de janela/limite que
+      # o spec do provider não sabe; o `effort`/`params` vivem no Link, não aqui.
+      def register_from_spec!(provider:, model:, effort: nil, params: nil)
+        registry = RubyLLM::Models.instance.all
+        return if registry.any? { |m| m.id == model.to_s && m.provider == provider.to_s }
+
+        # Sem medir janela/limite do modelo novo, usa tetos conservadores que a
+        # gem aceita (inteiros). Quem quiser afinar pode registrar no initializer.
+        registry << RubyLLM::Model::Info.new(
+          id: model.to_s,
+          name: "#{provider.to_s}/#{model} (via llm_chain.yml)",
+          provider: provider.to_s,
+          capabilities: %w[function_calling streaming],
+          max_output_tokens: 32_768,
+          context_window: 200_000
+        )
+      end
+
       # A lista de modelos custom do projeto, registrada no boot pelo
       # initializer (config/initializers/ruby_llm.rb) e re-registrada pela rake
       # depois do `refresh!`.
@@ -48,6 +72,15 @@ module Llm
       # 2026-08-07 — não são estimativa.
       def custom_models
         [
+          # --- NVIDIA NIM, rota direta ------------------------------------------------
+          RubyLLM::Model::Info.new(
+            id: 'moonshotai/kimi-k3',
+            name: 'Kimi K3 (via NVIDIA NIM)',
+            provider: 'nvidia',
+            capabilities: %w[function_calling streaming],
+            max_output_tokens: 32_768,
+            context_window: 131_072
+          ),
           # --- Poolside, rota direta -------------------------------------------------
           RubyLLM::Model::Info.new(
             id: 'poolside/laguna-xs-2.1',
