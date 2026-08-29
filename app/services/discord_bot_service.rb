@@ -489,7 +489,15 @@ class DiscordBotService
     # inválido é nil OU 0 (0 é truthy em Ruby, por isso o `.to_i.positive?`):
     # nesses casos a thread NÃO herda e usamos o próprio id. NUNCA confiamos no
     # cache `parent` do objeto de canal — só no `parent_id` explícito.
+    #
+    # CORREÇÃO Sol R1: a guarda `thread?` é OBRIGATÓRIA antes de tocar
+    # `parent_id`. Canal de texto NORMAL sob uma Categoria também tem `parent_id`
+    # (o ID da categoria), e não é thread. Sem a guarda, o canal aberto normal
+    # seria recusado (usaria a categoria em vez do próprio id) e uma categoria
+    # configurada por engano abriria todos os canais sob ela. Só herdamos o
+    # `parent_id` quando o canal É thread de fato.
     def effective_open_channel_id(channel)
+      return channel.id unless channel.respond_to?(:thread?) && channel.thread?
       parent = channel.parent_id.to_i
       parent.positive? ? parent : channel.id
     end

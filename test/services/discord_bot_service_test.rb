@@ -18,9 +18,9 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     ChatSessionManager.stubs(:all_tool_classes).returns([])
   end
 
-  def mock_event(user_id: "123", channel_id: "456", content: "pergunta", username: "joao", private: false, attachments: [], parent_id: nil)
+  def mock_event(user_id: "123", channel_id: "456", content: "pergunta", username: "joao", private: false, attachments: [], parent_id: nil, thread: false)
     user = stub(id: user_id, display_name: username, username: username, bot_account?: false)
-    channel = stub(id: channel_id, private?: private, start_typing: nil, parent_id: parent_id)
+    channel = stub(id: channel_id, private?: private, thread?: thread, parent_id: parent_id, start_typing: nil)
     message = stub(content: content, attachments: attachments)
     event = mock("event")
     event.stubs(:user).returns(user)
@@ -391,7 +391,7 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
   # sem menção; o escopo é compartilhado com a IDENTIDADE da thread (não do pai).
   test "thread em canal aberto e atendida e usa identidade da thread (invariante 1)" do
     ENV["DISCORD_OPEN_CHANNEL_IDS"] = "999"
-    event = mock_event(channel_id: "777", parent_id: "999", private: false, content: "pergunta")
+    event = mock_event(channel_id: "777", parent_id: "999", thread: true, private: false, content: "pergunta")
 
     assert DiscordBotService.should_handle?(event)
 
@@ -417,7 +417,7 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
 
   # Invariante 3: thread de canal NÃO aberto exige menção/!; escopo individual.
   test "thread em canal nao aberto exige mencao e tem escopo individual (invariante 3)" do
-    event = mock_event(channel_id: "777", parent_id: "888", private: false, content: "pergunta")
+    event = mock_event(channel_id: "777", parent_id: "888", thread: true, private: false, content: "pergunta")
     assert_not DiscordBotService.should_handle?(event)
 
     scope = Discord::SessionScope.for(user_id: "123", channel_id: "777", open_channel_id: "888")
@@ -429,8 +429,8 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
   # Invariante 4: parent_id nil OU 0 não herda — usa o próprio id, sem crash.
   test "thread com parent_id nil ou 0 nao herda e nao quebra (invariante 4)" do
     ENV["DISCORD_OPEN_CHANNEL_IDS"] = "999"
-    nil_event = mock_event(channel_id: "777", parent_id: nil, private: false, content: "pergunta")
-    zero_event = mock_event(channel_id: "777", parent_id: 0, private: false, content: "pergunta")
+    nil_event = mock_event(channel_id: "777", parent_id: nil, thread: true, private: false, content: "pergunta")
+    zero_event = mock_event(channel_id: "777", parent_id: 0, thread: true, private: false, content: "pergunta")
 
     # Em nenhum dos dois casos a thread (id 777) herda o canal aberto 999 (nil/0 = inválido).
     assert_not DiscordBotService.should_handle?(nil_event)
@@ -448,7 +448,7 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     ENV["DISCORD_OPEN_CHANNEL_IDS"] = "999"
     event = mock("event")
     event.stubs(:user).returns(stub(id: "123"))
-    event.stubs(:channel).returns(stub(id: "777", parent_id: "999"))
+    event.stubs(:channel).returns(stub(id: "777", parent_id: "999", thread?: true))
     event.stubs(:options).returns({})
     event.expects(:defer).with(ephemeral: false)
     event.expects(:edit_response).with(content: "🆕 Nova conversa iniciada. Como este canal é compartilhado, ela vale para todo mundo. A anterior ficou guardada — " \
@@ -467,10 +467,10 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     dm_event = mock_event(private: true)
     assert DiscordBotService.should_handle?(dm_event)
 
-    bang_event = mock_event(channel_id: "777", parent_id: "888", private: false, content: "!sessions")
+    bang_event = mock_event(channel_id: "777", parent_id: "888", thread: true, private: false, content: "!sessions")
     assert DiscordBotService.should_handle?(bang_event)
 
-    thread_event = mock_event(channel_id: "777", parent_id: "999", private: false, content: "// assunto humano")
+    thread_event = mock_event(channel_id: "777", parent_id: "999", thread: true, private: false, content: "// assunto humano")
     scope = Discord::SessionScope.for(user_id: "123", channel_id: "777", open_channel_id: "999")
     assert scope.shared
     assert Discord::SessionScope.muted?(thread_event.message.content)
@@ -486,6 +486,49 @@ class DiscordBotServiceTest < ActiveSupport::TestCase
     assert_equal "c:999", parent.key
     assert_equal "c:777", thread.key
     refute_equal parent.key, thread.key
+  ensure
+    ENV.delete("DISCORD_OPEN_CHANNEL_IDS")
+  end
+
+  # Missão Sol R1: canal de texto NORMAL sob uma Categoria também tem parent_id
+  # (o ID da categoria), mas NÃO é thread. Com a guarda thread? obrigatória, o
+  # canal aberto usa o PRÓPRIO id e ignora a categoria — antes do fix ele seria
+  # recusado (usava a categoria em vez do próprio id) e uma categoria
+  # configurada por engano abriria todos os canais sob ela.
+  test "canal comum categorizado usa o proprio id e nao a categoria (Sol R1)" do
+    ENV["DISCORD_OPEN_CHANNEL_IDS"] = "456"
+    # canal id=456, NÃO é thread, parent_id=999 é a CATEGORIA (não aberto)
+    event = mock_event(channel_id: "456", parent_id: "999", thread: false, private: false, content: "pergunta")
+
+    # o helper devolve "456" (próprio id), ignorando a categoria 999
+    assert_equal "456", DiscordBotService.send(:effective_open_channel_id, event.channel)
+
+    # should_handle? true: usa o próprio 456, NÃO a categoria 999
+    assert DiscordBotService.should_handle?(event)
+
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "456", open_channel_id: "456")
+    assert scope.shared
+    assert_equal "c:456", scope.key
+  ensure
+    ENV.delete("DISCORD_OPEN_CHANNEL_IDS")
+  end
+
+  # Missão Sol R1: thread REAL continua herdando o canal aberto do pai, com a
+  # guarda thread? agora correta (só herda quando É thread de fato).
+  test "thread real herda o canal aberto do pai (Sol R1)" do
+    ENV["DISCORD_OPEN_CHANNEL_IDS"] = "999"
+    # canal id=777, É thread, parent_id=999 (canal aberto)
+    event = mock_event(channel_id: "777", parent_id: "999", thread: true, private: false, content: "pergunta")
+
+    # o helper devolve 999 (o pai aberto; parent_id.to_i é Integer)
+    assert_equal 999, DiscordBotService.send(:effective_open_channel_id, event.channel)
+
+    assert DiscordBotService.should_handle?(event)
+
+    scope = Discord::SessionScope.for(user_id: "123", channel_id: "777", open_channel_id: "999")
+    assert scope.shared
+    assert_equal "c:777", scope.key
+    assert_equal "777", scope.channel_id
   ensure
     ENV.delete("DISCORD_OPEN_CHANNEL_IDS")
   end
