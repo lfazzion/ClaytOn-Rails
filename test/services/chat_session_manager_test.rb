@@ -434,8 +434,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     # link_c NUNCA deve ser usado neste turno (nem perguntado, nem construído).
     chat_c.expects(:ask).never
 
-    Llm::ModelChain.stubs(:links).returns(list_snapshot, list_evil)
-    Llm::ModelChain.stubs(:primary).returns(link_a, link_c)
+    Llm::ModelChain.expects(:links).once.returns(list_snapshot)
     RubyLLM.stubs(:chat).returns(chat_a, chat_b, chat_c)
 
     resp = ChatSessionManager.ask(scope: @scope, content: "primeiro", user_id: "101", username: "joao")

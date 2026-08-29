@@ -75,9 +75,10 @@ class ChatSessionManager
           # mudar no meio do turno, prepare_chat/ask_through_chain/touch_session
           # continuam usando ESTE snapshot — o chat do elo A nunca é rotulado com
           # a assinatura/elo B.
+          links = Llm::ModelChain.links
           turn = TurnLinks.new(
-            links: Llm::ModelChain.links,
-            primary: Llm::ModelChain.primary
+            links: links,
+            primary: links.first
           )
 
           chat = prepare_chat(scope, conversation, turn)
