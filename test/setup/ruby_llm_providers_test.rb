@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "pathname"
 require "llm/model_chain"
 
 # Não existe teste algum hoje cobrindo config/initializers/ruby_llm.rb, e foi
@@ -8,16 +9,67 @@ require "llm/model_chain"
 # nenhum initializer commitado registra. Estes testes fecham a porta: eles rodam
 # depois do boot do Rails, então observam o estado real que o initializer deixou.
 class RubyLlmProvidersTest < ActiveSupport::TestCase
-  # `Llm::ModelChain.links` monta cada elo SÓ quando a chave daquela rota está no
-  # ambiente (`lib/llm/model_chain.rb:146,153,160` via `chave?`) — chave ausente
-  # ENCURTA a cadeia de propósito. Sem chave nenhuma, `links` volta [] e o laço
-  # que a percorre exercita ZERO elos (falso-positivo: passa sem cobrir nada).
-  # Igual ao chat_models_registry_test, setamos valores obviamente falsos para
-  # que TODOS os elos sejam montados e verificados — a asserção fica mais forte,
-  # não mais fraca. `links` não é memoizado (model_chain.rb:67-83), então o ENV
-  # vale na hora da chamada.
+  # `Llm::ModelChain.links` monta cada elo SÓ quando a chave daquela rota está
+  # no ambiente (`lib/llm/model_chain.rb:153` via `chave?`) — chave ausente
+  # ENCURTA a cadeia de propósito. DESDE 29/08 a cadeia NÃO vem de ENV
+  # hardcoded: `links` lê config/llm_chain.yml (primary + fallback opcional) via
+  # LlmChainLoader; sem o arquivo (ou sem chaves de API) `links` volta [] e o
+  # laço que a percorre exercita ZERO elos (falso-positivo: passa sem cobrir
+  # nada). Igual ao chat_models_registry_test, escrevemos um YAML válido num
+  # Dir.mktmpdir, apontamos CHAIN_CONFIG_PATH para ele e ligamos as ENVs das
+  # rotas que o YAML declara, para que TODOS os elos sejam montados e
+  # verificados — a asserção fica mais forte, não mais fraca. `links` não é
+  # memoizado (model_chain.rb:74-98), então o ENV vale na hora da chamada.
   CHAVES_DE_ROTA = %w[NOUS_API_KEY POOLSIDE_API_KEY OPENROUTER_API_KEY].freeze
   VALOR_FALSO = "chave-teste-invalida"
+
+  # Redefine uma constante de classe durante o bloco e restaura no ensure.
+  # `links` referencia CHAIN_CONFIG_PATH como constante nua, resolvida em tempo
+  # de execucao — trocar a constante redireciona a leitura sem acoplar o teste
+  # a localizacao de producao (padrao de test/lib/llm/model_chain_test.rb).
+  def stub_const(klass, const, valor)
+    original = klass.const_defined?(const, false) ? klass.const_get(const, false) : :__undef__
+    klass.send(:remove_const, const) if klass.const_defined?(const, false)
+    klass.const_set(const, valor)
+    yield
+  ensure
+    klass.send(:remove_const, const) if klass.const_defined?(const, false)
+    klass.const_set(const, original) unless original == :__undef__
+  end
+
+  # Escreve um YAML de cadeia em arquivo temporario, aponta CHAIN_CONFIG_PATH
+  # para ele (limpando o last-known-good state daquele caminho) e devolve o
+  # caminho. Dir.mktmpdir garante que NAO tocamos em arquivo fixo nem no
+  # config/llm_chain.yml da aplicacao.
+  def com_yaml(conteudo)
+    Dir.mktmpdir do |dir|
+      caminho = File.join(dir, "llm_chain.yml")
+      File.write(caminho, conteudo)
+      Llm::LlmChainLoader.state_mutex.synchronize { Llm::LlmChainLoader.state.delete(caminho) }
+      stub_const(Llm::ModelChain, :CHAIN_CONFIG_PATH, Pathname.new(caminho)) do
+        yield caminho
+      end
+    end
+  end
+
+  # YAML valido: primary nous + fallback openrouter (cadeia de 2 elos).
+  YAML_CADEIA = <<~YAML.freeze
+    version: 1
+    chat:
+      primary:
+        label: nous
+        provider: nous
+        model: tencent/hy3:free
+        effort: none
+        params:
+          tags: ["user=cleitin-bot"]
+      fallback:
+        label: openrouter
+        provider: openrouter
+        model: openrouter/free
+        effort: null
+        params: null
+  YAML
 
   test "os dois provedores novos estão registrados na gem" do
     assert_equal Llm::Providers::Poolside, RubyLLM::Provider.providers[:poolside]
@@ -88,20 +140,29 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
   end
 
   test "elos da ModelChain e ids registrados a mao resolvem no registry" do
-    # Ver ressalva do revisor GLМ: sem as ENVs de rota no ambiente este laço
-    # exercitava 0 elos (links vazio) e o teste passava sem cobrir a cadeia.
-    # Aplicamos o mesmo padrão do chat_models_registry_test — setamos valores
-    # falsos para as três rotas e RESTAURAMOS em ensure — e garantimos que os 3
-    # elos foram de fato montados e verificados (contador = CHAVES_DE_ROTA.size).
+    # Ver ressalva do revisor GLМ: sem as ENVs de rota no ambiente (e sem o
+    # YAML da cadeia) este laço exercitava 0 elos (links vazio) e o teste
+    # passava sem cobrir a cadeia. DESDE 29/08 a cadeia vem de
+    # config/llm_chain.yml (primary + fallback); aqui escrevemos um YAML valido
+    # num Dir.mktmpdir, apontamos CHAIN_CONFIG_PATH para ele e ligamos as ENVs
+    # das rotas que o YAML declara (nous + openrouter) e RESTAURAMOS tudo em
+    # ensure. Garantimos que os 2 elos foram de fato montados e verificados.
     anteriores = CHAVES_DE_ROTA.to_h { |nome| [nome, ENV.key?(nome) ? ENV[nome] : :ausente] }
     CHAVES_DE_ROTA.each { |nome| ENV[nome] = VALOR_FALSO if ENV[nome].to_s.strip.empty? }
     begin
-      links = Llm::ModelChain.links
-      assert_equal CHAVES_DE_ROTA.size, links.size,
-                   "com todas as chaves presentes a cadeia tem de montar os 3 elos"
-      links.each do |link|
-        assert RubyLLM.models.find(link.model, link.provider),
-               "elo #{link.label} aponta para #{link.model} (#{link.provider}), fora do registry"
+      com_yaml(YAML_CADEIA) do
+        links = Llm::ModelChain.links
+        # YAML declara primary (nous) + fallback (openrouter); ambas as chaves
+        # estao presentes, entao montam 2 elos.
+        assert_equal 2, links.size,
+                     "com primary e fallback no YAML e chaves presentes a cadeia tem de montar 2 elos"
+        links.each do |link|
+          encontrado = RubyLLM.models.find(link.model, link.provider)
+          assert encontrado,
+                 "elo #{link.label} aponta para #{link.model} (#{link.provider}), fora do registry"
+          assert_equal link.model.to_s, encontrado.id
+          assert_equal link.provider.to_s, encontrado.provider
+        end
       end
     ensure
       anteriores.each do |nome, valor|
