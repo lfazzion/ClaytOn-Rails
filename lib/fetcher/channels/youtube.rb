@@ -48,7 +48,6 @@ module Fetcher
         end
       end
 
-      PREFERRED_LANGS = %w[pt-BR pt en en-US en-orig].freeze
       # Abaixo do CHANNEL_TIMEOUT (40s) do ExtractService, que por sua vez fica
       # abaixo dos 90s do plugin do reader.
       YTDLP_TIMEOUT = 30
@@ -96,7 +95,7 @@ module Fetcher
         # Público de propósito: é onde mora a leitura do que o yt-dlp escreveu, e
         # é por aqui que o teste entra sem precisar do binário nem da rede.
         def build_from(dir:, url:, info: {})
-          path, lang = pick_subtitle(dir, info)
+          path, lang, auto_generated = pick_subtitle(dir, info)
           raise NoTranscript, "vídeo sem faixa de legenda disponível" if path.nil?
 
           text = render(events_from(path))
@@ -110,7 +109,7 @@ module Fetcher
               "source"         => "youtube",
               "kind"           => "transcript",
               "lang"           => lang.to_s,
-              "auto_generated" => !info.dig("subtitles", lang),
+              "auto_generated" => auto_generated,
               "video_id"       => info["id"].to_s,
               "channel"        => (info["channel"] || info["uploader"]).to_s
             }
@@ -237,18 +236,28 @@ module Fetcher
         # `--no-simulate` é OBRIGATÓRIO junto do `--print`: `--print` liga o modo
         # simulação, e em simulação o yt-dlp imprime mas NÃO grava arquivo nenhum.
         # Medido com controle: sem a flag, 0 arquivos json3; com ela, 3.
+        #
+        # Única execução: `--sub-langs all` baixa todas as faixas de uma só vez.
+        # O orçamento YTDLP_TIMEOUT (30s) inteiro vai para a única chamada.
+        # Timeout::Error vira NoTranscript.
         def run(url, dir, cookie_path)
+          download_subs(dir, cookie_path, url, "all", YTDLP_TIMEOUT)
+        end
+
+        # Uma chamada do yt-dlp para o `dir` informado. A escolha do budget
+        # é do chamador. Timeout::Error é convertido em NoTranscript.
+        def download_subs(dir, cookie_path, url, langs, timeout)
           command = [
             "yt-dlp", "--no-update", "--skip-download", "--ignore-no-formats-error",
             "--no-progress", "--no-warnings", "--quiet", "--no-simulate",
-            "--write-subs", "--write-auto-subs", "--sub-format", "json3",
-            "--sub-langs", PREFERRED_LANGS.join(","),
+            "--write-subs", "--write-auto-subs", "--sub-format", "json3/vtt/srt/best",
+            "--sub-langs", langs,
             "--print", INFO_TEMPLATE, "--cookies", cookie_path,
             "--socket-timeout", "15",
             "-o", File.join(dir, "%(id)s.%(ext)s"), url
           ]
 
-          out, err, status = Timeout.timeout(YTDLP_TIMEOUT) { Open3.capture3(*command) }
+          out, err, status = Timeout.timeout(timeout) { Open3.capture3(*command) }
 
           # A checagem do stderr roda MESMO com status 0: com
           # `--ignore-no-formats-error` o yt-dlp sai com sucesso e reporta a
@@ -265,39 +274,197 @@ module Fetcher
         rescue JSON::ParserError
           {}
         rescue Timeout::Error
-          raise NoTranscript, "yt-dlp não respondeu em #{YTDLP_TIMEOUT}s"
+          raise NoTranscript, "yt-dlp não respondeu em #{timeout}s (--sub-langs #{langs})"
         end
 
-        # Manual antes de automática dentro do mesmo idioma: legenda enviada pelo
-        # autor não repete linha nem erra nome próprio.
+        # Seleção determinística de legenda — sem lista de preferência de idioma.
+        #
+        # Regras (na ordem de prioridade):
+        # 1) Manual (`info["subtitles"]`) vence automática (`info["automatic_captions"]`).
+        #    Quando o mesmo lang existe nos dois, o manual é escolhido.
+        # 2) Dentro do mesmo grupo (manual ou auto): ordem lexicográfica do código
+        #    de idioma (ex.: "es" < "pt").
+        # 3) Dentro do mesmo idioma: json3 > vtt > srt.
+        #
+        # Qualquer idioma serve — não há hardcode de língua alguma.
+        #
+        # Devolve [path, lang, auto_generated] — o terceiro elemento indica a
+        # fonte (manual=false, auto=true) para que `build_from` preencha o
+        # metadata sem recontar.
+        FORMAT_WEIGHT = { "json3" => 1, "vtt" => 2, "srt" => 3 }.freeze
+
         def pick_subtitle(dir, info)
-          disponiveis = Dir[File.join(dir, "*.json3")].to_h { |p| [lang_of(p, info["id"]), p] }
-          return [nil, nil] if disponiveis.empty?
-
-          PREFERRED_LANGS.each do |lang|
-            return [disponiveis[lang], lang] if disponiveis.key?(lang)
+          video_id = info["id"]
+          # disponiveis: lang => { ext => path }, json3 sobrescrevendo vtt/srt.
+          disponiveis = {}
+          FORMAT_WEIGHT.sort_by { |_, peso| peso }.each do |ext, peso|
+            Dir[File.join(dir, "*.#{ext}")].each do |p|
+              lang = lang_of(p, video_id)
+              # Só atualiza se ainda não tem entrada OU se a entrada atual é
+              # de extensão pior (peso maior).
+              atual = disponiveis[lang]
+              if atual.nil? || peso < FORMAT_WEIGHT[atual.keys.first]
+                disponiveis[lang] = { ext => p }
+              end
+            end
           end
-          lang, path = disponiveis.first
-          [path, lang]
+          return [nil, nil, nil] if disponiveis.empty?
+
+          manual = info["subtitles"] || {}
+          # 1) manual vence auto; 2) lexicográfico dentro de cada grupo.
+          sorted = disponiveis.keys.sort_by do |lang|
+            [manual.key?(lang) ? 0 : 1, lang]
+          end
+
+          lang = sorted.first
+          entry = disponiveis[lang]
+          # json3 > vtt > srt — pega a chave de menor peso.
+          path = entry.key?("json3") ? entry["json3"] :
+                 entry.key?("vtt") ? entry["vtt"] :
+                 entry["srt"]
+          auto_generated = !manual.key?(lang)
+          [path, lang, auto_generated]
         end
 
-        # yt-dlp escreve `<id>.<lang>.json3`.
+        # yt-dlp grava `<id>.<lang>.<ext>`. O lang é tudo entre o id e a
+        # extensão, então "en-GB" sobreviver a um lang que tem hífen e o
+        # caller do id que tem ponto exige o strip duplo.
         def lang_of(path, video_id)
-          File.basename(path, ".json3").delete_prefix("#{video_id}.")
+          base = File.basename(path)
+          base = base.sub(/\A#{Regexp.escape(video_id.to_s)}\./, "")
+          base = base.sub(/\.(json3|vtt|srt)\z/, "")
+          base
         end
 
+        # Dispatch por extensão. json3 mantém o contrato antigo (events com
+        # segs/utf8) consumido por `render`. vtt e srt produzem events
+        # sintéticos no MESMO formato (Hash com "text") para que `render`
+        # não precise de branch.
         def events_from(path)
-          JSON.parse(File.read(path))["events"]
+          case File.extname(path)
+          when ".json3"
+            JSON.parse(File.read(path))["events"]
+          when ".vtt"
+            parse_vtt(File.read(path))
+          when ".srt"
+            parse_srt(File.read(path))
+          end
         rescue JSON::ParserError, Errno::ENOENT
           nil
         end
 
+        # Parser VTT mínimo:
+        # - "WEBVTT" na primeira linha é o sinal do formato. Pode vir seguido
+        #   de título (WEBVTT - Some title) — `start_with?` cobre.
+        # - Metadados opcionais (Kind:, Language:) e blocos NOTE / STYLE /
+        #   REGION antes da primeira cue são descartados.
+        # - NOTE pode aparecer COLADO à primeira cue (sem linha em branco
+        #   entre o corpo do NOTE e o timestamp) — medido no fixture do
+        #   harness e em alguns VTTs do YouTube. O loop de NOTE consome
+        #   até linha em branco OU linha de timing, não até linha em
+        #   branco apenas.
+        # - Cada cue: linha com timestamp "-->", depois texto até a
+        #   próxima linha em branco.
+        # - Tags inline (<c>, <i>, <b>) são removidas — yt-dlp coloca
+        #   `<c.colorXXXXX>` em legendas automáticas.
+        # Devolve [{ "text" => "..." }, ...] no mesmo formato que `render`
+        # espera.
+        WEBVTT_INLINE_TAG  = /<[^>]+>/.freeze
+        WEBVTT_TIMING      = /\A(\d{2}:)?\d{2}:\d{2}\.\d{3}\s+-->\s+(\d{2}:)?\d{2}:\d{2}\.\d{3}/.freeze
+        WEBVTT_HEADER_KEYS = %w[Kind: Language:].freeze
+
+        def parse_vtt(body)
+          events = []
+          lines  = body.to_s.split("\n")
+          i = 0
+          n = lines.size
+
+          while i < n
+            stripped = lines[i].to_s.strip
+
+            # NOTE multilinha: consome até a próxima linha em branco OU até
+            # uma linha de timing (NOTE pode aparecer colado na primeira cue
+            # em alguns VTTs — o fixture do harness é exatamente este caso).
+            if stripped == "NOTE"
+              i += 1
+              while i < n && lines[i].strip != "" && !lines[i].strip.match?(WEBVTT_TIMING)
+                i += 1
+              end
+              next
+            end
+
+            # STYLE/REGION multilinha: consome até a próxima linha em branco.
+            if stripped.start_with?("STYLE", "REGION")
+              i += 1
+              while i < n && lines[i].strip != ""
+                i += 1
+              end
+              next
+            end
+
+            # Metadados chave: valor (Kind:, Language:) ou o próprio "WEBVTT"
+            # que aparece na primeira linha.
+            if i == 0 && stripped.start_with?("WEBVTT")
+              i += 1
+              next
+            end
+            if WEBVTT_HEADER_KEYS.any? { |k| stripped.start_with?(k) }
+              i += 1
+              next
+            end
+
+            # Linha de timing: junta linhas até a próxima em branco.
+            if stripped.match?(WEBVTT_TIMING)
+              i += 1
+              buf = []
+              while i < n && lines[i].strip != ""
+                buf << lines[i]
+                i += 1
+              end
+              texto = buf.join("\n").gsub(WEBVTT_INLINE_TAG, "").strip
+              events << { "text" => texto } unless texto.empty?
+              next
+            end
+
+            # Linha em branco ou linha não-reconhecida: avança.
+            i += 1
+          end
+          events
+        end
+
+        # Parser SRT mínimo: blocos "1\nHH:MM:SS,mmm --> HH:MM:SS,mmm\ntexto\n"
+        # separados por linha em branco. Vírgula no timestamp em vez de ponto.
+        def parse_srt(body)
+          events = []
+          blocks = body.to_s.split(/\r?\n\r?\n+/)
+          blocks.each do |blk|
+            linhas = blk.lines.map(&:chomp)
+            timing = linhas.find { |l| l.include?("-->") }
+            next unless timing
+
+            idx = linhas.index(timing)
+            texto = linhas[(idx + 1)..].to_a.join("\n").gsub(/<[^>]+>/, "").strip
+            events << { "text" => texto } unless texto.empty?
+          end
+          events
+        end
+
         # Legenda automática repete a linha anterior a cada quadro de rolagem —
         # sem deduplicar, uma aula de 20 minutos vira o dobro de texto repetido.
+        #
+        # Dois formatos chegam aqui:
+        # - json3: event = {"segs" => [{"utf8" => "..."}]}
+        # - vtt/srt: event = {"text" => "..."} (produzido por parse_vtt/parse_srt)
+        # O helper extrai o texto de qualquer um dos dois para o `render` ter um
+        # só contrato.
         def render(events)
           linhas = Array(events).filter_map do |event|
-            texto = Array(event["segs"]).map { |seg| seg["utf8"].to_s }.join.strip
-            texto.presence
+            texto = if event.key?("segs")
+                      Array(event["segs"]).map { |seg| seg["utf8"].to_s }.join
+                    else
+                      event["text"].to_s
+                    end
+            texto.strip.presence
           end
           linhas.chunk_while { |a, b| a == b }.map(&:first).join("\n")
         end

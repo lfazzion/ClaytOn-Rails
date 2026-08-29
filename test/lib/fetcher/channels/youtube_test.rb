@@ -49,18 +49,11 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
   test "legenda enviada pelo autor nao e marcada como automatica" do
     info = INFO.merge("subtitles" => { "pt-BR" => [{}] }, "automatic_captions" => {})
 
-    com_dir(info: info) do |dir, info|
+    com_dir(info: info, subs: {}) do |dir, info|
+      File.write(File.join(dir, "#{info['id']}.pt-BR.json3"), JSON.generate(EVENTS))
       result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
 
       assert_equal false, result[:metadata]["auto_generated"]
-    end
-  end
-
-  test "respeita a ordem de preferencia de idioma" do
-    com_dir(subs: { "en" => EVENTS, "pt-BR" => EVENTS }) do |dir, info|
-      result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
-
-      assert_equal "pt-BR", result[:metadata]["lang"], "pt-BR vem antes de en em PREFERRED_LANGS"
     end
   end
 
@@ -105,7 +98,6 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
 
   test "URL que nao e de video devolve nil sem tocar no jar" do
     Fetcher::CookieJar.expects(:require!).never
-
     assert_nil Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/@algum")
   end
 
@@ -121,9 +113,7 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
     assert_equal "youtube.com", erro.domain
     assert_includes erro.message, "renovar"
   end
-  # A regressao que isto guarda: sessao rejeitada saia como "video sem legenda".
-  # O yt-dlp sai com status 0 e sem faixa nenhuma nos dois casos; o unico sinal
-  # e o arquivo de cookie que ele reescreve.
+
   def com_arquivo_de_cookie(nomes)
     Tempfile.create(["jar", ".txt"]) do |f|
       f.puts "# Netscape HTTP Cookie File"
@@ -151,8 +141,6 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
   end
 
   test "sessao invalidada de verdade: 3PSID sobrevive mas a sessao morreu" do
-    # Conjunto EXATO que o YouTube devolveu em 04/08 ao rejeitar a sessao.
-    # `__Secure-3PSID` continua la; se ele fosse sentinela, isto passaria batido.
     mortos = %w[GPS PREF VISITOR_INFO1_LIVE VISITOR_PRIVACY_METADATA SOCS
                 __Secure-1PSIDTS __Secure-3PAPISID __Secure-3PSID
                 __Secure-3PSIDCC __Secure-3PSIDTS __Secure-ROLLOUT_TOKEN __Secure-YNID]
@@ -164,9 +152,6 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
     end
   end
 
-  # Medido em 05/08: com `--ignore-no-formats-error` o yt-dlp sai com status 0 e
-  # reporta a sessao morta so como WARNING no stderr. A checagem tem que rodar
-  # independente do status, senao a sessao rotacionada passa como "sem legenda".
   test "sessao rejeitada e detectada mesmo com exit 0" do
     aviso = "WARNING: [youtube] The provided YouTube account cookies are no longer valid. " \
             "They have likely been rotated in the browser as a security measure."
@@ -194,32 +179,53 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
   test "stderr limpo nao e confundido com sessao rejeitada" do
     ok = Struct.new(:success?).new(true)
     Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
-    Open3.stubs(:capture3).returns(["{}", "WARNING: n challenge solving failed", ok])
+    Open3.stubs(:capture3).returns(["{}", "WARNING: no challenge solving failed", ok])
     Fetcher::CookieJar.stubs(:parse_netscape).returns([{ "name" => "SID" }])
 
-    # Sem faixa no diretorio temporario, o erro correto e NoTranscript.
     assert_raises(Fetcher::Channels::Youtube::NoTranscript) do
       Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
     end
   end
 
-  # ── Busca (Youtube.search) — mesmos portões do caminho de leitura ──────────
-  # O `search` usava o jar PURO (CookieJar.require! + with_netscape_file sem
-  # injeção), ignorando a sessão viva do Chrome — a divergência que o
-  # SessionCookies existe para eliminar — e não passava por HostRateLimiter.
+  test "exit não-zero com sessão válida levanta YtdlpError, nunca NoTranscript" do
+    ok = Struct.new(:success?, :exitstatus).new(false, 1)
+    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
+    Open3.stubs(:capture3).returns(["{}", "", ok])
 
+    erro = assert_raises(Fetcher::Channels::Youtube::YtdlpError) do
+      Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
+    end
+    assert_match(/exit 1/, erro.message)
+    assert_kind_of Fetcher::Channels::Error, erro
+    refute_kind_of Fetcher::Channels::Youtube::NoTranscript, erro
+  end
+
+  test "exit não-zero com stderr de sessão rejeitada preserva CookieJar::Expired" do
+    ok = Struct.new(:success?, :exitstatus).new(false, 1)
+    aviso = "ERROR: Sign in to confirm you are not a bot."
+    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
+    Open3.stubs(:capture3).returns(["{}", aviso, ok])
+
+    erro = assert_raises(Fetcher::CookieJar::Expired) do
+      Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
+    end
+
+    assert_equal "youtube.com", erro.domain
+  end
+
+  test "YtdlpError é subclasse de Channels::Error" do
+    assert Fetcher::Channels::Youtube::YtdlpError < Fetcher::Channels::Error
+  end
+
+  # ── Busca (Youtube.search) ─────────────────────────────────────────────────
   def stubbed_search(cookies:, origem:)
     Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([cookies, origem])
     Fetcher::Channels::Youtube.stubs(:resultados).returns([])
   end
 
   test "search usa a sessao do SessionCookies (Chrome vivo antes do jar)" do
-    # Sem o stub, o jar está VAZIO neste teste e o `SessionCookies` levantaria
-    # Expired — o teste só passa se a sessão vier da fonte certa. O
-    # `with_netscape_file` real roda (escreve tempfile efêmero, sem rede).
     Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
     stubbed_search(cookies: [{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], origem: :browser)
-
     assert_equal [], Fetcher::Channels::Youtube.search(query: "ruby")
   end
 
@@ -252,36 +258,225 @@ class Fetcher::Channels::YoutubeTest < ActiveSupport::TestCase
   test "search com query vazia devolve lista vazia sem gastar nada" do
     Fetcher::HostRateLimiter.expects(:exceeded?).never
     Fetcher::CookieJar.expects(:with_netscape_file).never
-
     assert_equal [], Fetcher::Channels::Youtube.search(query: "   ")
   end
 
-  test "exit não-zero com sessão válida levanta YtdlpError, nunca NoTranscript" do
-    ok = Struct.new(:success?, :exitstatus).new(false, 1)
+  # ── RED CASE 1: comando yt-dlp usa --sub-langs all em UMA unica execucao ────
+  # Intercepta a construcao do comando e exige --sub-langs all. O codigo
+  # anterior (2-pass com PREFERRED_LANGS) falha este teste — passa com
+  # PREFERRED_LANGS.join(",") no primeiro download, nao "all".
+  test "run usa --sub-langs all em unica execucao (sem 2-pass, sem PREFERRED_LANGS)" do
+    captured_commands = []
+    ok = Struct.new(:success?, :exitstatus).new(true, 0)
     Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
-    Open3.stubs(:capture3).returns(["{}", "", ok])
 
-    erro = assert_raises(Fetcher::Channels::Youtube::YtdlpError) do
+    # Abre a moqueira da cookie jar para que `with_netscape_file` execute e
+    # `verify_session!` veja um cookie de sessao.
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields(Tempfile.create(["jar", ".txt"]).path).returns({"id" => "X", "title" => "T"})
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!)
+    Fetcher::CookieJar.stubs(:parse_netscape).returns([{ "name" => "SID" }])
+
+    Open3.expects(:capture3).with { |*args|
+      captured_commands << args
+      true
+    }.returns(['{"id":"X","title":"T"}', "", ok])
+
+    # capture3 mock devolve info sem legendas — build_from levanta NoTranscript
+    # porque o dir esta vazio. O foco deste teste e o COMANDO emitido, nao o
+    # resultado do parse.
+    assert_raises(Fetcher::Channels::Youtube::NoTranscript) do
       Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
     end
-    assert_match(/exit 1/, erro.message)
-    assert_kind_of Fetcher::Channels::Error, erro
-    refute_kind_of Fetcher::Channels::Youtube::NoTranscript, erro
+
+    # Deve ter exatamente uma chamada a capture3 (unico download)
+    assert_equal 1, captured_commands.length, "deve rodar yt-dlp uma unica vez, nao 2-pass"
+
+    cmd = captured_commands.first
+    assert_includes cmd, "--sub-langs"
+    idx = cmd.index("--sub-langs")
+    assert_equal "all", cmd[idx + 1], "deve passar --sub-langs all, nao PREFERRED_LANGS"
+
+    # PREFERRED_LANGS nao deve existir mais
+    refute Fetcher::Channels::Youtube.const_defined?(:PREFERRED_LANGS),
+           "PREFERRED_LANGS deve ser removida completamente"
   end
 
-  test "exit não-zero com stderr de sessão rejeitada preserva CookieJar::Expired" do
-    ok = Struct.new(:success?, :exitstatus).new(false, 1)
-    aviso = "ERROR: Sign in to confirm you are not a bot."
-    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "SID", "value" => "v", "domain" => ".youtube.com" }], :jar])
-    Open3.stubs(:capture3).returns(["{}", aviso, ok])
+  # ── RED CASE 2: idiomas arbitrarios sem hardcoded ────────────────────────────
+  # ja.vtt, ar.vtt, zu.vtt, hi.vtt — cada um sozinho, cada um deve ser
+  # reconhecido e servir. Sem nenhuma constante de preferencia.
+  ["ja", "ar", "zu", "hi"].each do |lang|
+    test "idioma arbitrario #{lang} funciona sem lista de preferencia" do
+      Dir.mktmpdir("ytt-arbitrario") do |dir|
+        info = INFO.merge("subtitles" => {}, "automatic_captions" => { lang => [{}] })
+        write_vtt(dir, info, lang)
 
-    erro = assert_raises(Fetcher::CookieJar::Expired) do
-      Fetcher::Channels::Youtube.call(url: "https://www.youtube.com/watch?v=X")
+        result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+
+        assert_equal lang, result[:metadata]["lang"], "idioma #{lang} deve servir sem hardcoded"
+        assert_operator result[:content].length, :>, 0
+      end
     end
-    assert_equal "youtube.com", erro.domain
   end
 
-  test "YtdlpError é subclasse de Channels::Error" do
-    assert Fetcher::Channels::Youtube::YtdlpError < Fetcher::Channels::Error
+  # ── RED CASE 3: duas legendas automaticas → escolha determinista ────────────
+  # Ordenacao lexicografica: "es" < "pt" (e < p).
+  test "duas legendas automaticas: escolha determinista por ordem lexica" do
+    Dir.mktmpdir("ytt-deterministic") do |dir|
+      info = INFO.merge("subtitles" => {}, "automatic_captions" => { "es" => [{}], "pt" => [{}] })
+      write_vtt(dir, info, "es")
+      write_vtt(dir, info, "pt")
+
+      result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+
+      assert_equal "es", result[:metadata]["lang"], "lexicografico: es < pt"
+      assert_operator result[:content].length, :>, 0
+    end
+  end
+
+  # ── RED CASE 4: manual vence automatica ─────────────────────────────────────
+  # Mesmo idioma em manual e automatico — manual deve ser escolhido.
+  test "faixa manual vence automatica quando ambas existem" do
+    Dir.mktmpdir("ytt-manual") do |dir|
+      info = INFO.merge(
+        "subtitles" => { "en" => [{}] },
+        "automatic_captions" => { "en" => [{}], "es" => [{}] }
+      )
+      # escreve um arquivo .vtt em portugues (automatico) e outro em ingles (manual)
+      write_vtt(dir, info, "es", "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nauto es\n")
+      write_vtt(dir, info, "en", "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nmanual en\n")
+
+      result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+
+      assert_equal "en", result[:metadata]["lang"], "manual deve vencer automatica"
+      assert_includes result[:content], "manual en"
+      assert_equal false, result[:metadata]["auto_generated"]
+    end
+  end
+
+  # ── RED CASE 5: mesmo idioma em varios formatos → json3 > vtt > srt ─────────
+  test "mesmo idioma em varios formatos prefere json3 > vtt > srt" do
+    Dir.mktmpdir("ytt-formats") do |dir|
+      info = INFO.merge(
+        "subtitles" => { "en-GB" => [{}] },
+        "automatic_captions" => {}
+      )
+      # json3, vtt, srt para o mesmo idioma en-GB
+      File.write(File.join(dir, "#{info['id']}.en-GB.json3"), JSON.generate(EVENTS))
+      write_vtt(dir, info, "en-GB", "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nvtt content\n")
+      File.write(File.join(dir, "#{info['id']}.en-GB.srt"), "1\n00:00:01,000 --> 00:00:02,000\nsrt content\n")
+
+      result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+
+      assert_equal "en-GB", result[:metadata]["lang"]
+      # json3 tem prioridade — conteudo vem do json3
+      assert_equal "primeira linha\nsegunda linha", result[:content]
+    end
+  end
+
+  # ── RED CASE 6: nenhuma faixa e faixa vazia → NoTranscript ───────────────────
+  test "sem nenhuma faixa suportada levanta NoTranscript" do
+    Dir.mktmpdir("ytt-vazio") do |dir|
+      info = INFO.merge("subtitles" => {}, "automatic_captions" => {})
+      File.write(File.join(dir, "lixo.txt"), "não é legenda")
+
+      assert_raises(Fetcher::Channels::Youtube::NoTranscript) do
+        Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+      end
+    end
+  end
+
+  test "faixa parseavel mas vazia levanta NoTranscript" do
+    Dir.mktmpdir("ytt-fazio") do |dir|
+      info = INFO.merge("subtitles": {}, "automatic_captions": {})
+      File.write(File.join(dir, "#{info['id']}.en.vtt"), "WEBVTT\n")
+
+      assert_raises(Fetcher::Channels::Youtube::NoTranscript) do
+        Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+      end
+    end
+  end
+
+  # ── RED CASE 7: video de controle real (en-GB) → lang en-GB, content > 1000 ───
+  # VTT com conteudo extenido (simulando a fixture de controle lGtBPrSrnjY).
+  LARGE_VTT = <<~VTT
+    WEBVTT
+    Kind: captions
+    Language: en-GB
+    NOTE
+    This file was generated by YouTube.
+    #{Array.new(60) { |i|
+      "00:00:#{(i % 60).to_s.rjust(2, "0")}.000 --> 00:00:#{(i + 1 > 59 ? 59 : i + 1).to_s.rjust(2, "0")}.000\nLine number #{i} of the transcript content for testing purposes"
+    }.join("\n")}
+
+  VTT
+
+  test "video de controle en-GB: lang en-GB e conteudo > 1000" do
+    Dir.mktmpdir("ytt-control") do |dir|
+      info = INFO.merge("subtitles" => {}, "automatic_captions" => { "en-GB" => [{}] })
+      write_vtt(dir, info, "en-GB", LARGE_VTT)
+
+      result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+
+      assert_equal "en-GB", result[:metadata]["lang"]
+      assert_operator result[:content].length, :>, 1000, "conteudo deve ter mais de 1000 caracteres"
+      assert_equal true, result[:metadata]["auto_generated"]
+    end
+  end
+
+  # ── Parsers mantidos ────────────────────────────────────────────────────────
+
+  VTT_FIXTURE = <<~VTT
+    WEBVTT
+    Kind: captions
+    Language: en-GB
+    NOTE
+    This file was generated by YouTube.
+    It contains auto-generated captions.
+    00:00:00.500 --> 00:00:03.000
+    <c>Welcome</c> to the show.
+
+    00:00:03.500 --> 00:00:06.000
+    We are <i>testing</i> the parser.
+  VTT
+
+  def write_vtt(dir, info, lang, body = VTT_FIXTURE)
+    File.write(File.join(dir, "#{info['id']}.#{lang}.vtt"), body)
+  end
+
+  test "parse_vtt ignora NOTE/Kind/Language/STYLE e extrai so o texto das cues" do
+    Dir.mktmpdir("ytt-parse") do |dir|
+      info = INFO.merge("subtitles" => {})
+      write_vtt(dir, info, "en-GB")
+
+      events = Fetcher::Channels::Youtube.send(:events_from, File.join(dir, "#{info['id']}.en-GB.vtt"))
+      textos = events.map { |e| e["text"] }
+
+      assert_equal 2, events.size
+      assert_includes textos[0], "Welcome"
+      refute_includes textos[0], "<c>", "tags <c> devem ser strippadas"
+      assert_includes textos[1], "testing"
+    end
+  end
+
+  test "parse_srt extrai texto dos blocos" do
+    srt_body = <<~SRT
+      1
+      00:00:00,500 --> 00:00:03,000
+      Welcome to the show.
+
+      2
+      00:00:03,500 --> 00:00:06,000
+      We are testing the parser.
+    SRT
+    Dir.mktmpdir("ytt-srt") do |dir|
+      info = INFO.merge("subtitles" => {})
+      File.write(File.join(dir, "#{info['id']}.en.srt"), srt_body)
+
+      result = Fetcher::Channels::Youtube.build_from(dir: dir, url: "https://www.youtube.com/watch?v=X", info: info)
+
+      assert_equal "en", result[:metadata]["lang"]
+      assert_includes result[:content], "Welcome"
+      assert_includes result[:content], "testing"
+    end
   end
 end
