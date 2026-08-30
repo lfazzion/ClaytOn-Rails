@@ -4,6 +4,7 @@ require "net/http"
 require "json"
 require "digest"
 require "set"
+require_relative "../services/search_api_cache"
 
 class WebSearchTool < ToolBase
   description "Pesquisa web em tempo real via SearXNG. Use para fatos atuais, notícias, " \
@@ -39,10 +40,14 @@ class WebSearchTool < ToolBase
   # F1: teto de 5 hits por busca (era 10). Plataforma única, sem fan-out
   # paralelo — `SearchApiRouter` também clampa em MAX_RESULTS=5.
   MAX_LIMIT         = 5
-  CACHE_TTL         = 15.minutes
-  # Um tropeço de um segundo não pode cegar o bot por 15 minutos: busca vazia pode ser
-  # engine acordando, e o custo de repetir contra o SearXNG local é desprezível. O minuto
-  # existe só para absorver rajada de tool calls do mesmo turno de conversa.
+  # F3c do plano-fase2 (30/08/2026): TTL do cache de RESULTADO é derivado
+  # do tipo+time_range via `SearchApiCache.ttl_for`. Não há constante de
+  # TTL fixa aqui — o `run` chama `SearchApiCache.write` que decide.
+  # F3c: debounce de VAZIO (não cache de conteúdo). TTL curto e fixo de 60s
+  # é separado da tabela de tipos — absorve rajada de tool calls do mesmo
+  # turno sem servir "não achei nada" congelado por 15min. NÃO passa pelo
+  # `SearchApiCache.write` (que rejeita `[]` por contrato do F3c item 5 do
+  # brief): é gravação direta, fim único da WEBSEARCH_TOOL.
   EMPTY_CACHE_TTL   = 1.minute
   ALLOWED_TIME_RANGES = %w[day week month year].freeze
 
@@ -120,15 +125,37 @@ class WebSearchTool < ToolBase
     # ao router (specialty_first e cascata legado) e evitar divergência.
     origin = Thread.current[:cleitin_origin]
 
-    # Cache key inclui o provider para não servir um resultado SearXNG a uma
-    # query que pediu Tavily (cruzamento perigoso: a próxima chamada igual
-    # com mesmo type batia no cache e nunca pagava a API certa).
-    # Para type=auto/nil, provider é nil e o cache key fica igual ao atual.
-    cache_key = "web_search:#{Digest::SHA256.hexdigest("#{q}|#{limit}|#{tr}|#{provider}")}"
-    cached = Rails.cache.read(cache_key)
+    # F3c do plano-fase2 (30/08/2026): TTL por tipo∩time_range (plano D2).
+    # `SearchApiCache` é o único ponto que decide TTL e que grava; aqui só
+    # pedimos o read. A key inclui `provider` E `type` para não cruzar hit
+    # SearXNG vs pago (uma query com type=news nunca pode servir um hit
+    # que veio de Tavily num type anterior diferente).
+    cached = SearchApiCache.read(query: q, limit: limit, time_range: tr,
+                                 type: resolved_type, provider: provider)
     # `nil`, não `[]`: acerto de cache não mediu engine nenhum, e um `[]` aqui
     # afirmaria "nenhum caiu". Métrica ausente é nil, nunca zero.
     return success(cached).merge(unresponsive: nil) if cached
+
+    # Debounce de VAZIO (60s, chave separada). Absorve rajada do mesmo turno
+    # sem servir "não achei nada" congelado. NÃO é cache de conteúdo — é só
+    # debounce — por isso fica em chave própria fora do SearchApiCache.
+    # Exceção canônica D2 (plano-fase2, decisão do maestro 30/08): a tabela
+    # TTL do plano diz "vazio | 1 min" e o `SearchApiCache` rejeita `[]`,
+    # então a absorção de rajada fica aqui, em gravação direta da tool.
+    # F3c fail-open (D1-F3c-v5): `Rails.cache.read` direto, fora do envelope
+    # do SearchApiCache. Se o store explodir (Solid Cache lock, FileStore IO,
+    # Memcached down), o cache NUNCA bloqueia a busca — mesmo padrão (f) do
+    # SearchApiCache: trata como miss, segue para o fetch.
+    empty_hit =
+      begin
+        Rails.cache.read(empty_cache_key(q, limit, tr, resolved_type, provider))
+      rescue StandardError => e
+        Rails.logger.warn("[WebSearchTool] debounce read falhou: #{e.class}: #{e.message}")
+        nil
+      end
+    if empty_hit
+      return success([]).merge(unresponsive: nil)
+    end
 
     payload = fetch(q, limit, tr)
 
@@ -155,10 +182,14 @@ class WebSearchTool < ToolBase
           r.merge(content: truncate(r[:content]))
         end
         # Refinamento SOTA 5: o resultado do fallback passa pelo MESMO fluxo de
-        # cache do run() (a cache_key foi calculada antes do fetch). Gravamos
+        # cache do run() (a TTL/key foi calculada antes do fetch). Gravamos
         # aqui para que a próxima chamada igual acerte o cache e não gaste cota.
         # `unresponsive` reflete a falha do SearXNG quando houve (nil se fetch nil).
-        Rails.cache.write(cache_key, fallback_results, expires_in: CACHE_TTL)
+        # F3c: TTL derivado do tipo via SearchApiCache — Tavily (news=600s)
+        # não fica 15min congelado igual antes.
+        SearchApiCache.write(query: q, limit: limit, time_range: tr,
+                             type: resolved_type, provider: provider,
+                             payload: fallback_results)
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end
 
@@ -180,7 +211,11 @@ class WebSearchTool < ToolBase
         fallback_results = fallback[:results].first(limit).map do |r|
           r.merge(content: truncate(r[:content]))
         end
-        Rails.cache.write(cache_key, fallback_results, expires_in: CACHE_TTL)
+        # F3c: TTL derivado do tipo via SearchApiCache — auto=900s (15min),
+        # factual=10800s (3h) etc., conforme tabela do plano-fase2 D2.
+        SearchApiCache.write(query: q, limit: limit, time_range: tr,
+                             type: resolved_type, provider: provider,
+                             payload: fallback_results)
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end
     end
@@ -205,7 +240,23 @@ class WebSearchTool < ToolBase
                      "resultado devolvido — tente de novo em alguns minutos")
       end
 
-      Rails.cache.write(cache_key, [], expires_in: EMPTY_CACHE_TTL)
+      # F3c: vazio do SearXNG sem engine caída → debounce vazio de 60s
+      # (TTL curto, fixo). NÃO passa pelo SearchApiCache.write — este
+      # rejeita `[]` por contrato (item 5 do brief: "não cachear vazio
+      # (buscar de novo custa cota mas evita servir 'não existe'
+      # congelado)"). A gravação direta aqui serve só para absorver rajada
+      # do mesmo turno, não para servir cacheamento durável. A key inclui
+      # type+provider para não colidir com o cache de conteúdo principal.
+      # F3c fail-open (D1-F3c-v5): mesmo padrão do read acima. Se o store
+      # explodir aqui, NÃO derruba — o debounce vazio é absorvedor de rajada
+      # do mesmo turno; falhar em gravar só significa que a próxima rajada
+      # re-busca (aceitável). Lado oposto do SearchApiCache que tem envelope.
+      begin
+        Rails.cache.write(empty_cache_key(q, limit, tr, resolved_type, provider),
+                          [], expires_in: EMPTY_CACHE_TTL)
+      rescue StandardError => e
+        Rails.logger.warn("[WebSearchTool] debounce write falhou: #{e.class}: #{e.message}")
+      end
       return success([]).merge(unresponsive: unreachable)
     end
 
@@ -222,7 +273,11 @@ class WebSearchTool < ToolBase
     # externo NÃO passam pelo RelevanceGuard — ver comentário no SearchApiRouter
     # e no retorno de fallback acima: as APIs ranqueiam por relevância própria.)
     data = verdict.approved.first(limit)
-    Rails.cache.write(cache_key, data, expires_in: CACHE_TTL)
+    # F3c: TTL via SearchApiCache — news=600s, factual=10800s, entity/academic
+    # =86400s, code/auto=900s; time_range aperta nunca alarga (plano-fase2 D2).
+    SearchApiCache.write(query: q, limit: limit, time_range: tr,
+                         type: resolved_type, provider: provider,
+                         payload: data)
     success(data).merge(unresponsive: unreachable)
   end
 
@@ -230,6 +285,13 @@ class WebSearchTool < ToolBase
 
   def platform_query?(query)
     query.to_s.match?(PLATFORM_FALLBACK_BLOCK_PATTERN)
+  end
+
+  # Chave do debounce vazio (60s). Separada da chave do SearchApiCache
+  # porque este cache é só debounce, não cacheamento de conteúdo.
+  def empty_cache_key(query, limit, time_range, resolved_type, provider)
+    payload = "#{query}|#{limit}|#{time_range}|#{resolved_type}|#{provider}"
+    "web_search_empty:#{Digest::SHA256.hexdigest(payload)}"
   end
 
   def categories_for(query)
