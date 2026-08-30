@@ -15,14 +15,22 @@ class McpController < ActionController::API
   before_action :authenticate!
 
   def handle
+    # F3b (30/08/2026): o McpController é o portão que o McpServer.app (Rack)
+    # chama quando o cliente MCP executa `tools/call`. Setar `:cleitin_origin`
+    # aqui cobre TODA chamada MCP (web_search e qualquer outra tool que o
+    # cliente invoque via este endpoint). Chave distinta de `:cleitin_actor`
+    # (que o repo usa em outros caminhos como hash de auditoria/ACL). O
+    # ensure limpa para não vazar `:mcp` num próximo request servido pela
+    # MESMA thread do servidor (Puma com thread-pool reutiliza).
+    Thread.current[:cleitin_origin] = :mcp
     status, headers, corpo = McpServer.app.call(request.env)
-
     texto = +""
     corpo.each { |pedaco| texto << pedaco }
     corpo.close if corpo.respond_to?(:close)
-
     headers.each { |chave, valor| response.headers[chave] = valor unless chave.casecmp?("content-length") }
     render plain: texto, status: status, content_type: headers["content-type"] || "application/json"
+  ensure
+    Thread.current[:cleitin_origin] = nil
   end
 
   private

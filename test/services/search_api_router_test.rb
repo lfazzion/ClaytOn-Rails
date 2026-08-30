@@ -222,8 +222,8 @@ class SearchApiRouterTest < ActiveSupport::TestCase
       .with(:linkup, "rails", 5, anything)
       .returns({ ok: false, reason: "HTTP 500", retryable: false })
 
-    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup).returns(true).once
-    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup).once
+    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup, origin: nil).returns(true).once
+    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup, origin: nil).once
 
     out = SearchApiRouter.call(query: "rails", limit: 5)
     assert_nil out
@@ -238,8 +238,8 @@ class SearchApiRouterTest < ActiveSupport::TestCase
     stub_request(:post, "https://api.linkup.so/v1/search")
       .to_return(status: 500).then.to_return(status: 500)
 
-    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup).returns(true).once
-    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup).once
+    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup, origin: nil).returns(true).once
+    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup, origin: nil).once
 
     out = SearchApiRouter.call(query: "rails", limit: 5)
     assert_nil out
@@ -257,13 +257,70 @@ class SearchApiRouterTest < ActiveSupport::TestCase
         headers: { "Content-Type" => "application/json" }
       )
 
-    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup).returns(true).once
-    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup).never
+    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup, origin: nil).returns(true).once
+    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup, origin: nil).never
 
     out = SearchApiRouter.call(query: "rails", limit: 5)
     refute_nil out
     assert_equal "linkup", out[:engine]
     assert_equal 1, out[:results].size
+  end
+
+  # ── F3b D4: propagação de `origin:` do router até o envelope de quota ──────
+  # Garante que `SearchApiRouter.call(origin: :mcp)` propaga `:mcp` para o
+  # `reserve_quota_or_skip`. Esse é o elo crítico: sem ele, a métrica por
+  # origem (count_mcp) nunca é alimentada pelo MCP, e o piso do bot fica
+  # invisível para o dashboard F8.
+  #
+  # Estratégia: mocha stub no envelope privado (mesmo padrão dos testes F3a
+  # acima) para capturar o que é passado — sem gastar HTTP, sem AR real.
+  test "router propaga origin: :mcp para o envelope de reserva" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    stub_linkup_success("rails", [{ name: "R1", url: "https://r1.com", content: "c" }])
+
+    captured = nil
+    SearchApiRouter.stubs(:reserve_quota_or_skip).with do |provider, origin:|
+      captured = origin
+      true
+    end
+
+    SearchApiRouter.call(query: "rails", limit: 5, origin: :mcp)
+    assert_equal :mcp, captured, "router.call(origin: :mcp) deve repassar :mcp ao envelope"
+  end
+
+  # ── F3b D4: WebSearchTool lê Thread.current[:cleitin_origin] e propaga ─────
+  # Espelha o caminho MCP (McpController#handle seta :mcp) e o caminho bot
+  # (ChatSessionManager#ask seta :discord). O stub do router aqui captura o
+  # `origin:` que a tool passa, provando que a leitura do Thread.current
+  # está no caminho crítico. O caso ausente (Thread.current[:cleitin_origin]
+  # = nil) é o caller "sem origem" (legado / testes / outros).
+  test "WebSearchTool lê Thread.current[:cleitin_origin] e propaga ao router" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_linkup_success("rails", [{ name: "R1", url: "https://r1.com", content: "c" }])
+
+    captured = []
+    SearchApiRouter.stubs(:call).with do |**kwargs|
+      captured << kwargs[:origin]
+      true
+    end.returns(nil)
+
+    # Caso 1: ausente → nil
+    Thread.current[:cleitin_origin] = nil
+    WebSearchTool.new.execute(query: "rails")
+    assert_nil captured.last, "ausente: WebSearchTool deve passar origin=nil"
+
+    # Caso 2: :discord
+    Thread.current[:cleitin_origin] = :discord
+    WebSearchTool.new.execute(query: "rails")
+    assert_equal :discord, captured.last, "thread=:discord: WebSearchTool deve passar :discord"
+
+    # Caso 3: :mcp
+    Thread.current[:cleitin_origin] = :mcp
+    WebSearchTool.new.execute(query: "rails")
+    assert_equal :mcp, captured.last, "thread=:mcp: WebSearchTool deve passar :mcp"
+  ensure
+    Thread.current[:cleitin_origin] = nil
   end
 
   private

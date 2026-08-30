@@ -63,6 +63,13 @@ class ChatSessionManager
       with_scope_lock(scope.key) do
         Thread.current[:cleitin_actor] = { user_id: user_id, username: username }
         Thread.current[:cleitin_turn] = SecureRandom.hex(8)
+        # F3b (30/08/2026): o `ask` é o ÚNICO entrypoint do bot que executa
+        # tools via RubyLLM. Setar `:cleitin_origin = :discord` aqui cobre
+        # TODA chamada que o bot fizer (web_search e qualquer outra que
+        # passe pelo mesmo `Thread.current`). Chave distinta de `:cleitin_actor`
+        # (que é hash de auditoria/ACL) para não conflitar com a checagem
+        # existente em `profile_management_tools.rb:17`.
+        Thread.current[:cleitin_origin] = :discord
         inicio = Time.now
         Rails.logger.info "[ChatSessionManager] Iniciando ask — " \
                           "scope=#{scope.key} user=#{user_id} " \
@@ -116,6 +123,7 @@ class ChatSessionManager
         ensure
           Thread.current[:cleitin_actor] = nil
           Thread.current[:cleitin_turn] = nil
+          Thread.current[:cleitin_origin] = nil
         end
       end
     end
