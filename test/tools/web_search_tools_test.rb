@@ -46,7 +46,7 @@ class WebSearchToolsTest < ActiveSupport::TestCase
     assert_equal :success, WebSearchTool.new.execute(query: "activerecord")[:status]
   end
 
-  test "trunca content acima de 400 chars" do
+  test "trunca content acima de 200 chars (F1 payload magro)" do
     long = "a" * 1000
     stub_request(:get, "http://searxng:8080/search")
       .with(query: hash_including(format: "json"))
@@ -55,7 +55,8 @@ class WebSearchToolsTest < ActiveSupport::TestCase
         body:   { results: [{ "title" => "T", "url" => "u", "content" => long, "engine" => "e" }] }.to_json
       )
     result = WebSearchTool.new.execute(query: "x")
-    assert_operator result[:data].first[:content].length, :<=, 401
+    # F1 plano v2: CONTENT_MAX_CHARS 400→200. 200 chars + reticências = 201.
+    assert_operator result[:data].first[:content].length, :<=, 201
   end
 
   test "clampa limit no teto" do
@@ -66,7 +67,8 @@ class WebSearchToolsTest < ActiveSupport::TestCase
         body:   { results: Array.new(20) { |i| { "title" => i.to_s, "url" => "u#{i}", "content" => "c" } } }.to_json
       )
     result = WebSearchTool.new.execute(query: "x", limit: 999)
-    assert_operator result[:data].size, :<=, 10
+    # F1 plano v2 (30/08/2026): teto desce de 10 para 5.
+    assert_operator result[:data].size, :<=, 5
   end
 
   test "query vazia retorna error" do

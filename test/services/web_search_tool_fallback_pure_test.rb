@@ -237,7 +237,7 @@ class WebSearchToolFallbackPureTest < Minitest::Test
 
     assert_equal :success, res[:status]
     content = res[:data].first[:content]
-    assert_equal 401, content.length, "conteúdo deve ser truncado a 400 caracteres + reticências (401 chars)"
+    assert_equal 201, content.length, "conteúdo deve ser truncado a 200 caracteres + reticências (201 chars) — F1 payload magro"
     assert content.end_with?("…"), "conteúdo truncado deve terminar com reticências"
   end
 

@@ -13,6 +13,18 @@ class McpServerToolsTest < ActiveSupport::TestCase
     assert_equal %w[platform query], schema[:inputSchema][:required]
   end
 
+  # F2 do plano v2 (30/08/2026): a tool MCP `web_search` expoe o classificador
+  # `type` com enum fixo e `limit` com teto 5. Quem consome e o modelo do perfil,
+  # que le esses campos do schema. Travado aqui — se algum dia o enum perder um
+  # valor ou o teto subir, o modelo para de conseguir classificar / cota estoura.
+  test "web_search declara schema com type enum e limit maximum 5" do
+    schema = McpServer::Tools::WebSearch.to_h
+    assert_equal "web_search", schema[:name]
+    assert_equal %w[news entity academic factual code auto],
+                 schema[:inputSchema][:properties][:type][:enum]
+    assert_equal 5, schema[:inputSchema][:properties][:limit][:maximum]
+  end
+
   test "sucesso vira conteudo de texto com structuredContent e sem isError" do
     ::PlatformSearchTool.any_instance.stubs(:execute).returns(
       status: :success, data: { platform: "x", query: "EXM7777", count: 1, results: [{ "url" => "https://x.com/EXM7777/status/1" }] }

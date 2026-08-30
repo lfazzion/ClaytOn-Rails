@@ -21,22 +21,45 @@ module McpServer
         "ausência. Para conteúdo dentro do YouTube, Reddit ou X, use platform_search."
       )
 
-      # `additionalProperties: false` pelo mesmo motivo de `platform_search.rb`:
-      # argumento inventado tem que virar erro que o modelo lê, não -32603.
+      # Dois mecanismos INDEPENDENTES de validação do input_schema:
+      #
+      # (1) `additionalProperties: false` (JSON Schema) — rejeita chaves
+      # INVENTADAS (argumento que não existe no schema: `foo`, `typpe`, etc.).
+      # É erro estruturado que o modelo lê, não -32603 genérico.
+      #
+      # (2) `enum:` em `type` (e em `time_range`) — rejeita VALORES fora do
+      # conjunto permitido (ex.: `type: "blog"` quando o enum é
+      # news|entity|academic|factual|code|auto). É o outro mecanismo; não
+      # confundir com (1): chave errada vs valor errado na chave certa.
+      #
+      # F2 do plano v2 (30/08/2026): `type` é o classificador da query que o
+      # modelo do perfil lê do schema. Enum fixo: news|entity|academic|factual|
+      # code|auto. Default `auto` = comportamento legado (SearXNG → cascata
+      # padrão). `code` é a única saída que NÃO vai pra API paga: cai pra
+      # SearXNG local direto.
       input_schema(
         properties: {
           query: { type: "string", description: "O que procurar, 1-200 chars" },
-          limit: { type: "integer", minimum: 1, maximum: 10, description: "Máximo de resultados (padrão 5)" },
-          time_range: { type: "string", enum: %w[day week month year], description: "Recorte de tempo, opcional" }
+          limit: { type: "integer", minimum: 1, maximum: 5, description: "Máximo de resultados (padrão 5)" },
+          time_range: { type: "string", enum: %w[day week month year], description: "Recorte de tempo, opcional" },
+          type: {
+            type: "string",
+            enum: %w[news entity academic factual code auto],
+            default: "auto",
+            description:
+              "Tipo da query. news|entity|academic|factual escolhem o provedor da API paga (custa cota); " \
+              "code = SearXNG local, nunca pago; auto (padrão) = comportamento legado (SearXNG → fallback)."
+          }
         },
         required: %w[query],
         additionalProperties: false
       )
 
-      def self.call(query:, limit: nil, time_range: nil, server_context: nil)
+      def self.call(query:, limit: nil, time_range: nil, type: nil, server_context: nil)
         argumentos = { query: query }
         argumentos[:limit] = limit if limit
         argumentos[:time_range] = time_range if time_range
+        argumentos[:type] = type if type
         Responder.from(::WebSearchTool.new.execute(**argumentos))
       end
     end

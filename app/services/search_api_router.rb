@@ -56,7 +56,10 @@ class SearchApiRouter
   # Timeout idêntico ao do WebSearchTool (Spec 1.a).
   OPEN_TIMEOUT = 5
   READ_TIMEOUT = 20
-  MAX_RESULTS  = 10
+  # F1 do plano v2 (30/08/2026): teto do router desce a 5 (era 10), mesmo
+  # teto do WebSearchTool. Camada única no cleitin: clamp em UM lugar só,
+  # repetido é divergência esperando para acontecer.
+  MAX_RESULTS  = 5
 
   # Mapa de time_range (day/week/month/year) → dias para recuar a data inicial.
   TIME_RANGE_DAYS = { "day" => 1, "week" => 7, "month" => 30, "year" => 365 }.freeze
@@ -87,8 +90,29 @@ class SearchApiRouter
   # ── API pública (usada pelo WebSearchTool#run) ─────────────────────────────
 
   # Tenta as APIs externas em ordem de fallback.
+  #
+  # Contrato (decisão do maestro, 30/08/2026, plano v2 F2 — alinha a
+  # comportamento da tool com o que o plano promete):
+  #
+  # `specialty:` presente e HABILITADO (provider em PROVIDERS + provider com
+  #   chave em ENV + !quota_exceeded?):
+  #     UMA tentativa. Sucesso → retorna. Fail OU 200-vazio → retorna nil
+  #     (NÃO cascata; a cota do preferred já foi cobrada no attempt).
+  #
+  # `specialty:` presente mas NÃO habilitado (sem chave / cota zerada /
+  #   valor fora do PROVIDERS):
+  #     Degrada para cascata padrão (linkup → exa → tavily), idêntica ao
+  #     caminho sem specialty. Comportamento defensivo: o caller pediu um
+  #     provedor que não está disponível, então cai no legado.
+  #
+  # `specialty:` ausente (`auto`):
+  #     Fluxo legado intacto: cascata padrão (linkup → exa → tavily), com a
+  #     regra de especialidade por regex (`specialty_for(query)`) que filtra
+  #     a fila após 200-vazio (papers → exa, lookup → tavily, factual
+  #     genérica → para no linkup).
+  #
   # @return [Hash, nil] { results:, engine:, cost: } em sucesso, ou nil se todas falharem.
-  def self.call(query:, limit: 5, time_range: nil, today: current_date)
+  def self.call(query:, limit: 5, time_range: nil, today: current_date, specialty: nil)
     providers = ordered_providers
     return nil if providers.empty? # sem nenhuma chave → router desligado (Spec 1.d)
 
@@ -97,11 +121,50 @@ class SearchApiRouter
     reasons = []
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
+    # ── Caminho A: specialty habilitado → UMA tentativa, sem cascata ─────────
+    # Essa é a diferença material do contrato: se o caller disse QUAL provedor
+    # usar (via `type:` do schema), só esse provedor paga. Se ele falhar ou
+    # devolver vazio, a cota já foi cobrada no attempt — chamar outro seria
+    # gastar cota fora do tipo escolhido (violação do plano v2 F2).
+    if specialty_enabled?(specialty, providers)
+      result, reason = attempt(specialty, query, limit, tr, today)
+      elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
+
+      if result && result[:results].any?
+        Rails.logger.info(
+          "[SearchApiRouter] #{specialty} (specialty) serviu a busca por #{query.inspect}" \
+          " (custo: #{result[:cost]}, latência: #{elapsed_ms}ms)"
+        )
+        return result
+      elsif result
+        # 200 vazio no specialty habilitado: miss. NÃO cascata — retorna nil
+        # e o caller (WebSearchTool) cai no erro "busca indisponível".
+        reasons << "#{specialty}: 200 vazio (miss de specialty)"
+        Rails.logger.warn("[SearchApiRouter] specialty #{specialty} miss para #{query.inspect}; sem cascata")
+      else
+        reasons << "#{specialty}: #{reason}"
+        Rails.logger.warn("[SearchApiRouter] specialty #{specialty} falhou para #{query.inspect}: #{reason}; sem cascata")
+      end
+
+      Rails.logger.warn("[SearchApiRouter] specialty habilitado falhou para #{query.inspect}: #{reasons.join(' | ')}")
+      return nil
+    end
+
+    # ── Caminho B: specialty ausente OU não habilitado → cascata padrão ──────
+    # Mesmo se o caller pediu um specialty que não estava habilitado, caímos
+    # aqui e aplicamos a cascata padrão (linkup → exa → tavily) com a regra
+    # de regex (`specialty_for(query)`) que decide se o 200-vazio de um
+    # provider deve avançar para outro de especialidade compatível.
     query_specialty = specialty_for(query)
+
+    # Specialty explícito que NÃO está habilitado NÃO interfere na cascata
+    # padrão (o caller pediu, mas o provider não estava disponível). A
+    # cascata segue a ordem de fallback por chave presente.
     providers_to_try = providers.dup
 
     until providers_to_try.empty?
       provider = providers_to_try.shift
+
       next if quota_exceeded?(provider) # cota do mês esgotada → pula direto
 
       result, reason = attempt(provider, query, limit, tr, today)
@@ -114,8 +177,9 @@ class SearchApiRouter
         )
         return result
       elsif result
-        # 200 com results=[] -> miss da especialidade (cota já foi incrementada no attempt).
-        # Continua a cascata para o próximo provider SÓ SE a query casar com a especialidade do próximo.
+        # 200 com results=[] -> miss. Avança a cascata SÓ SE a query casar
+        # com a especialidade do próximo (regex `query_specialty`). Sem
+        # match: para a cascata (factual genérico / type=auto sem regex).
         if query_specialty
           providers_to_try.select! { |p| p == query_specialty }
         else
@@ -130,6 +194,22 @@ class SearchApiRouter
 
     Rails.logger.warn("[SearchApiRouter] todas as APIs falharam para #{query.inspect}: #{reasons.join(' | ')}")
     nil
+  end
+
+  # ── Helpers do contrato de specialty ────────────────────────────────────────
+
+  # `specialty:` só está habilitado se: (1) for um provider válido da
+  # cascata paga, (2) tiver chave em ENV (provider apareceu em
+  # `ordered_providers`), e (3) NÃO estiver com cota zerada do mês.
+  # Sem essas três condições, o caminho A é pulado e o B (cascata padrão)
+  # entra — degrada graciosamente.
+  def self.specialty_enabled?(specialty, providers)
+    return false if specialty.nil?
+    return false unless PROVIDERS.include?(specialty)
+    return false unless providers.include?(specialty)
+    return false if quota_exceeded?(specialty)
+
+    true
   end
 
   # ── Providers habilitados (Spec 1.d) ───────────────────────────────────────
@@ -318,7 +398,11 @@ class SearchApiRouter
       uri = URI("https://api.exa.ai/search")
       body = {
         query: query, type: "auto", numResults: limit,
-        contents: { highlights: true }
+        # `num_sentences: 2` (F1 plano v2): Exa sem teto por highlight pode
+        # devolver parágrafos inteiros, fugindo do CONTENT_MAX_CHARS=200 do
+        # WebSearchTool. Travado em 2 frases = bem abaixo do teto de 200
+        # chars e mata o vetor de UGC comprido (D4).
+        contents: { highlights: { num_sentences: 2 } }
       }
       body[:startPublishedDate] = time_filter if time_filter
       req = Net::HTTP::Post.new(uri)
