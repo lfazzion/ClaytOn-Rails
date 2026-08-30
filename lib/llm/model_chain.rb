@@ -67,6 +67,7 @@ module Llm
       poolside: "POOLSIDE_API_KEY",
       openrouter: "OPENROUTER_API_KEY",
       nvidia: "NVIDIA_API_KEY",
+      agnes: "AGNES_API_KEY",
       gemini: "GOOGLE_AI_API_KEY"
     }.freeze
 
@@ -80,6 +81,7 @@ module Llm
       poolside: [],
       openrouter: [],
       nvidia: [],
+      agnes: %w[none low medium high],
       gemini: []
     }.freeze
 

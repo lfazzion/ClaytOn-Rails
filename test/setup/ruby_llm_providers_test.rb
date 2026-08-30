@@ -20,7 +20,7 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
   # rotas que o YAML declara, para que TODOS os elos sejam montados e
   # verificados — a asserção fica mais forte, não mais fraca. `links` não é
   # memoizado (model_chain.rb:74-98), então o ENV vale na hora da chamada.
-  CHAVES_DE_ROTA = %w[NOUS_API_KEY POOLSIDE_API_KEY OPENROUTER_API_KEY].freeze
+  CHAVES_DE_ROTA = %w[NOUS_API_KEY POOLSIDE_API_KEY OPENROUTER_API_KEY AGNES_API_KEY].freeze
   VALOR_FALSO = "chave-teste-invalida"
 
   # Redefine uma constante de classe durante o bloco e restaura no ensure.
@@ -176,6 +176,64 @@ class RubyLlmProvidersTest < ActiveSupport::TestCase
     end
     assert RubyLLM.models.find("gemma-4-31b-it"),
            "gemma-4-31b-it (registrado a mao no Llm::ModelRegistry) nao resolve"
+  end
+
+  # O provider agnes é registrado no boot (config/initializers/ruby_llm.rb),
+  # assim como nous/poolside. Sem registro, RubyLLM.chat com provider: :agnes
+  # levantaria erro de provedor desconhecido em tempo de execução.
+  test "o provider agnes está registrado na gem após o boot" do
+    assert_equal Llm::Providers::Agnes, RubyLLM::Provider.providers[:agnes]
+  end
+
+  test "registrar o provider agnes criou os acessores de configuração" do
+    # Provider.register chama Configuration.register_provider_options por dentro.
+    assert_respond_to RubyLLM.config, :agnes_api_key
+    assert_respond_to RubyLLM.config, :agnes_api_base
+  end
+
+  test "configuration_requirements do agnes exige só a chave" do
+    assert_equal %i[agnes_api_key agnes_api_base], Llm::Providers::Agnes.configuration_options
+    assert_equal %i[agnes_api_key], Llm::Providers::Agnes.configuration_requirements
+  end
+
+  # O initializer lê AGNES_API_KEY no RubyLLM.configure. Sem a chave, a
+  # configuração fica nil e a ModelChain corta o elo agnes (chave ausente
+  # encurta a cadeia). Com a chave, o elo entra.
+  test "AGNES_API_KEY é lida no configure e o fallback agnes entra na cadeia" do
+    agnes_key_antigo = RubyLLM.config.agnes_api_key
+    anteriores = CHAVES_DE_ROTA.to_h { |nome| [nome, ENV.key?(nome) ? ENV[nome] : :ausente] }
+    CHAVES_DE_ROTA.each { |nome| ENV[nome] = VALOR_FALSO if ENV[nome].to_s.strip.empty? }
+    RubyLLM.config.agnes_api_key = ENV["AGNES_API_KEY"]
+    begin
+      yaml = <<~YAML
+        version: 1
+        chat:
+          primary:
+            label: nous
+            provider: nous
+            model: tencent/hy3:free
+            effort: none
+            params:
+              tags: ["user=cleitin-bot"]
+          fallback:
+            label: agnes-25-flash
+            provider: agnes
+            model: agnes-2.5-flash
+            effort: none
+            params: null
+      YAML
+      com_yaml(yaml) do
+        links = Llm::ModelChain.links
+        assert_equal 2, links.size, "com primary nous e fallback agnes, ambas as chaves presentes montam 2 elos"
+        assert_equal :agnes, links.last.provider
+        assert_equal "agnes-2.5-flash", links.last.model
+      end
+    ensure
+      anteriores.each do |nome, valor|
+        valor == :ausente ? ENV.delete(nome) : ENV[nome] = valor
+      end
+      RubyLLM.config.agnes_api_key = agnes_key_antigo
+    end
   end
 
   test "mensagem de sistema sai com o papel 'system', não 'developer'" do

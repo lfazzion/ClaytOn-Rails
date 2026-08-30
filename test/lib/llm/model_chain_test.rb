@@ -9,7 +9,8 @@ class Llm::ModelChainTest < ActiveSupport::TestCase
   # Chaves que model_chain lê de ENV. Todas apagadas por padrão; o teste liga o
   # que o cenário exige. Troca ENV e devolve ao que era, inclusive no erro.
   ENV_KEYS = %w[NOUS_API_KEY OPENROUTER_API_KEY POOLSIDE_API_KEY NVIDIA_API_KEY
-                GOOGLE_AI_API_KEY DISCORD_EFFORT_NOUS DISCORD_POOLSIDE_THINKING].freeze
+                GOOGLE_AI_API_KEY AGNES_API_KEY
+                DISCORD_EFFORT_NOUS DISCORD_POOLSIDE_THINKING].freeze
 
   def com_env(valores)
     anteriores = ENV_KEYS.index_with { |chave| ENV[chave] }
@@ -372,6 +373,105 @@ class Llm::ModelChainTest < ActiveSupport::TestCase
         assert_equal :poolside, resumidor.provider
         assert_not_equal Llm::ModelChain.primary.model, resumidor.model
         assert_equal({ chat_template_kwargs: { enable_thinking: false } }, resumidor.params)
+      end
+    end
+  end
+
+  # CASO — fallback AGNES válido (chave presente) entra na cadeia como segundo elo.
+  # O modelo agnes-2.5-flash raciocina POR PADRÃO; com effort: none o conteúdo vem
+  # preenchido (medido em probe real). Espelha o caso do fallback openrouter.
+  test "fallback agnes com chave presente entra como segundo elo" do
+    yaml = <<~YAML
+      version: 1
+      chat:
+        primary:
+          label: nous
+          provider: nous
+          model: tencent/hy3:free
+          effort: none
+          params:
+            tags: ["user=cleitin-bot"]
+        fallback:
+          label: agnes-25-flash
+          provider: agnes
+          model: agnes-2.5-flash
+          effort: none
+          params: null
+    YAML
+    com_env("NOUS_API_KEY" => "sk-n", "AGNES_API_KEY" => "sk-agnes") do
+      com_yaml(yaml) do
+        links = Llm::ModelChain.links
+        assert_equal 2, links.size, "primary + fallback agnes válido montam 2 elos"
+        assert_equal %w[nous agnes-25-flash], links.map(&:label)
+        fb = links.last
+        assert_equal :agnes, fb.provider
+        assert_equal "agnes-2.5-flash", fb.model
+        assert_equal "none", fb.effort, "effort none é aceito pelo agnes (medido)"
+      end
+    end
+  end
+
+  # CASO — sem chave AGNES o elo é removido e a cadeia não quebra (padrão
+  # "chave ausente encurta" já testado para os outros providers). O primary
+  # continua montado e a cadeia fica só com ele.
+  test "fallback agnes sem chave é removido e a cadeia não quebra" do
+    yaml = <<~YAML
+      version: 1
+      chat:
+        primary:
+          label: nous
+          provider: nous
+          model: tencent/hy3:free
+          effort: none
+          params:
+            tags: ["user=cleitin-bot"]
+        fallback:
+          label: agnes-25-flash
+          provider: agnes
+          model: agnes-2.5-flash
+          effort: none
+          params: null
+    YAML
+    # Só NOUS configurado; o fallback agnes sem AGNES_API_KEY some.
+    com_env("NOUS_API_KEY" => "sk-n") do
+      com_yaml(yaml) do
+        links = Llm::ModelChain.links
+        assert_equal 1, links.size, "fallback agnes sem chave é cortado"
+        assert_equal %w[nous], links.map(&:label)
+        assert_equal "tencent/hy3:free", links.first.model
+      end
+    end
+
+    # NENHUMA chave: cadeia vazia (nem o agnes sem credencial mente).
+    com_env({}) do
+      com_yaml(yaml) do
+        assert_empty Llm::ModelChain.links, "sem nenhuma credencial, cadeia fica vazia"
+      end
+    end
+  end
+
+  # CASO — effort inválido do agnes é rejeitado e vira nil (não dá HTTP 400 em
+  # toda chamada do elo). Valor fora do vocabulário medido cai para nil COM log.
+  test "agnes com effort inválido é rejeitado e vira nil" do
+    yaml = <<~YAML
+      version: 1
+      chat:
+        primary:
+          label: agnes-25-flash
+          provider: agnes
+          model: agnes-2.5-flash
+          effort: ultra-max
+          params: null
+        fallback: null
+    YAML
+    com_env("AGNES_API_KEY" => "sk-agnes") do
+      com_yaml(yaml) do
+        avisos = []
+        Rails.logger.stubs(:warn).with { |m| avisos << m.to_s; true }
+        primario = Llm::ModelChain.primary
+        assert_equal :agnes, primario.provider
+        assert_nil primario.effort, "effort inválido do agnes (fora do vocabulário) vira nil"
+        assert(avisos.any? { |m| m =~ /não é suportado pelo provider :agnes/ }, "deve logar o effort inválido")
       end
     end
   end
