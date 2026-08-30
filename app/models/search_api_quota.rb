@@ -33,6 +33,12 @@ class SearchApiQuota < ApplicationRecord
   # leitura + gravação, evitando corrida de incremento concorrente).
   # Em caso de corrida no find_or_create_by (RecordNotUnique), recupera o
   # registro criado concorrentemente sem perder sucesso.
+  #
+  # NOTA F3a: `increment` foi mantido por compatibilidade com
+  # test/services/search_api_quota_test.rb (minitest puro sem Rails) e com
+  # `SearchApiRouter.increment_quota` (helper público fail-open). O caminho
+  # NOVO do router usa `reserve_quota!` para fundir check+increment numa
+  # única transação atômica (corrige o TOCTOU do E10).
   def self.increment(api_name, month: current_month)
     rec = begin
       find_or_create_by(api_name: api_name, month: month) do |r|
@@ -43,6 +49,70 @@ class SearchApiQuota < ApplicationRecord
     end
     rec.with_lock do
       rec.increment!(:count)
+    end
+  end
+
+  # ── F3a: reserva atômica de quota ──────────────────────────────────────────
+  # Funde `exceeded?` + `increment` numa única transação atômica para fechar
+  # a janela TOCTOU do E10: dois `with_lock` separados davam espaço para uma
+  # thread passar no check e a outra também passar antes do increment gravar.
+  #
+  # Semântica:
+  #   - Abre transação + `with_lock` na linha (api_name, month) (cria se não
+  #     existir, com count=0).
+  #   - Lê count, compara com ceiling. Se count >= ceiling → retorna false
+  #     SEM incrementar. O caller decide o que fazer (pular provedor).
+  #   - Senão → increment!(:count), retorna true.
+  #
+  # Em caso de corrida na criação concorrente (RecordNotUnique entre o
+  # find_or_create_by de uma transação e a outra), recupera o registro já
+  # criado pela thread rival e re-tenta o lock — análogo ao `increment`
+  # legado.
+  #
+  # @return [Boolean] true se reservou, false se teto atingido.
+  def self.reserve_quota!(api_name, ceiling:, month: current_month)
+    transaction do
+      rec = nil
+      begin
+        rec = find_or_create_by(api_name: api_name, month: month) do |r|
+          r.count = 0
+        end
+      rescue ActiveRecord::RecordNotUnique
+        # Concorrente acabou de criar a linha entre o nosso find e o create.
+        # `retry` re-executa o bloco begin..rescue; o find_or_create_by vai
+        # agora encontrar a row já criada.
+        rec = find_by(api_name: api_name, month: month) || retry
+      end
+
+      rec.with_lock do
+        if rec.count >= ceiling
+          false
+        else
+          rec.increment!(:count)
+          true
+        end
+      end
+    end
+  end
+
+  # Reverte UM incremento feito por `reserve_quota!`. Noop silencioso se a
+  # contagem já está em 0 (não baixa para negativo — protege contra
+  # rollback duplicado em caso de retry/HTTP error duplo).
+  #
+  # @return [Integer] count resultante após o rollback (ou o valor atual se noop).
+  def self.rollback_quota!(api_name, month: current_month)
+    return 0 unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
+
+    rec = find_by(api_name: api_name, month: month)
+    return 0 unless rec
+
+    rec.with_lock do
+      if rec.count.positive?
+        rec.decrement!(:count)
+        rec.count
+      else
+        rec.count
+      end
     end
   end
 end
