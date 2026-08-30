@@ -91,13 +91,25 @@ class SearchApiRouter
 
   # Tenta as APIs externas em ordem de fallback.
   #
-  # F2 do plano v2 (30/08/2026): `specialty:` é o provider preferencial vindo
-  # do WebSearchTool (mapeamento type → provider, mesma tabela do schema MCP).
-  # Quando presente e habilitado (chave + cota), o provedor é tentado PRIMEIRO;
-  # se ele servir com resultados → retorna; se der 200-vazio OU falhar → cai
-  # na cascata padrão (linkup → exa → tavily) DESCONTANDO o specialty já
-  # tentado (cota já cobrada no attempt). Specialty desconhecido ou sem
-  # chave/cota → degrada para cascata padrão sem erro.
+  # Contrato (decisão do maestro, 30/08/2026, plano v2 F2 — alinha a
+  # comportamento da tool com o que o plano promete):
+  #
+  # `specialty:` presente e HABILITADO (provider em PROVIDERS + provider com
+  #   chave em ENV + !quota_exceeded?):
+  #     UMA tentativa. Sucesso → retorna. Fail OU 200-vazio → retorna nil
+  #     (NÃO cascata; a cota do preferred já foi cobrada no attempt).
+  #
+  # `specialty:` presente mas NÃO habilitado (sem chave / cota zerada /
+  #   valor fora do PROVIDERS):
+  #     Degrada para cascata padrão (linkup → exa → tavily), idêntica ao
+  #     caminho sem specialty. Comportamento defensivo: o caller pediu um
+  #     provedor que não está disponível, então cai no legado.
+  #
+  # `specialty:` ausente (`auto`):
+  #     Fluxo legado intacto: cascata padrão (linkup → exa → tavily), com a
+  #     regra de especialidade por regex (`specialty_for(query)`) que filtra
+  #     a fila após 200-vazio (papers → exa, lookup → tavily, factual
+  #     genérica → para no linkup).
   #
   # @return [Hash, nil] { results:, engine:, cost: } em sucesso, ou nil se todas falharem.
   def self.call(query:, limit: 5, time_range: nil, today: current_date, specialty: nil)
@@ -109,39 +121,49 @@ class SearchApiRouter
     reasons = []
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-    query_specialty = specialty_for(query)
-    providers_to_try = providers.dup
+    # ── Caminho A: specialty habilitado → UMA tentativa, sem cascata ─────────
+    # Essa é a diferença material do contrato: se o caller disse QUAL provedor
+    # usar (via `type:` do schema), só esse provedor paga. Se ele falhar ou
+    # devolver vazio, a cota já foi cobrada no attempt — chamar outro seria
+    # gastar cota fora do tipo escolhido (violação do plano v2 F2).
+    if specialty_enabled?(specialty, providers)
+      result, reason = attempt(specialty, query, limit, tr, today)
+      elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
-    # F2: specialty explícito do caller (type→provider do schema MCP).
-    # Se ele existir na cascata padrão E tiver chave, vai PRIMEIRO.
-    # Se não existir ou não tiver chave, degrada para cascata padrão sem erro.
-    preferred = nil
-    if specialty && PROVIDERS.include?(specialty) && providers.include?(specialty)
-      preferred = specialty
-      # Specialty explícito sobrepõe a classificação por regex: o caller já
-      # decidiu, não chamamos o mesmo provedor duas vezes no `miss`.
-      query_specialty = nil if query_specialty == specialty
+      if result && result[:results].any?
+        Rails.logger.info(
+          "[SearchApiRouter] #{specialty} (specialty) serviu a busca por #{query.inspect}" \
+          " (custo: #{result[:cost]}, latência: #{elapsed_ms}ms)"
+        )
+        return result
+      elsif result
+        # 200 vazio no specialty habilitado: miss. NÃO cascata — retorna nil
+        # e o caller (WebSearchTool) cai no erro "busca indisponível".
+        reasons << "#{specialty}: 200 vazio (miss de specialty)"
+        Rails.logger.warn("[SearchApiRouter] specialty #{specialty} miss para #{query.inspect}; sem cascata")
+      else
+        reasons << "#{specialty}: #{reason}"
+        Rails.logger.warn("[SearchApiRouter] specialty #{specialty} falhou para #{query.inspect}: #{reason}; sem cascata")
+      end
+
+      Rails.logger.warn("[SearchApiRouter] specialty habilitado falhou para #{query.inspect}: #{reasons.join(' | ')}")
+      return nil
     end
+
+    # ── Caminho B: specialty ausente OU não habilitado → cascata padrão ──────
+    # Mesmo se o caller pediu um specialty que não estava habilitado, caímos
+    # aqui e aplicamos a cascata padrão (linkup → exa → tavily) com a regra
+    # de regex (`specialty_for(query)`) que decide se o 200-vazio de um
+    # provider deve avançar para outro de especialidade compatível.
+    query_specialty = specialty_for(query)
+
+    # Specialty explícito que NÃO está habilitado NÃO interfere na cascata
+    # padrão (o caller pediu, mas o provider não estava disponível). A
+    # cascata segue a ordem de fallback por chave presente.
+    providers_to_try = providers.dup
 
     until providers_to_try.empty?
       provider = providers_to_try.shift
-
-      # Enquanto o specialty preferencial ainda está na fila, FILTRA para ele
-      # apenas (descontando os que vêm antes, cuja vez já passou).
-      # Quando o specialty sai da fila (turno anterior), a cascata padrão
-      # inteira entra — incluindo o próprio specialty? NÃO: ele já foi
-      # tentado (cota cobrada). Removemos ele.
-      if preferred
-        if provider == preferred
-          # OK, tenta o specialty
-        else
-          next # ignora outros enquanto preferred não foi tentado
-        end
-      elsif specialty == provider
-        # Specialty já tentado em turno anterior (deu certo/miss/fail).
-        # Não chamamos de novo — cota já cobrada no attempt.
-        next
-      end
 
       next if quota_exceeded?(provider) # cota do mês esgotada → pula direto
 
@@ -155,8 +177,9 @@ class SearchApiRouter
         )
         return result
       elsif result
-        # 200 com results=[] -> miss da especialidade (cota já foi incrementada no attempt).
-        # Continua a cascata para o próximo provider SÓ SE a query casar com a especialidade do próximo.
+        # 200 com results=[] -> miss. Avança a cascata SÓ SE a query casar
+        # com a especialidade do próximo (regex `query_specialty`). Sem
+        # match: para a cascata (factual genérico / type=auto sem regex).
         if query_specialty
           providers_to_try.select! { |p| p == query_specialty }
         else
@@ -167,19 +190,26 @@ class SearchApiRouter
         reasons << "#{provider}: #{reason}"
         Rails.logger.warn("[SearchApiRouter] #{provider} falhou para #{query.inspect}: #{reason}")
       end
-
-      # Specialty preferencial JÁ FOI tentado neste turno (serviu/miss/fail):
-      # libera cascata padrão e remove o specialty da fila para não repetir
-      # (cota já cobrada). Mesmo se o resultado foi sucesso, este return já
-      # saiu do loop — então chegamos aqui só em miss/fail.
-      if preferred == provider
-        preferred = nil
-        providers_to_try.reject! { |p| p == provider }
-      end
     end
 
     Rails.logger.warn("[SearchApiRouter] todas as APIs falharam para #{query.inspect}: #{reasons.join(' | ')}")
     nil
+  end
+
+  # ── Helpers do contrato de specialty ────────────────────────────────────────
+
+  # `specialty:` só está habilitado se: (1) for um provider válido da
+  # cascata paga, (2) tiver chave em ENV (provider apareceu em
+  # `ordered_providers`), e (3) NÃO estiver com cota zerada do mês.
+  # Sem essas três condições, o caminho A é pulado e o B (cascata padrão)
+  # entra — degrada graciosamente.
+  def self.specialty_enabled?(specialty, providers)
+    return false if specialty.nil?
+    return false unless PROVIDERS.include?(specialty)
+    return false unless providers.include?(specialty)
+    return false if quota_exceeded?(specialty)
+
+    true
   end
 
   # ── Providers habilitados (Spec 1.d) ───────────────────────────────────────
