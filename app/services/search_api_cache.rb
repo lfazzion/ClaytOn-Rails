@@ -35,9 +35,22 @@ require "digest"
 #
 # (c) Cache de erro NÃO grava (mantido do código atual). O brief pediu
 #     "NUNCA cachear erro/falha; cachear só sucesso". `write` rejeita
-#     `payload` que seja Hash `{ok: false, results: []}` (envelope
-#     produzido quando o router entrega `ok=false`). Qualquer outro Hash
-#     sem `ok: true` é tratado conservadoramente como erro.
+#     `payload` Hash cujo campo `ok` seja ausente, `nil` ou `false` —
+#     i.e., "sem ok: true explícito" = erro conservador. A tool hoje
+#     manda lista de hashes (cache de conteúdo); o envelope `{ok: false,
+#     results: []}` é a forma que o router sinaliza falha, e o
+#     `{ok: true, results: [...]}` que ele sinaliza sucesso também cai
+#     na malha conservadora por não ser uma lista. Esse é o tradeoff
+#     do fail-closed conservador: qualquer formato não-lista que não
+#     traga `ok: true` explícito é descartado.
+#
+# (f) Fail-open do STORE: `read`/`write` engolem `StandardError` do
+#     `Rails.cache` (Solid Cache lock/corrupt, FileStore IO, Memcached
+#     down). `read` devolve `nil`, `write` devolve `false` — cache NUNCA
+#     bloqueia a busca. Padrão de referência: `search_api_router.rb:405-411`.
+#     Importante porque `WebSearchTool#run` chama esses métodos no caminho
+#     quente — um erro de store propagado derruba a busca inteira e viola
+#     o contrato "cache NUNCA bloqueia a busca" (decisão F3c).
 #
 # (d) Key inclui `provider` para NÃO cruzar hit SearXNG vs pago (decisão
 #     do plano D2: "Key inclui `provider` **e** `type`"). Provider nil
@@ -109,13 +122,24 @@ class SearchApiCache
   end
 
   # Lê do cache. Retorna o payload ou nil se ausente/expirado.
+  # Fail-open: erro de `Rails.cache` (Solid Cache lock, FileStore IO,
+  # Memcached down) é logado e retorna nil — cache NUNCA bloqueia a busca.
   def self.read(query:, limit:, time_range:, type:, provider:)
     key = key_for(query: query, limit: limit, time_range: time_range, type: type, provider: provider)
     Rails.cache.read(key)
+  rescue StandardError => e
+    Rails.logger.warn("[SearchApiCache] read falhou para key=#{key}: #{e.class}: #{e.message}")
+    nil
   end
 
-  # Grava no cache SOMENTE sucesso (lista não vazia OU hash {ok: true}).
-  # Retorna true se gravou, false se rejeitado (vazio / nil / erro).
+  # Grava no cache SOMENTE sucesso (lista não vazia; hash com `ok: true`
+  # explícito). Retorna true se gravou, false se rejeitado (vazio / nil /
+  # erro / falha do store).
+  #
+  # Fail-open do STORE: `Rails.cache.write` pode levantar (Solid Cache lock,
+  # corrupt file, Memcached down). O envelope engole e devolve `false` —
+  # a busca segue sem cache, nunca propaga exceção de infraestrutura para
+  # `WebSearchTool#run`.
   #
   # A WEBSEARCH_TOOL chama isso com o array normalizado (lista de hashes
   # {title:, url:, content:, engine:}). O router, se chamado em algum ponto
@@ -129,6 +153,9 @@ class SearchApiCache
     key = key_for(query: query, limit: limit, time_range: time_range, type: type, provider: provider)
     Rails.cache.write(key, payload, expires_in: ttl)
     true
+  rescue StandardError => e
+    Rails.logger.warn("[SearchApiCache] write falhou para key=#{key}: #{e.class}: #{e.message}")
+    false
   end
 
   # ── Helpers internos ───────────────────────────────────────────────────────
@@ -144,8 +171,14 @@ class SearchApiCache
     payload.nil? || (payload.respond_to?(:empty?) && payload.empty?)
   end
 
-  # envelope de erro (`ok: false`) → não grava (decisão F3c item 1).
+  # envelope de erro (Hash sem `ok: true` explícito) → não grava
+  # (decisão F3c item 1; alinhar com o comentário (c) da classe).
+  # Cobre `{ok: false}`, `{ok: nil}` e `{ok: ausente}` — tudo que não
+  # traga `ok: true` explícito é tratado como erro conservador.
+  # Lista de hashes (cache de conteúdo da tool) não é Hash e passa.
   def self.error_envelope?(payload)
-    payload.is_a?(Hash) && payload.key?(:ok) && payload[:ok] == false
+    return false unless payload.is_a?(Hash)
+
+    payload[:ok] != true
   end
 end

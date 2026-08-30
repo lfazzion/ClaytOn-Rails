@@ -128,19 +128,54 @@ class SearchApiCacheRailsTest < ActiveSupport::TestCase
   end
 
   # ── Cache rejeita vazio (não vaza para o SearchApiCache de conteúdo) ──────
+  # type="auto" e não `type: nil`: a `WebSearchTool` resolve type fora do
+  # enum para "auto" (defesa da linha 121 de web_search_tools.rb) — e o
+  # `SearchApiCache.read` precisa ler com a mesma chave que o `write`
+  # usaria. `type: nil` ficaria em chave DIFERENTE da que o `write` gravou
+  # (TTL=piso 60s mas o `key_for` rotula diferente), falso-verde de
+  # "cache rejeitou". type="auto" é o que a tool de fato passa.
   test "SearchApiCache.read não encontra vazio (vazio fica só no debounce)" do
     stub_request(:get, /searxng:8080\/search/)
       .to_return(
         status: 200,
-        body: { results: [] }.to_json,
-        headers: { "Content-Type" => "application/json" }
+        body: { results: [] }.to_json
       )
 
     WebSearchTool.new.execute(query: "vai-vazio")
 
     # SearchApiCache.read deve retornar nil — vazio NÃO é gravado lá.
     assert_nil SearchApiCache.read(query: "vai-vazio", limit: 5, time_range: nil,
-                                   type: nil, provider: nil),
+                                   type: "auto", provider: nil),
                "SearchApiCache rejeita payload=[]; vazio fica só no debounce da tool"
+  end
+
+  # ── Fail-open do store (decisão (f) da classe) ─────────────────────────────
+  # `Rails.cache` que raise NÃO derruba `WebSearchTool#run`. Stub do
+  # SearXNG local está presente — o fetch funciona — mas o cache do read
+  # explode e o tool segue.
+  test "Read do cache que explode: WebSearchTool continua e faz o fetch" do
+    stub_request(:get, /searxng:8080\/search/)
+      .to_return(
+        status: 200,
+        body: { results: [{ "title" => "T", "url" => "https://x", "content" => "c", "engine" => "ddg" }] }.to_json,
+        headers: { "Content-Type" => "application/json" }
+      )
+
+    prev_cache = Rails.cache
+    boom = Class.new do
+      def read(_); raise IOError, "boom read"; end
+      def write(*_); raise Errno::EIO, "boom write"; end
+      def clear; end
+    end.new
+    Rails.singleton_class.send(:define_method, :cache) { boom }
+
+    begin
+      r = WebSearchTool.new.execute(query: "cache estourou", type: "news")
+      assert_equal :success, r[:status]
+      assert_equal "T", r[:data].first[:title]
+    ensure
+      captured = prev_cache
+      Rails.singleton_class.send(:define_method, :cache) { captured }
+    end
   end
 end

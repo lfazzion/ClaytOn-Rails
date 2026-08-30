@@ -360,4 +360,105 @@ class SearchApiCachePureTest < Minitest::Test
     assert_equal 1, out.size
     assert_equal "u", out.first[:url]
   end
+
+  # ── envelope de erro: rejeita Hash sem `ok: true` explícito ────────────────
+  # Alinhamento código↔comentário da classe (decisão (c) do F3c).
+  # Lista de hashes (sucesso da tool) NÃO é Hash e passa direto.
+  def test_error_envelope_rejeita_hash_ok_false
+    assert SearchApiCache.write(query: "q", limit: 5, time_range: nil, type: "news",
+                                 provider: :tavily, payload: { ok: false, results: [] }) == false
+  end
+
+  def test_error_envelope_rejeita_hash_sem_ok
+    assert SearchApiCache.write(query: "q", limit: 5, time_range: nil, type: "news",
+                                 provider: :tavily, payload: { results: [] }) == false
+  end
+
+  def test_error_envelope_rejeita_hash_ok_nil
+    assert SearchApiCache.write(query: "q", limit: 5, time_range: nil, type: "news",
+                                 provider: :tavily, payload: { ok: nil, results: [] }) == false
+  end
+
+  def test_error_envelope_aceita_hash_ok_true
+    # O router pode mandar {ok: true, results: [...]} como sinal de sucesso —
+    # passa no fail-closed conservador (ok: true explícito).
+    assert_equal true, SearchApiCache.write(query: "q", limit: 5, time_range: nil, type: "news",
+                                             provider: :tavily, payload: { ok: true, results: [{ url: "u" }] })
+  end
+
+  # ── FAIL-OPEN do store: read/write NUNCA propagam exceção ──────────────────
+  # Contrato F3c (decisão (f) da classe): erro de `Rails.cache` (Solid Cache
+  # lock, FileStore IO, Memcached down) é engole e logado — read devolve nil,
+  # write devolve false. WebSearchTool#run não pode quebrar por falha do cache.
+  #
+  # Implementação: stub de `Rails.cache` cujo `read`/`write` levanta. Captura
+  # o log via array de mensagens para não depender de logger real.
+  class BoomCacheStore
+    def read(_key); raise IOError, "Solid Cache lock contention"; end
+    def write(_key, _value, **_rest); raise Errno::EIO, "FileStore disk full"; end
+    def clear; end
+    def advance(_); end
+  end
+
+  def with_boom_store_and_capture_log
+    captured = []
+    prev_cache = Rails.respond_to?(:cache) ? Rails.cache : nil
+    prev_logger = Rails.logger if Rails.respond_to?(:logger)
+    boom = BoomCacheStore.new
+    Rails.singleton_class.send(:define_method, :cache) { boom }
+    Rails.singleton_class.send(:define_method, :logger) do
+      o = Object.new
+      o.define_singleton_method(:warn)  { |m| captured << [:warn, m] }
+      o.define_singleton_method(:info)  { |*| }
+      o.define_singleton_method(:error) { |*| }
+      o
+    end
+    result = yield
+    [result, captured]
+  ensure
+    if prev_cache
+      captured_prev = prev_cache
+      Rails.singleton_class.send(:define_method, :cache) { captured_prev }
+    else
+      Rails.singleton_class.send(:remove_method, :cache)
+    end
+    if prev_logger
+      prev_l = prev_logger
+      Rails.singleton_class.send(:define_method, :logger) { prev_l }
+    end
+  end
+
+  def test_read_fail_open_retorna_nil_quando_store_explode
+    out, _log = with_boom_store_and_capture_log do
+      SearchApiCache.read(query: "q", limit: 5, time_range: nil,
+                          type: "news", provider: :tavily)
+    end
+    assert_nil out, "read com store que raise deve devolver nil (fail-open)"
+  end
+
+  def test_read_fail_open_loga_warn_e_nao_propaga_excecao
+    _out, log = with_boom_store_and_capture_log do
+      SearchApiCache.read(query: "q", limit: 5, time_range: nil,
+                          type: "news", provider: :tavily)
+    end
+    assert(log.any? { |lvl, msg| lvl == :warn && msg.include?("[SearchApiCache]") },
+           "read falho deve logar warn com prefixo [SearchApiCache]; viu: #{log.inspect}")
+  end
+
+  def test_write_fail_open_retorna_false_quando_store_explode
+    out, _log = with_boom_store_and_capture_log do
+      SearchApiCache.write(query: "q", limit: 5, time_range: nil, type: "news",
+                           provider: :tavily, payload: [{ url: "u" }])
+    end
+    assert_equal false, out, "write com store que raise deve devolver false (fail-open)"
+  end
+
+  def test_write_fail_open_loga_warn_e_nao_propaga_excecao
+    _out, log = with_boom_store_and_capture_log do
+      SearchApiCache.write(query: "q", limit: 5, time_range: nil, type: "news",
+                           provider: :tavily, payload: [{ url: "u" }])
+    end
+    assert(log.any? { |lvl, msg| lvl == :warn && msg.include?("[SearchApiCache]") },
+           "write falho deve logar warn com prefixo [SearchApiCache]; viu: #{log.inspect}")
+  end
 end

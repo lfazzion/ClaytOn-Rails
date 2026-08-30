@@ -40,12 +40,9 @@ class WebSearchTool < ToolBase
   # F1: teto de 5 hits por busca (era 10). Plataforma única, sem fan-out
   # paralelo — `SearchApiRouter` também clampa em MAX_RESULTS=5.
   MAX_LIMIT         = 5
-  # F3c do plano-fase2 (30/08/2026): TTL do cache de RESULTADO agora é
-  # derivado do tipo+time_range via `SearchApiCache.ttl_for`. Esta constante
-  # fica aqui só como referência legada de testes da F2 que ainda
-  # importam-na (ver `web_search_tools_test.rb`); o `run` chama
-  # `SearchApiCache.write` e nunca esta constante.
-  CACHE_TTL         = 15.minutes
+  # F3c do plano-fase2 (30/08/2026): TTL do cache de RESULTADO é derivado
+  # do tipo+time_range via `SearchApiCache.ttl_for`. Não há constante de
+  # TTL fixa aqui — o `run` chama `SearchApiCache.write` que decide.
   # F3c: debounce de VAZIO (não cache de conteúdo). TTL curto e fixo de 60s
   # é separado da tabela de tipos — absorve rajada de tool calls do mesmo
   # turno sem servir "não achei nada" congelado por 15min. NÃO passa pelo
@@ -142,7 +139,21 @@ class WebSearchTool < ToolBase
     # Debounce de VAZIO (60s, chave separada). Absorve rajada do mesmo turno
     # sem servir "não achei nada" congelado. NÃO é cache de conteúdo — é só
     # debounce — por isso fica em chave própria fora do SearchApiCache.
-    if Rails.cache.read(empty_cache_key(q, limit, tr, resolved_type, provider))
+    # Exceção canônica D2 (plano-fase2, decisão do maestro 30/08): a tabela
+    # TTL do plano diz "vazio | 1 min" e o `SearchApiCache` rejeita `[]`,
+    # então a absorção de rajada fica aqui, em gravação direta da tool.
+    # F3c fail-open (D1-F3c-v5): `Rails.cache.read` direto, fora do envelope
+    # do SearchApiCache. Se o store explodir (Solid Cache lock, FileStore IO,
+    # Memcached down), o cache NUNCA bloqueia a busca — mesmo padrão (f) do
+    # SearchApiCache: trata como miss, segue para o fetch.
+    empty_hit =
+      begin
+        Rails.cache.read(empty_cache_key(q, limit, tr, resolved_type, provider))
+      rescue StandardError => e
+        Rails.logger.warn("[WebSearchTool] debounce read falhou: #{e.class}: #{e.message}")
+        nil
+      end
+    if empty_hit
       return success([]).merge(unresponsive: nil)
     end
 
@@ -236,8 +247,16 @@ class WebSearchTool < ToolBase
       # congelado)"). A gravação direta aqui serve só para absorver rajada
       # do mesmo turno, não para servir cacheamento durável. A key inclui
       # type+provider para não colidir com o cache de conteúdo principal.
-      Rails.cache.write(empty_cache_key(q, limit, tr, resolved_type, provider),
-                        [], expires_in: EMPTY_CACHE_TTL)
+      # F3c fail-open (D1-F3c-v5): mesmo padrão do read acima. Se o store
+      # explodir aqui, NÃO derruba — o debounce vazio é absorvedor de rajada
+      # do mesmo turno; falhar em gravar só significa que a próxima rajada
+      # re-busca (aceitável). Lado oposto do SearchApiCache que tem envelope.
+      begin
+        Rails.cache.write(empty_cache_key(q, limit, tr, resolved_type, provider),
+                          [], expires_in: EMPTY_CACHE_TTL)
+      rescue StandardError => e
+        Rails.logger.warn("[WebSearchTool] debounce write falhou: #{e.class}: #{e.message}")
+      end
       return success([]).merge(unresponsive: unreachable)
     end
 
