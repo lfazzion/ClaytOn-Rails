@@ -198,6 +198,74 @@ class SearchApiRouterTest < ActiveSupport::TestCase
     assert_equal 1, SearchApiQuota.find_by(api_name: "linkup", month: SearchApiRouter.current_month).count
   end
 
+  # ── F3a (blindagem r1): envelopes reserve/rollback sob falha 5xx ────────────
+  # Estes testes travam a contagem de chamadas de `reserve_quota_or_skip` e
+  # `rollback_quota_silently` em 3 cenários do `attempt`. A regra é:
+  #   - reserve_quota_or_skip: 1x por chamada NÃO-retry (não é re-chamado no
+  #     retry — a reserva original cobre o 1 retry do `attempt`).
+  #   - rollback_quota_silently: 1x por falha terminal (após o retry esgotar
+  #     OU em 4xx/retryable=false imediato). NUNCA em 200 (mesmo vazio).
+  #
+  # Usamos spy via mocha (`.expects(...).with(...).once`) — NUNCA stubamos
+  # `SearchApiRouter.call` (a API real é exercida de verdade). O HTTP é
+  # stubado via WebMock (já é o padrão da suíte) ou via mocha para o caso
+  # de `retryable=false` (que o WebMock puro não consegue forçar — `http_post`
+  # calcula retryable do código de status 5xx e não há como desativar).
+  test "5xx retryable=false: reserve=1 e rollback=1 (sem retry, falha terminal)" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    # Stub forçado do http_post para simular falha 5xx com retryable=false
+    # (caminho de erro terminal — não passa pelo retry interno do attempt).
+    # Em produção, esse caminho é raro (5xx sempre é retryable=true); aqui
+    # ele representa o "contrato se a API devolvesse retryable=false": a
+    # reserva ainda é revertida.
+    SearchApiRouter.expects(:http_post)
+      .with(:linkup, "rails", 5, anything)
+      .returns({ ok: false, reason: "HTTP 500", retryable: false })
+
+    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup).returns(true).once
+    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup).once
+
+    out = SearchApiRouter.call(query: "rails", limit: 5)
+    assert_nil out
+  end
+
+  test "5xx + retry que falha: reserve=1 e rollback=1 (retry NÃO reserva de novo)" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    # WebMock encadeia: 1ª chamada 500, retry também 500. O `attempt` re-tenta
+    # (com `retried: true`, sem nova reserva) e só então chama rollback. Asserções
+    # verificam a regra "retry NÃO reserva de novo" (reserve=1) e "ambos os
+    # failures revertem" (rollback=1 ao fim).
+    stub_request(:post, "https://api.linkup.so/v1/search")
+      .to_return(status: 500).then.to_return(status: 500)
+
+    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup).returns(true).once
+    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup).once
+
+    out = SearchApiRouter.call(query: "rails", limit: 5)
+    assert_nil out
+  end
+
+  test "5xx depois 200 (retry sucede): reserve=1 e rollback=0 (200 cobra)" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    # WebMock: 1ª chamada 500, retry 200 com 1 resultado. O `attempt` re-tenta
+    # sem nova reserva e SUCEDE — 200 cobra, rollback NÃO é chamado.
+    stub_request(:post, "https://api.linkup.so/v1/search")
+      .to_return(status: 500)
+      .then.to_return(
+        status: 200,
+        body: { results: [{ "name" => "R1", "url" => "https://r1.com", "content" => "c" }] }.to_json,
+        headers: { "Content-Type" => "application/json" }
+      )
+
+    SearchApiRouter.expects(:reserve_quota_or_skip).with(:linkup).returns(true).once
+    SearchApiRouter.expects(:rollback_quota_silently).with(:linkup).never
+
+    out = SearchApiRouter.call(query: "rails", limit: 5)
+    refute_nil out
+    assert_equal "linkup", out[:engine]
+    assert_equal 1, out[:results].size
+  end
+
   private
 
   def stub_linkup_success(query, results)

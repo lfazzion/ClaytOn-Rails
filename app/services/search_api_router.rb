@@ -130,13 +130,13 @@ class SearchApiRouter
       result, reason = attempt(specialty, query, limit, tr, today)
       elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
-      if result && result[:results].any?
+      if result.is_a?(Hash) && result[:results].any?
         Rails.logger.info(
           "[SearchApiRouter] #{specialty} (specialty) serviu a busca por #{query.inspect}" \
           " (custo: #{result[:cost]}, latência: #{elapsed_ms}ms)"
         )
         return result
-      elsif result
+      elsif result.is_a?(Hash)
         # 200 vazio no specialty habilitado: miss. NÃO cascata — retorna nil
         # e o caller (WebSearchTool) cai no erro "busca indisponível".
         reasons << "#{specialty}: 200 vazio (miss de specialty)"
@@ -165,18 +165,18 @@ class SearchApiRouter
     until providers_to_try.empty?
       provider = providers_to_try.shift
 
-      next if quota_exceeded?(provider) # cota do mês esgotada → pula direto
+      next if quota_exceeded?(provider) # cota do mês esgotada → pula direto (fast-path)
 
       result, reason = attempt(provider, query, limit, tr, today)
       elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
-      if result && result[:results].any?
+      if result.is_a?(Hash) && result[:results].any?
         Rails.logger.info(
           "[SearchApiRouter] #{provider} serviu a busca por #{query.inspect}" \
           " (custo: #{result[:cost]}, latência: #{elapsed_ms}ms)"
         )
         return result
-      elsif result
+      elsif result.is_a?(Hash)
         # 200 com results=[] -> miss. Avança a cascata SÓ SE a query casar
         # com a especialidade do próximo (regex `query_specialty`). Sem
         # match: para a cascata (factual genérico / type=auto sem regex).
@@ -187,8 +187,21 @@ class SearchApiRouter
         end
         reasons << "#{provider}: 200 vazio (miss)"
       else
+        # Falha (HTTP não-200, timeout, parse, OU quota_exceeded sob
+        # concorrência entre a pre-check e o reserve). Em qualquer caso,
+        # não há resultado pra devolver — segue para o próximo provider
+        # da cascata, respeitando a regra de especialidade.
         reasons << "#{provider}: #{reason}"
-        Rails.logger.warn("[SearchApiRouter] #{provider} falhou para #{query.inspect}: #{reason}")
+        if reason == "quota_exceeded"
+          # Cota estourou entre o fast-path e o reserve: marca como pulado,
+          # mas NÃO filtra a cascata por especialidade — é o mesmo
+          # comportamento de `next if quota_exceeded?`.
+          Rails.logger.info("[SearchApiRouter] #{provider} cota estourou durante attempt; pulando")
+          # Não cascata adicional: a regra de especialidade pós-200-vazio
+          # não se aplica a falhas pré-HTTP. Mantém a fila intacta.
+        else
+          Rails.logger.warn("[SearchApiRouter] #{provider} falhou para #{query.inspect}: #{reason}")
+        end
       end
     end
 
@@ -308,7 +321,31 @@ class SearchApiRouter
   # ── Internals de rede e cota (cobertos pelos testes Rails/WebMock) ──────────
 
   # Tenta UMA API: 1 retry só em timeout/5xx; 401/400/429/cota esgotada NÃO retry.
+  #
+  # F3a (Refinamento F2 + E10): a reserva de quota virou atômica via
+  # `SearchApiQuota.reserve_quota!`, chamada ANTES do HTTP. Isso funde
+  # `exceeded?` + `increment` numa única transação, eliminando o TOCTOU do
+  # bug E10 (dois `with_lock` separados davam janela para dois providers
+  # acreditarem que a cota estava livre).
+  #
+  # Fluxo:
+  #   1. `reserve_quota!` → false: retorna [:quota_exceeded] (sem HTTP, sem cobrança).
+  #   2. HTTP não-200 / timeout / erro de rede → `rollback_quota!` + retorna falha.
+  #   3. HTTP 200 (mesmo com results vazio) → COBRADO. Sem rollback.
+  #
+  # Retry: no caminho recursivo (retried=true) NÃO chama reserve_quota! de
+  # novo — a reserva original cobre o retry. Apenas re-tenta o HTTP.
   def self.attempt(provider, query, limit, time_range, today, score_threshold: SearchApiRouter.score_threshold, retried: false)
+    unless retried
+      # `reserve_quota_or_skip` (envelope abaixo, :388-395) é o ponto
+      # fail-open: se AR não estiver conectado OU o `reserve_quota!` levantar
+      # erro, a busca segue (retorna `true`). Aqui a função é estritamente
+      # "decide se pode gastar": se a cota está cheia, pula o provider sem
+      # gastar HTTP. O fail-open do rollback vive em `:399-405`.
+      reserved = reserve_quota_or_skip(provider)
+      return [nil, "quota_exceeded"] if reserved == false
+    end
+
     time_filter = time_filter_for(provider, time_range, today: today)
     response = http_post(provider, query, limit, time_filter)
 
@@ -317,21 +354,56 @@ class SearchApiRouter
       retryable = response[:retryable]
       if retryable && !retried
         Rails.logger.warn("[SearchApiRouter] #{provider} retryável (#{response[:reason]}); 1 retry")
+        # NÃO reservamos de novo no retry (a reserva original cobre o 1 retry).
         return attempt(provider, query, limit, time_range, today, score_threshold: score_threshold, retried: true)
       end
+      # Falha terminal (sem retry ou retry esgotado): reverte a reserva.
+      # Cobrimos: 1ª falha COM retry (rollback após o retry falhar) E
+      # 1ª falha SEM retry (rollback imediato). Cobrir o caso `retried=true`
+      # garante que reserva+retry+falha = sem cobrança.
+      rollback_quota_silently(provider)
       return [nil, response[:reason]]
     end
 
     normalized = normalize_results(provider, response[:body], score_threshold: score_threshold)
     if normalized.empty?
-      Rails.logger.info("[SearchApiRouter] #{provider} 200, 0 resultados úteis (vazio ou filtrados por score)")
+      Rails.logger.info("[SearchApiRouter] #{provider} 200, 0 resultados úteis (vazio ou filtrados por score) — quota COBRADA (200 vazio cobra)")
     end
 
-    increment_quota(provider)
+    # Sucesso (200 qualquer, inclusive vazio): quota já foi reservada em (1).
+    # NÃO chama `increment_quota` aqui — reserva já incrementou.
     cost = extract_cost(provider, response[:body])
     [{ results: normalized, engine: provider.to_s, cost: cost }, nil]
   rescue StandardError => e
+    # Erro inesperado (ex.: exception de parsing, NoMethodError). Reverte a
+    # reserva. Como a reserva só ocorre uma vez (no caminho `!retried`), o
+    # rollback aqui cobre tanto a 1ª tentativa quanto o retry — em ambos os
+    # casos houve cobrança que precisa ser revertida.
+    rollback_quota_silently(provider)
     [nil, "#{e.class}: #{e.message}"]
+  end
+
+  # Envelope fail-open do `reserve_quota!`. Se AR indisponível ou erro de
+  # banco, retornamos `true` (fail-open: a busca não é bloqueada por erro de
+  # cota). Se a cota realmente está cheia, `reserve_quota!` retorna `false`
+  # e nós propagamos.
+  def self.reserve_quota_or_skip(provider)
+    return true unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
+
+    SearchApiQuota.reserve_quota!(provider.to_s, ceiling: quota_ceiling(provider), month: current_month)
+  rescue StandardError => e
+    Rails.logger.warn("[SearchApiRouter] erro ao reservar cota de #{provider}: #{e.message}")
+    true # fail-open
+  end
+
+  # Envelope fail-open do `rollback_quota!`. Falha ao reverter não derruba
+  # a busca; só logamos.
+  def self.rollback_quota_silently(provider)
+    return unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
+
+    SearchApiQuota.rollback_quota!(provider.to_s, month: current_month)
+  rescue StandardError => e
+    Rails.logger.warn("[SearchApiRouter] erro ao reverter cota de #{provider}: #{e.message}")
   end
 
   # Executa o POST HTTP da API. Devolve {ok:, body:, reason:, retryable:}.
@@ -436,9 +508,16 @@ class SearchApiRouter
     end
   end
 
-  # ── Cota mensal por API (Spec 1.b / Refinamento SOTA 3) ────────────────────
-  # Tabela `search_api_quotas` (api_name, month 'YYYY-MM', count) com find_or_create
-  # + increment DENTRO de with_lock para serializar concorrência.
+  # ── Cota mensal por API (Spec 1.b / Refinamento SOTA 3 / F3a) ───────────────
+  # Tabela `search_api_quotas` (api_name, month 'YYYY-MM', count).
+  #
+  # F3a introduziu `reserve_quota!` / `rollback_quota!` no modelo
+  # `SearchApiQuota` para fundir check+increment numa única transação atômica
+  # (corrige o TOCTOU do E10). O router chama `reserve_quota!` ANTES do HTTP
+  # e reverte com `rollback_quota!` apenas em falha HTTP. `quota_exceeded?`
+  # e `increment_quota` continuam aqui como helpers fail-open públicos
+  # (chamados pelo fail-open check e pelo caminho legado de testes) e como
+  # fast-path de cascata.
 
   def self.current_month
     if defined?(Time.current) && Time.current
