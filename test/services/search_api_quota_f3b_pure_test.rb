@@ -16,7 +16,8 @@
 #   origin != :discord       → false quando count >= ceiling - bot_floor_size(ceiling)
 #                              (MCP/legado param aos 95% do teto;
 #                              teto=100 → mcp_limit=95; teto=10 → mcp_limit=10;
-#                              teto=5 → mcp_limit=0; teto=1 → mcp_limit=1)
+#                              teto=5 → mcp_limit=5, floor_size=0;
+#                              teto=1 → mcp_limit=1)
 #   origin == :discord       → false SÓ com count >= ceiling (sem overage)
 #   count NUNCA > ceiling    → regra absoluta do plano
 #
@@ -178,7 +179,9 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
   end
 
   def test_kill_switch_ceiling_zero_bloqueia_mcp_e_nil
-    %i[mcp nil].each do |origin|
+    # `[:mcp, nil]` em vez de `%i[mcp nil]`: o `%i` cria símbolo `:nil`
+    # (que conflita com `nil`), poluindo o assert e confundindo leitora.
+    [ :mcp, nil ].each do |origin|
       ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 0, month: "2026-08", origin: origin)
       refute ok, "ceiling=0 bloqueia #{origin.inspect} também"
     end

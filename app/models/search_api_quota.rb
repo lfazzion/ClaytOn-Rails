@@ -59,19 +59,28 @@ class SearchApiQuota < ApplicationRecord
   #   e NUNCA passa de `ceiling`. Discord (o bot) tem acesso aos últimos 5%
   #   da cota; MCP e demais origens param aos 95%.
   #
-  # Concretamente:
-  #   ceiling <= 0  → kill-switch; ninguém reserva (nem Discord).
-  #   origin != :discord (inclui nil e mcp) + count >= max(0, floor(ceiling*0.95))
-  #                  → MCP/legado param aos 95% do teto.
+  # Concretamente (uma fórmula única: mcp_limit = ceiling - bot_floor_size(ceiling)):
+  #   ceiling <= 0                              → kill-switch; ninguém reserva
+  #                                              (nem Discord). Early-return.
+  #   origin != :discord (inclui nil e mcp)
+  #     count >= mcp_limit                      → recusa (MCP/legado param).
+  #     count <  mcp_limit                      → reserva normal.
   #   origin == :discord
   #     count <  ceiling                        → reserva normal (count_discord+1).
-  #     count >= ceiling (mas <= 95% ainda?)    → impossível: count >= ceiling ≥ 95%+.
-  #     count >= ceiling e ainda dentro do piso → reserva do piso (96–100).
-  #     count >= ceiling e piso esgotado        → recusa.
+  #     count >= ceiling                        → recusa (teto único puro; sem
+  #                                              overage — `count` NUNCA
+  #                                              ultrapassa `ceiling`).
+  #
+  # Tabela rápida de `mcp_limit = ceiling - bot_floor_size(ceiling)`:
+  #   ceiling=100 → bot_floor_size=5  → mcp_limit=95
+  #   ceiling=10  → bot_floor_size=0  → mcp_limit=10 (teto pequeno, sem fatia extra)
+  #   ceiling=5   → bot_floor_size=0  → mcp_limit=5  (teto 1-19: piso=0 → mcp usa tudo)
+  #   ceiling=1   → bot_floor_size=0  → mcp_limit=1
+  #   ceiling=0   → kill-switch (early-return antes do cálculo)
   #
   # A coluna `count_discord` é CONTADOR DE OBSERVABILIDADE da reserva: sobe
   # junto com `count` e serve ao dashboard F8 (rake search:report). NÃO é um
-  # segundo teto — o teto é único.
+  # segundo teto — o teto é único, e a trava do Discord é só `count >= ceiling`.
   FLOOR_RATIO = 0.05
   private_constant :FLOOR_RATIO
 
@@ -104,13 +113,16 @@ class SearchApiQuota < ApplicationRecord
   # Regra (F3b D1 — "RESERVA dos últimos 5%"):
   #   1. ceiling <= 0 → false SEMPRE. Teto 0 é kill-switch (Discord não
   #      escapa — o bot fica sem API). Early-return SEM incrementar.
-  #   2. origin != :discord (inclui nil ≡ mcp) e count >= max(0, floor(ceiling*0.95))
-  #      → false SEM incrementar. MCP/legado param aos 95%; a fatia 96–100 é
-  #      exclusiva do bot.
+  #   2. origin != :discord (inclui nil ≡ mcp) e count >= mcp_limit
+  #      (onde `mcp_limit = ceiling - bot_floor_size(ceiling)`)
+  #      → false SEM incrementar. MCP/legado param; a fatia 96–100 é
+  #      exclusiva do bot. Com `ceiling=5`/`ceiling=1` (piso=0),
+  #      `mcp_limit = ceiling`, e MCP reserva até o teto — não há
+  #      "reserva de piso" extra: teto pequeno demais para partilha.
   #   3. origin == :discord recusa SÓ com count >= ceiling (sem sobreposição):
-  #      o bot reserva os 5% finais (96–100) sob a MESMA contagem `count`.
-  #      Quando `count_discord` alcançar o tamanho do piso, recusa — sem
-  #      overage (`count` nunca ultrapassa `ceiling`).
+  #      a trava é única no teto. Sem overage (`count` nunca ultrapassa
+  #      `ceiling`); a coluna `count_discord` é só métrica, não um segundo
+  #      teto paralelo.
   #   4. Caso normal (count < ceiling para qualquer origem; ou
   #      origin == :discord com count < ceiling) → increment!(:count),
   #      e se origin não for nil, increment!(ORIGIN_COUNTER_COLUMN[origin]).
@@ -118,9 +130,10 @@ class SearchApiQuota < ApplicationRecord
   #      registro já criado pela thread rival e re-tenta o lock — análogo
   #      ao `increment` legado.
   #
-  # `max(0, ...)` em (2) evita piso negativo com tetos 1-2 (e.g. ceiling=2 →
-  # floor(0.1)=0 → max(0,0)=0 → MCP com count>=0 já recusa — comportamento
-  # esperado: teto pequeno = sem reserva de piso).
+  # `max(0, ...)` em `bot_floor_size` evita piso negativo com tetos 1-2
+  # (e.g. ceiling=2 → floor(0.10)=0 → max(0,0)=0 → `bot_floor_size=0`).
+  # Isso é o que faz `mcp_limit(2)=2` e `mcp_limit(1)=1` — MCP reserva
+  # até o teto inteiro, sem "fatia zero" artificial.
   #
   # @param origin [:discord, :mcp, nil] nil = "sem origem" (legado).
   # @return [Boolean] true se reservou, false se teto/piso atingido.
@@ -142,17 +155,17 @@ class SearchApiQuota < ApplicationRecord
 
       rec.with_lock do
         if origin != :discord
-          # MCP/legado param aos 95%: o limite é `ceiling - bot_floor_size`.
+          # MCP/legado param no `mcp_limit = ceiling - bot_floor_size(ceiling)`.
           # Concretamente: ceiling=100 → 95; ceiling=10 → 10; ceiling=1 → 1.
-          # Quando `bot_floor_size(ceiling) >= ceiling` (teto 0-5), o piso
-          # ocupa ou ultrapassa o teto inteiro; mcp_limit vira 0 e o MCP
-          # não reserva — comportamento esperado: teto pequeno demais para
-          # partilha. Discord usa o teto único (count < ceiling), sem
-          # overage.
+          # `bot_floor_size(ceiling)=0` para tetos 1-19 (floor(0.05..0.95)=0),
+          # então `mcp_limit = ceiling` nesses casos — MCP usa o teto inteiro,
+          # não há "reserva de piso" porque o piso é zero. Discord, por sua
+          # vez, sempre olha `count < ceiling` (teto único puro) — trava
+          # única, sem overage.
           mcp_limit = ceiling - bot_floor_size(ceiling)
           if rec.count >= mcp_limit
-            # MCP/legado atingiu o limite dos 95% (ou teto pequeno demais
-            # para partilha). Reserva do piso é exclusiva do bot.
+            # MCP/legado atingiu o limite (95% com teto grande, ou o teto
+            # inteiro com teto pequeno). Reserva do piso é exclusiva do bot.
             return false
           end
           # Cabe no teto geral E no limite MCP — reserva normal.
@@ -198,14 +211,15 @@ class SearchApiQuota < ApplicationRecord
 
     rec.with_lock do
       if origin != :discord
-        # MCP/legado: limite = `ceiling - bot_floor_size` (95% do teto, ou o
-        # teto inteiro quando `bot_floor_size == 0`, como em tetos 1-10).
+        # MCP/legado: `mcp_limit = ceiling - bot_floor_size(ceiling)`.
+        # `bot_floor_size == 0` para tetos 1-19 → `mcp_limit = ceiling`
+        # nesses casos. O único cenário em que `mcp_limit == 0` é
+        # `ceiling == 0`, e esse já foi bloqueado pelo kill-switch no
+        # early-return acima — então `mcp_limit > 0` quando chegamos aqui.
+        # Discord, por outro lado, usa o teto único (count < ceiling) —
+        # tetos pequenos (1-2) ainda permitem ao bot uma reserva normal
+        # dentro do teto.
         mcp_limit = ceiling - bot_floor_size(ceiling)
-        # Se `mcp_limit == 0` (apenas com `ceiling <= bot_floor_size`,
-        # i.e. tetos 0-5 onde o piso ocupa o teto inteiro), MCP/legado NÃO
-        # reserva nada. Discord, por outro lado, usa o teto único
-        # (count < ceiling) — então tetos pequenos (1-2) ainda permitem
-        # ao bot uma reserva normal dentro do teto.
         return rec.count >= mcp_limit
       end
 
