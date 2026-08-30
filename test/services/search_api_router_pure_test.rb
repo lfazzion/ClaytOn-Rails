@@ -190,12 +190,14 @@ class SearchApiRouterPureTest < Minitest::Test
   end
 
   # ── Clamp de limit (Spec 1.g) ──────────────────────────────────────────────
-  def test_clamp_limit_respeita_1_a_10
+  def test_clamp_limit_respeita_1_a_5
+    # F1 do plano v2 (30/08/2026): teto desce de 10 para 5. Camada única no
+    # cleitin: o `WebSearchTool` (máx 5) e o `SearchApiRouter` (máx 5) batem
+    # no mesmo número — `clamp_limit` é o gargalo final do router.
     assert_equal 1, SearchApiRouter.clamp_limit(0)
     assert_equal 1, SearchApiRouter.clamp_limit(-5)
     assert_equal 5, SearchApiRouter.clamp_limit(5)
-    assert_equal 10, SearchApiRouter.clamp_limit(10)
-    assert_equal 10, SearchApiRouter.clamp_limit(50)
+    assert_equal 5, SearchApiRouter.clamp_limit(50)
   end
 
   # ── Ordenação de fallback / router desligado (Spec 1.d) ────────────────────

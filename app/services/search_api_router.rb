@@ -56,7 +56,10 @@ class SearchApiRouter
   # Timeout idêntico ao do WebSearchTool (Spec 1.a).
   OPEN_TIMEOUT = 5
   READ_TIMEOUT = 20
-  MAX_RESULTS  = 10
+  # F1 do plano v2 (30/08/2026): teto do router desce a 5 (era 10), mesmo
+  # teto do WebSearchTool. Camada única no cleitin: clamp em UM lugar só,
+  # repetido é divergência esperando para acontecer.
+  MAX_RESULTS  = 5
 
   # Mapa de time_range (day/week/month/year) → dias para recuar a data inicial.
   TIME_RANGE_DAYS = { "day" => 1, "week" => 7, "month" => 30, "year" => 365 }.freeze
@@ -87,8 +90,17 @@ class SearchApiRouter
   # ── API pública (usada pelo WebSearchTool#run) ─────────────────────────────
 
   # Tenta as APIs externas em ordem de fallback.
+  #
+  # F2 do plano v2 (30/08/2026): `specialty:` é o provider preferencial vindo
+  # do WebSearchTool (mapeamento type → provider, mesma tabela do schema MCP).
+  # Quando presente e habilitado (chave + cota), o provedor é tentado PRIMEIRO;
+  # se ele servir com resultados → retorna; se der 200-vazio OU falhar → cai
+  # na cascata padrão (linkup → exa → tavily) DESCONTANDO o specialty já
+  # tentado (cota já cobrada no attempt). Specialty desconhecido ou sem
+  # chave/cota → degrada para cascata padrão sem erro.
+  #
   # @return [Hash, nil] { results:, engine:, cost: } em sucesso, ou nil se todas falharem.
-  def self.call(query:, limit: 5, time_range: nil, today: current_date)
+  def self.call(query:, limit: 5, time_range: nil, today: current_date, specialty: nil)
     providers = ordered_providers
     return nil if providers.empty? # sem nenhuma chave → router desligado (Spec 1.d)
 
@@ -100,8 +112,37 @@ class SearchApiRouter
     query_specialty = specialty_for(query)
     providers_to_try = providers.dup
 
+    # F2: specialty explícito do caller (type→provider do schema MCP).
+    # Se ele existir na cascata padrão E tiver chave, vai PRIMEIRO.
+    # Se não existir ou não tiver chave, degrada para cascata padrão sem erro.
+    preferred = nil
+    if specialty && PROVIDERS.include?(specialty) && providers.include?(specialty)
+      preferred = specialty
+      # Specialty explícito sobrepõe a classificação por regex: o caller já
+      # decidiu, não chamamos o mesmo provedor duas vezes no `miss`.
+      query_specialty = nil if query_specialty == specialty
+    end
+
     until providers_to_try.empty?
       provider = providers_to_try.shift
+
+      # Enquanto o specialty preferencial ainda está na fila, FILTRA para ele
+      # apenas (descontando os que vêm antes, cuja vez já passou).
+      # Quando o specialty sai da fila (turno anterior), a cascata padrão
+      # inteira entra — incluindo o próprio specialty? NÃO: ele já foi
+      # tentado (cota cobrada). Removemos ele.
+      if preferred
+        if provider == preferred
+          # OK, tenta o specialty
+        else
+          next # ignora outros enquanto preferred não foi tentado
+        end
+      elsif specialty == provider
+        # Specialty já tentado em turno anterior (deu certo/miss/fail).
+        # Não chamamos de novo — cota já cobrada no attempt.
+        next
+      end
+
       next if quota_exceeded?(provider) # cota do mês esgotada → pula direto
 
       result, reason = attempt(provider, query, limit, tr, today)
@@ -125,6 +166,15 @@ class SearchApiRouter
       else
         reasons << "#{provider}: #{reason}"
         Rails.logger.warn("[SearchApiRouter] #{provider} falhou para #{query.inspect}: #{reason}")
+      end
+
+      # Specialty preferencial JÁ FOI tentado neste turno (serviu/miss/fail):
+      # libera cascata padrão e remove o specialty da fila para não repetir
+      # (cota já cobrada). Mesmo se o resultado foi sucesso, este return já
+      # saiu do loop — então chegamos aqui só em miss/fail.
+      if preferred == provider
+        preferred = nil
+        providers_to_try.reject! { |p| p == provider }
       end
     end
 
@@ -318,7 +368,11 @@ class SearchApiRouter
       uri = URI("https://api.exa.ai/search")
       body = {
         query: query, type: "auto", numResults: limit,
-        contents: { highlights: true }
+        # `num_sentences: 2` (F1 plano v2): Exa sem teto por highlight pode
+        # devolver parágrafos inteiros, fugindo do CONTENT_MAX_CHARS=200 do
+        # WebSearchTool. Travado em 2 frases = bem abaixo do teto de 200
+        # chars e mata o vetor de UGC comprido (D4).
+        contents: { highlights: { num_sentences: 2 } }
       }
       body[:startPublishedDate] = time_filter if time_filter
       req = Net::HTTP::Post.new(uri)

@@ -15,19 +15,63 @@ class WebSearchTool < ToolBase
               "devolver artigo antigo com bom SEO)."
 
   param :query, type: :string,  desc: "Consulta de busca (1-200 chars, não pode ser vazia)", required: true
-  param :limit, type: :integer, desc: "Número máximo de resultados (1-10, padrão 5)", required: false
+  param :limit, type: :integer, desc: "Número máximo de resultados (1-5, padrão 5)", required: false
   param :time_range, type: :string,
         desc: "Filtro de recência: day|week|month|year. Use para último/agora/hoje/esta-semana.",
         required: false
+  # F2 do plano v2 (30/08/2026): parâmetro `type` opcional no schema MCP e na
+  # tool. Quando presente e ≠ "auto", a LLM do perfil classifica a QUERY e o
+  # Rails escolhe o provedor — specialty_first. Quando ausente ou "auto",
+  # comportamento atual preservado (local_first + fallback router por regex).
+  # O enum é o mesmo do contrato MCP (lib/mcp_server/tools/web_search.rb).
+  param :type, type: :string,
+        desc: "Tipo da query p/ o router escolher provedor (news|entity|academic|factual|code|auto). " \
+              "Default 'auto' = comportamento atual (SearXNG → fallback por regex).",
+        required: false
 
   BASE_URL          = ENV.fetch("SEARXNG_URL", "http://searxng:8080/search")
-  CONTENT_MAX_CHARS = 400
+  # F1 do plano v2 (30/08/2026): payload magro. 400 chars por snippet era a
+  # tolerância antiga; o L5 mediu que 200 basta para a manchete caber, e o
+  # snipamento menor reduz drasticamente o espaço que UGC/snippet ocupa no
+  # contexto da conversa (D4 do plano). Teto UNICO aqui — MCP e Discord usam
+  # a mesma constante (camada única no cleitin, plano v2 D6).
+  CONTENT_MAX_CHARS = 200
+  # F1: teto de 5 hits por busca (era 10). Plataforma única, sem fan-out
+  # paralelo — `SearchApiRouter` também clampa em MAX_RESULTS=5.
+  MAX_LIMIT         = 5
   CACHE_TTL         = 15.minutes
   # Um tropeço de um segundo não pode cegar o bot por 15 minutos: busca vazia pode ser
   # engine acordando, e o custo de repetir contra o SearXNG local é desprezível. O minuto
   # existe só para absorver rajada de tool calls do mesmo turno de conversa.
   EMPTY_CACHE_TTL   = 1.minute
   ALLOWED_TIME_RANGES = %w[day week month year].freeze
+
+  # F2 do plano v2 (30/08/2026): mapa type → provider. Tabela é o
+  # CONTRATO com o schema MCP (lib/mcp_server/tools/web_search.rb).
+  # "code" → :searxng = custo zero, doutrina 18/08 + L5: SearXNG local
+  #   basta para StackOverflow/GitHub/MDN; API paga NUNCA.
+  # "auto" → nil = comportamento atual preservado.
+  TYPE_TO_PROVIDER = {
+    "news"     => :tavily,
+    "entity"   => :exa,
+    "academic" => :exa,
+    "factual"  => :linkup,
+    "code"     => :searxng,
+    "auto"     => nil
+  }.freeze
+  ALLOWED_TYPES = TYPE_TO_PROVIDER.keys.freeze
+
+  # F2: subset de providers que disparam fallback via `SearchApiRouter.call`.
+  # `:searxng` (code) é o custo zero, fica de fora. O `nil` (auto) cai no
+  # fluxo legado (cascata padrão sem specialty).
+  PROVIDERS_PAGOS = %i[tavily exa linkup].freeze
+
+  # Mapeia `type` da chamada para o provider preferencial.
+  # `nil` para ausente/"auto"/valor fora do enum (defensivo: modelo pode
+  # inventar valor). O WebSearchTool trata nil como fluxo atual.
+  def self.provider_for_type(type)
+    TYPE_TO_PROVIDER[type.to_s]
+  end
 
   # Sem este parametro o SearXNG busca so em `general`, e metade dos engines
   # registrados mora em `it` (stackoverflow, github, askubuntu, superuser,
@@ -54,25 +98,46 @@ class WebSearchTool < ToolBase
   # no fallback externo quando o SearXNG falhar.
   PLATFORM_FALLBACK_BLOCK_PATTERN = /(?:\A|\s)(?:site:)?(?:www\.)?(?:reddit\.com|x\.com|twitter\.com)(?:\/[^\s]*)?(?:\s|$)/i
 
-  def run(query:, limit: 5, time_range: nil)
+  def run(query:, limit: 5, time_range: nil, type: nil)
     q = query.to_s.strip
     return error("query vazia") if q.empty?
     return error("query muito longa") if q.length > 200
 
-    limit = clamp(limit, 1, 10)
+    limit = clamp(limit, 1, MAX_LIMIT)
     tr = ALLOWED_TIME_RANGES.include?(time_range.to_s) ? time_range.to_s : nil
-    cache_key = "web_search:#{Digest::SHA256.hexdigest("#{q}|#{limit}|#{tr}")}"
+
+    # F2 do plano v2 (30/08/2026): classifica o `type` UMA vez, antes de
+    # ramificar. `provider` é o que vai para o fallback (specialty_first),
+    # ou nil quando o tipo é "auto"/inválido (comportamento atual preservado).
+    # Código defensivo: modelo pode mandar valor fora do enum.
+    resolved_type = ALLOWED_TYPES.include?(type.to_s) ? type.to_s : "auto"
+    provider = self.class.provider_for_type(resolved_type)
+
+    # Cache key inclui o provider para não servir um resultado SearXNG a uma
+    # query que pediu Tavily (cruzamento perigoso: a próxima chamada igual
+    # com mesmo type batia no cache e nunca pagava a API certa).
+    # Para type=auto/nil, provider é nil e o cache key fica igual ao atual.
+    cache_key = "web_search:#{Digest::SHA256.hexdigest("#{q}|#{limit}|#{tr}|#{provider}")}"
     cached = Rails.cache.read(cache_key)
     # `nil`, não `[]`: acerto de cache não mediu engine nenhum, e um `[]` aqui
     # afirmaria "nenhum caiu". Métrica ausente é nil, nunca zero.
     return success(cached).merge(unresponsive: nil) if cached
 
     payload = fetch(q, limit, tr)
+
+    # F2: type=code (provider=searxng) ou qualquer provedor que não esteja na
+    # cascata paga → NUNCA gasta API paga no fallback. SearXNG falhou =
+    # erro original preservado. Doutrina 18/08 + L5: code é custo zero.
+    pagar_api_paga = !provider.nil? && PROVIDERS_PAGOS.include?(provider)
+    bloquear_router = provider == :searxng
+
     # Router só acionado quando o SearXNG falha: sucesso local nunca gasta cota externa.
     # Queries direcionadas a Reddit/X/Twitter bloqueiam fallback externo (plataformas não indexadas).
-    if !platform_query?(q) && (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
+    if !bloquear_router && pagar_api_paga &&
+       !platform_query?(q) &&
+       (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
       fallback = begin
-        SearchApiRouter.call(query: q, limit: limit, time_range: tr)
+        SearchApiRouter.call(query: q, limit: limit, time_range: tr, specialty: provider)
       rescue StandardError => e
         Rails.logger.error "[WebSearchTool] SearchApiRouter falhou: #{e.class}: #{e.message}"
         nil
@@ -86,6 +151,28 @@ class WebSearchTool < ToolBase
         # cache do run() (a cache_key foi calculada antes do fetch). Gravamos
         # aqui para que a próxima chamada igual acerte o cache e não gaste cota.
         # `unresponsive` reflete a falha do SearXNG quando houve (nil se fetch nil).
+        Rails.cache.write(cache_key, fallback_results, expires_in: CACHE_TTL)
+        return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
+      end
+
+      # F2: specialty explícito falhou/miss → NÃO cascata padrão. A cascata
+      # inteira (linkup→exa→tavily) SEM specialty era o comportamento
+      # legado; com `type:` explícito o caller já decidiu qual provedor.
+      # tipo=auto (provider nil) → fluxo legado entra abaixo.
+    elsif !provider && !platform_query?(q) &&
+          (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
+      # Fluxo legado preservado: sem `type`, cascata padrão do router.
+      fallback = begin
+        SearchApiRouter.call(query: q, limit: limit, time_range: tr)
+      rescue StandardError => e
+        Rails.logger.error "[WebSearchTool] SearchApiRouter falhou: #{e.class}: #{e.message}"
+        nil
+      end
+
+      if fallback && fallback[:results]&.any?
+        fallback_results = fallback[:results].first(limit).map do |r|
+          r.merge(content: truncate(r[:content]))
+        end
         Rails.cache.write(cache_key, fallback_results, expires_in: CACHE_TTL)
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end

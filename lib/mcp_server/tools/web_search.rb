@@ -23,20 +23,34 @@ module McpServer
 
       # `additionalProperties: false` pelo mesmo motivo de `platform_search.rb`:
       # argumento inventado tem que virar erro que o modelo lê, não -32603.
+      # F2 do plano v2 (30/08/2026): `type` é o classificador da query que o
+      # modelo do perfil lê do schema. Enum fixo: news|entity|academic|factual|
+      # code|auto. Default `auto` = comportamento legado (SearXNG → cascata
+      # padrão). Valores fora do enum são rejeitados pelo `additionalProperties`
+      # abaixo + enum (modelo recebe erro estruturado, não -32603).
       input_schema(
         properties: {
           query: { type: "string", description: "O que procurar, 1-200 chars" },
-          limit: { type: "integer", minimum: 1, maximum: 10, description: "Máximo de resultados (padrão 5)" },
-          time_range: { type: "string", enum: %w[day week month year], description: "Recorte de tempo, opcional" }
+          limit: { type: "integer", minimum: 1, maximum: 5, description: "Máximo de resultados (padrão 5)" },
+          time_range: { type: "string", enum: %w[day week month year], description: "Recorte de tempo, opcional" },
+          type: {
+            type: "string",
+            enum: %w[news entity academic factual code auto],
+            default: "auto",
+            description:
+              "Tipo da query. news|entity|academic|factual|code escolhem o provedor da API paga (custa cota). " \
+              "code = SearXNG local, nunca API paga. auto (padrão) = comportamento legado: SearXNG → fallback."
+          }
         },
         required: %w[query],
         additionalProperties: false
       )
 
-      def self.call(query:, limit: nil, time_range: nil, server_context: nil)
+      def self.call(query:, limit: nil, time_range: nil, type: nil, server_context: nil)
         argumentos = { query: query }
         argumentos[:limit] = limit if limit
         argumentos[:time_range] = time_range if time_range
+        argumentos[:type] = type if type
         Responder.from(::WebSearchTool.new.execute(**argumentos))
       end
     end
