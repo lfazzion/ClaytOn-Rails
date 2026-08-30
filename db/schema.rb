@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_17_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_30_000001) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -128,6 +128,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_17_000001) do
     t.integer "count", null: false, default: 0
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    # F3b: métricas por origem (discord/mcp) — contadores inteiros default 0
+    # na linha canônica (api_name, month). Não são segundo teto: o teto é o
+    # `count`; essas colunas são observabilidade + suporte ao piso 5%.
+    # `origin` é só metadado do caller; o find_or_create_by do F3a ignora.
+    t.string "origin"
+    t.integer "count_discord", default: 0, null: false
+    t.integer "count_mcp", default: 0, null: false
     t.index ["api_name", "month"], name: "index_search_api_quotas_on_api_name_and_month", unique: true
   end
 

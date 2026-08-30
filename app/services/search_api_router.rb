@@ -111,8 +111,13 @@ class SearchApiRouter
   #     a fila após 200-vazio (papers → exa, lookup → tavily, factual
   #     genérica → para no linkup).
   #
+  # F3b: `origin:` identifica o caller (`:discord` / `:mcp` / nil). É
+  # propagado para `reserve_quota!` / `rollback_quota!` para alimentar a
+  # métrica por origem (count_discord, count_mcp) e a exceção do piso 5%
+  # pro bot. Default = nil (chamada sem origem).
+  #
   # @return [Hash, nil] { results:, engine:, cost: } em sucesso, ou nil se todas falharem.
-  def self.call(query:, limit: 5, time_range: nil, today: current_date, specialty: nil)
+  def self.call(query:, limit: 5, time_range: nil, today: current_date, specialty: nil, origin: nil)
     providers = ordered_providers
     return nil if providers.empty? # sem nenhuma chave → router desligado (Spec 1.d)
 
@@ -126,8 +131,8 @@ class SearchApiRouter
     # usar (via `type:` do schema), só esse provedor paga. Se ele falhar ou
     # devolver vazio, a cota já foi cobrada no attempt — chamar outro seria
     # gastar cota fora do tipo escolhido (violação do plano v2 F2).
-    if specialty_enabled?(specialty, providers)
-      result, reason = attempt(specialty, query, limit, tr, today)
+    if specialty_enabled?(specialty, providers, origin: origin)
+      result, reason = attempt(specialty, query, limit, tr, today, origin: origin)
       elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
       if result.is_a?(Hash) && result[:results].any?
@@ -165,9 +170,9 @@ class SearchApiRouter
     until providers_to_try.empty?
       provider = providers_to_try.shift
 
-      next if quota_exceeded?(provider) # cota do mês esgotada → pula direto (fast-path)
+      next if quota_exceeded?(provider, origin: origin) # cota do mês esgotada → pula direto (fast-path)
 
-      result, reason = attempt(provider, query, limit, tr, today)
+      result, reason = attempt(provider, query, limit, tr, today, origin: origin)
       elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
       if result.is_a?(Hash) && result[:results].any?
@@ -213,14 +218,17 @@ class SearchApiRouter
 
   # `specialty:` só está habilitado se: (1) for um provider válido da
   # cascata paga, (2) tiver chave em ENV (provider apareceu em
-  # `ordered_providers`), e (3) NÃO estiver com cota zerada do mês.
-  # Sem essas três condições, o caminho A é pulado e o B (cascata padrão)
+  # `ordered_providers`), e (3) NÃO estiver com cota zerada do mês
+  # (verificando via `quota_exceeded?(provider, origin:)` para que o piso
+  # discord seja respeitado pelo fast-path — sem origin, comportamento
+  # legado: teto único puro).
+  # Sem essas condições, o caminho A é pulado e o B (cascata padrão)
   # entra — degrada graciosamente.
-  def self.specialty_enabled?(specialty, providers)
+  def self.specialty_enabled?(specialty, providers, origin: nil)
     return false if specialty.nil?
     return false unless PROVIDERS.include?(specialty)
     return false unless providers.include?(specialty)
-    return false if quota_exceeded?(specialty)
+    return false if quota_exceeded?(specialty, origin: origin)
 
     true
   end
@@ -335,14 +343,18 @@ class SearchApiRouter
   #
   # Retry: no caminho recursivo (retried=true) NÃO chama reserve_quota! de
   # novo — a reserva original cobre o retry. Apenas re-tenta o HTTP.
-  def self.attempt(provider, query, limit, time_range, today, score_threshold: SearchApiRouter.score_threshold, retried: false)
+  #
+  # F3b: `origin:` é passado para os envelopes de quota. O `attempt` é o
+  # ÚNICO lugar no router que toca `reserve_quota_or_skip` / `rollback_quota_silently`
+  # — origem chega aqui de `call(...)` via parâmetro keyword.
+  def self.attempt(provider, query, limit, time_range, today, score_threshold: SearchApiRouter.score_threshold, retried: false, origin: nil)
     unless retried
-      # `reserve_quota_or_skip` (envelope abaixo, :388-395) é o ponto
+      # `reserve_quota_or_skip` (envelope abaixo, :396-403) é o ponto
       # fail-open: se AR não estiver conectado OU o `reserve_quota!` levantar
       # erro, a busca segue (retorna `true`). Aqui a função é estritamente
       # "decide se pode gastar": se a cota está cheia, pula o provider sem
-      # gastar HTTP. O fail-open do rollback vive em `:399-405`.
-      reserved = reserve_quota_or_skip(provider)
+      # gastar HTTP. O fail-open do rollback vive em `:407-413`.
+      reserved = reserve_quota_or_skip(provider, origin: origin)
       return [nil, "quota_exceeded"] if reserved == false
     end
 
@@ -355,13 +367,13 @@ class SearchApiRouter
       if retryable && !retried
         Rails.logger.warn("[SearchApiRouter] #{provider} retryável (#{response[:reason]}); 1 retry")
         # NÃO reservamos de novo no retry (a reserva original cobre o 1 retry).
-        return attempt(provider, query, limit, time_range, today, score_threshold: score_threshold, retried: true)
+        return attempt(provider, query, limit, time_range, today, score_threshold: score_threshold, retried: true, origin: origin)
       end
       # Falha terminal (sem retry ou retry esgotado): reverte a reserva.
       # Cobrimos: 1ª falha COM retry (rollback após o retry falhar) E
       # 1ª falha SEM retry (rollback imediato). Cobrir o caso `retried=true`
       # garante que reserva+retry+falha = sem cobrança.
-      rollback_quota_silently(provider)
+      rollback_quota_silently(provider, origin: origin)
       return [nil, response[:reason]]
     end
 
@@ -379,7 +391,7 @@ class SearchApiRouter
     # reserva. Como a reserva só ocorre uma vez (no caminho `!retried`), o
     # rollback aqui cobre tanto a 1ª tentativa quanto o retry — em ambos os
     # casos houve cobrança que precisa ser revertida.
-    rollback_quota_silently(provider)
+    rollback_quota_silently(provider, origin: origin)
     [nil, "#{e.class}: #{e.message}"]
   end
 
@@ -387,21 +399,27 @@ class SearchApiRouter
   # banco, retornamos `true` (fail-open: a busca não é bloqueada por erro de
   # cota). Se a cota realmente está cheia, `reserve_quota!` retorna `false`
   # e nós propagamos.
-  def self.reserve_quota_or_skip(provider)
+  #
+  # F3b: propaga `origin:` para que `reserve_quota!` saiba se a chamada
+  # tem a exceção do piso (discord) ou é mcp/nil (teto puro).
+  def self.reserve_quota_or_skip(provider, origin: nil)
     return true unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
 
-    SearchApiQuota.reserve_quota!(provider.to_s, ceiling: quota_ceiling(provider), month: current_month)
+    SearchApiQuota.reserve_quota!(provider.to_s, ceiling: quota_ceiling(provider), month: current_month, origin: origin)
   rescue StandardError => e
     Rails.logger.warn("[SearchApiRouter] erro ao reservar cota de #{provider}: #{e.message}")
     true # fail-open
   end
 
   # Envelope fail-open do `rollback_quota!`. Falha ao reverter não derruba
-  # a busca; só logamos.
-  def self.rollback_quota_silently(provider)
+    # a busca; só logamos.
+    #
+    # F3b: `origin:` propaga para reverter o contador de origem certo
+    # (count_discord / count_mcp) junto com o count principal.
+  def self.rollback_quota_silently(provider, origin: nil)
     return unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
 
-    SearchApiQuota.rollback_quota!(provider.to_s, month: current_month)
+    SearchApiQuota.rollback_quota!(provider.to_s, month: current_month, origin: origin)
   rescue StandardError => e
     Rails.logger.warn("[SearchApiRouter] erro ao reverter cota de #{provider}: #{e.message}")
   end
@@ -537,12 +555,32 @@ class SearchApiRouter
 
   # Fail-open intencional: se o banco estiver indisponível ou ocorrer erro
   # no modelo de cota, a busca externa não é bloqueada (retorna false).
-  def self.quota_exceeded?(provider)
+  #
+  # F3b: usa `exceeded_with_origin?` (regra canônica D1) em vez do
+  # `exceeded?` legado (F3a). O piso 96-100% é exclusivo de `:discord`:
+  # com origin :discord, o fast-path só bloqueia se count >= ceiling
+  # (sem overage); com origin :mcp/nil, bloqueia em count >= mcp_limit
+  # (95% do teto, ou teto=0 → bloqueia sempre).
+  #
+  # Kill-switch (ceiling <= 0) é checado ANTES da disponibilidade do AR:
+  # se o teto é 0, o método bloqueia MESMO sem banco conectado. Isso
+  # garante que `ceiling=0` fecha o router (defesa em profundidade contra
+  # alguém que desligaria o AR para contornar o teto — o teto é do
+  # plano, não da infra).
+  def self.quota_exceeded?(provider, origin: nil)
+    ceiling = quota_ceiling(provider)
+    return true if ceiling <= 0
+
     return false unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
 
-    SearchApiQuota.exceeded?(provider.to_s, quota_ceiling(provider), month: current_month)
+    SearchApiQuota.exceeded_with_origin?(
+      provider.to_s,
+      ceiling: ceiling,
+      origin: origin,
+      month: current_month
+    )
   rescue StandardError => e
-    Rails.logger.warn("[SearchApiRouter] erro ao verificar cota de #{provider}: #{e.message}")
+    Rails.logger.warn "[SearchApiRouter] erro ao verificar cota de #{provider}: #{e.message}"
     false
   end
 

@@ -113,6 +113,13 @@ class WebSearchTool < ToolBase
     resolved_type = ALLOWED_TYPES.include?(type.to_s) ? type.to_s : "auto"
     provider = self.class.provider_for_type(resolved_type)
 
+    # F3b (30/08/2026): origem do caller lida do Thread.current. Setada em
+    # `ChatSessionManager#ask` (caminho Discord/bot) ou `McpController#handle`
+    # (caminho MCP) — fora desses dois entrypoints vale nil (caller sem
+    # origem). Lida UMA vez aqui para propagar idêntica nas duas chamadas
+    # ao router (specialty_first e cascata legado) e evitar divergência.
+    origin = Thread.current[:cleitin_origin]
+
     # Cache key inclui o provider para não servir um resultado SearXNG a uma
     # query que pediu Tavily (cruzamento perigoso: a próxima chamada igual
     # com mesmo type batia no cache e nunca pagava a API certa).
@@ -137,7 +144,7 @@ class WebSearchTool < ToolBase
        !platform_query?(q) &&
        (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
       fallback = begin
-        SearchApiRouter.call(query: q, limit: limit, time_range: tr, specialty: provider)
+        SearchApiRouter.call(query: q, limit: limit, time_range: tr, specialty: provider, origin: origin)
       rescue StandardError => e
         Rails.logger.error "[WebSearchTool] SearchApiRouter falhou: #{e.class}: #{e.message}"
         nil
@@ -163,7 +170,7 @@ class WebSearchTool < ToolBase
           (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
       # Fluxo legado preservado: sem `type`, cascata padrão do router.
       fallback = begin
-        SearchApiRouter.call(query: q, limit: limit, time_range: tr)
+        SearchApiRouter.call(query: q, limit: limit, time_range: tr, origin: origin)
       rescue StandardError => e
         Rails.logger.error "[WebSearchTool] SearchApiRouter falhou: #{e.class}: #{e.message}"
         nil

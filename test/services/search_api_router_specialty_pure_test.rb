@@ -153,20 +153,25 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
   end
 
   # Quota zerada só para o provider passado; o resto fica liberado.
+  # Assinatura nova do router: `quota_exceeded?(provider, origin: nil)` —
+  # aceitamos `**_opts` para engolir kwargs sem quebrar.
   def stub_quota_exhausted_only(*providers)
-    SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?) do |provider|
+    SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?) do |provider, **_opts|
       providers.include?(provider)
     end
   end
 
-  # Quota livre para todos.
+  # Quota livre para todos. Assinatura nova: aceita `origin:` via `**_opts`.
   def stub_quota_open
-    SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?) { |_| false }
+    SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?) { |_provider, **_opts| false }
   end
 
+  # Envelopes no-op. Assinaturas novas (F3b):
+  #   reserve_quota_or_skip(provider, origin: nil) → true
+  #   rollback_quota_silently(provider, origin: nil) → nil
   def stub_quota_envelopes_noop
-    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) { |_| true }
-    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) { |_| }
+    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) { |_provider, **_opts| true }
+    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) { |_provider, **_opts| }
   end
 
   # (a) preferred habilitado + sucesso → SÓ ELE é chamado.

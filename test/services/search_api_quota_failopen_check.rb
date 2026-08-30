@@ -133,6 +133,43 @@ rescue StandardError => e
   failed += 1
 end
 
+# ── 5. Kill-switch do envelope: ceiling=0 + DB explode → quota_exceeded? = true ─
+# Defesa em profundidade do `quota_exceeded?` (router, search_api_router.rb:
+# linhas do early-return do kill-switch): quando `ceiling <= 0` o envelope
+# retorna `true` ANTES de tocar em AR/`SearchApiQuota.exceeded_with_origin?`.
+# Isso trava a regressão do contrato no envelope: alguém NÃO pode mover a
+# checagem de `ceiling <= 0` para dentro do `rescue` (fail-open) — o kill-switch
+# é do plano, não da infra.
+#
+# Para o teste ser honesto, simulamos AMBOS os cenários adversos:
+#   - ENV `SEARCH_API_QUOTA_LINKUP=0`  → `quota_ceiling(:linkup)` retorna 0.
+#   - stub `exceeded_with_origin?` levanta erro (DB fora).
+# Se a checagem do kill-switch for removida, o `rescue` engoliria o erro e
+# retornaria `false` (fail-open) — o teste falharia. Com a checagem intacta,
+# o early-return no envelope devolve `true` sem alcançar o `rescue`.
+begin
+  # Garante a configuração adversária sem contaminar ENV do processo após o teste.
+  original_quota = ENV["SEARCH_API_QUOTA_LINKUP"]
+  ENV["SEARCH_API_QUOTA_LINKUP"] = "0"
+
+  result = SearchApiRouter.quota_exceeded?(:linkup)
+  if result == true
+    passed += 1
+  else
+    puts "FAIL: quota_exceeded? esperado true (kill-switch), recebeu #{result.inspect}"
+    failed += 1
+  end
+rescue StandardError => e
+  puts "FAIL: quota_exceeded? com kill-switch levantou exceção inesperada: #{e.message}"
+  failed += 1
+ensure
+  if original_quota.nil?
+    ENV.delete("SEARCH_API_QUOTA_LINKUP")
+  else
+    ENV["SEARCH_API_QUOTA_LINKUP"] = original_quota
+  end
+end
+
 # ── Resultado ────────────────────────────────────────────────────────────────
 puts "\n=== Search API Quota Fail-Open Check ==="
 puts "Passed: #{passed}"

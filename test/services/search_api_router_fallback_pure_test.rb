@@ -182,13 +182,13 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
     }
 
     reserved_called = false
-    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) do |_provider|
+    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) do |_provider, **_opts|
       reserved_called = true
       true # simula "cota reservada com sucesso"
     end
 
     rollback_called = false
-    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) do |_provider|
+    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) do |_provider, **_opts|
       rollback_called = true
     end
 
@@ -377,13 +377,13 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
     }
 
     reserved_called = false
-    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) do |_provider|
+    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) do |_provider, **_opts|
       reserved_called = true
       true # simula "cota reservada com sucesso"
     end
 
     rollback_called = false
-    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) do |_provider|
+    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) do |_provider, **_opts|
       rollback_called = true
     end
 
