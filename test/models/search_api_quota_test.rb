@@ -209,4 +209,97 @@ class SearchApiQuotaModelTest < ActiveSupport::TestCase
     result = SearchApiQuota.reserve_quota!("smoke", ceiling: 1, month: "2026-08")
     assert_includes [true, false], result, "reserve_quota! deve retornar true|false, recebeu #{result.inspect}"
   end
+
+  # ── F3b D1 (canônico): RESERVA dos últimos 5%, sem overage ─────────────────
+  # Estes testes cravam a regra do plano-fase2 D1 contra a implementação
+  # Rails (test_helper carrega db/test.sqlite3 com o schema da migration
+  # `add_origin_metrics_to_search_api_quotas`, que tem `count_discord` e
+  # `count_mcp` como inteiros default 0).
+
+  test "F3b D1: ceiling=100, count=95, origin=:mcp → false (MCP para aos 95)" do
+    SearchApiQuota.where(api_name: "f3b_mcp_95", month: "2026-08").delete_all
+    SearchApiQuota.create!(api_name: "f3b_mcp_95", month: "2026-08", count: 95)
+
+    refute SearchApiQuota.reserve_quota!("f3b_mcp_95", ceiling: 100, month: "2026-08", origin: :mcp)
+    rec = SearchApiQuota.find_by(api_name: "f3b_mcp_95", month: "2026-08")
+    assert_equal 95, rec.count, "count NÃO incrementa quando MCP recusa"
+    assert_equal 0, rec.count_mcp, "count_mcp NÃO incrementa quando MCP recusa"
+  end
+
+  test "F3b D1: ceiling=100, count=95, origin=:discord → true (reserva o 96º)" do
+    SearchApiQuota.where(api_name: "f3b_disc_95", month: "2026-08").delete_all
+    SearchApiQuota.create!(api_name: "f3b_disc_95", month: "2026-08", count: 95)
+
+    assert SearchApiQuota.reserve_quota!("f3b_disc_95", ceiling: 100, month: "2026-08", origin: :discord)
+    rec = SearchApiQuota.find_by(api_name: "f3b_disc_95", month: "2026-08")
+    assert_equal 96, rec.count
+    assert_equal 1, rec.count_discord
+  end
+
+  test "F3b D1: origin=nil ≡ :mcp no gate (para aos 95)" do
+    SearchApiQuota.where(api_name: "f3b_nil_95", month: "2026-08").delete_all
+    SearchApiQuota.create!(api_name: "f3b_nil_95", month: "2026-08", count: 95)
+
+    refute SearchApiQuota.reserve_quota!("f3b_nil_95", ceiling: 100, month: "2026-08", origin: nil)
+    rec = SearchApiQuota.find_by(api_name: "f3b_nil_95", month: "2026-08")
+    assert_equal 95, rec.count, "origin=nil no gate ≡ :mcp"
+  end
+
+  test "F3b D1: ceiling=100, count=99, origin=:discord → true (vai pro 100); count=100 → false" do
+    SearchApiQuota.where(api_name: "f3b_disc_99", month: "2026-08").delete_all
+    SearchApiQuota.create!(api_name: "f3b_disc_99", month: "2026-08", count: 99)
+
+    assert SearchApiQuota.reserve_quota!("f3b_disc_99", ceiling: 100, month: "2026-08", origin: :discord)
+    rec = SearchApiQuota.find_by(api_name: "f3b_disc_99", month: "2026-08")
+    assert_equal 100, rec.count, "última reserva dentro do teto (count=100)"
+    assert_equal 1, rec.count_discord
+
+    refute SearchApiQuota.reserve_quota!("f3b_disc_99", ceiling: 100, month: "2026-08", origin: :discord),
+           "count=100 >= ceiling=100 → recusa (sem overage)"
+    rec.reload
+    assert_equal 100, rec.count, "count NUNCA passa de ceiling"
+  end
+
+  test "F3b D1: ceiling=0, origin=:discord → false (kill-switch fecha o bot)" do
+    refute SearchApiQuota.reserve_quota!("f3b_kill", ceiling: 0, month: "2026-08", origin: :discord),
+           "ceiling=0 é kill-switch — bot não escapa"
+    refute SearchApiQuota.find_by(api_name: "f3b_kill", month: "2026-08"),
+           "ceiling=0 → não cria registro (early-return antes do transaction)"
+  end
+
+  test "F3b D1: exceeded_with_origin? — MESMA regra do reserve (kill-switch)" do
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "qualquer", ceiling: 0, month: "2026-08", origin: :discord
+    )
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "qualquer", ceiling: 0, month: "2026-08", origin: :mcp
+    )
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "qualquer", ceiling: 0, month: "2026-08", origin: nil
+    )
+  end
+
+  test "F3b D1: exceeded_with_origin? — MCP bloqueia em count=95 (mcp_limit=95)" do
+    SearchApiQuota.where(api_name: "f3b_ew_mcp", month: "2026-08").delete_all
+    SearchApiQuota.create!(api_name: "f3b_ew_mcp", month: "2026-08", count: 95)
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "f3b_ew_mcp", ceiling: 100, month: "2026-08", origin: :mcp
+    )
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "f3b_ew_mcp", ceiling: 100, month: "2026-08", origin: nil
+    )
+  end
+
+  test "F3b D1: exceeded_with_origin? — Discord bloqueia SÓ em count >= ceiling" do
+    SearchApiQuota.where(api_name: "f3b_ew_disc", month: "2026-08").delete_all
+    SearchApiQuota.create!(api_name: "f3b_ew_disc", month: "2026-08", count: 99)
+    assert_equal false, SearchApiQuota.exceeded_with_origin?(
+      "f3b_ew_disc", ceiling: 100, month: "2026-08", origin: :discord
+    ), "count=99 < ceiling=100 → reserva o 100º"
+
+    SearchApiQuota.create!(api_name: "f3b_ew_disc2", month: "2026-08", count: 100)
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "f3b_ew_disc2", ceiling: 100, month: "2026-08", origin: :discord
+    ), "count=100 >= ceiling=100 → exceeded"
+  end
 end

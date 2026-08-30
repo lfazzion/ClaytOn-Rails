@@ -6,15 +6,22 @@
 #
 #   ruby test/services/search_api_quota_f3b_pure_test.rb
 #
-# O ponto central é blindar:
-#  - coluna origin opcional na linha canônica (api_name, month)
-#  - colunas count_discord / count_mcp (métrica, não segundo teto)
-#  - reserva atômica incrementa o contador de origem certo
-#  - rollback reverte o contador de origem certo
-#  - piso 5% pro bot (origin=discord) — único caso que continua reservando
-#    quando o teto principal está cheio
-#  - demais origins (mcp / nil) seguem o teto único intacto
-#  - teto único segue intacto (caminho legado passa idêntico)
+# Contrato canônico F3b D1 (plano-fase2 L31, aceite F3b L109):
+# "Piso dos últimos 5%" — RESERVA, não overage. Teto único NUNCA passa
+# de `ceiling`. Discord (o bot) tem acesso aos últimos 5% da cota; MCP e
+# demais origens param aos 95%. Kill-switch (ceiling <= 0) fecha TODOS.
+#
+# Regras cravadas pelos testes abaixo:
+#   ceiling <= 0             → false SEMPRE (kill-switch, inclusive :discord)
+#   origin != :discord       → false quando count >= ceiling - bot_floor_size(ceiling)
+#                              (MCP/legado param aos 95% do teto;
+#                              teto=100 → mcp_limit=95; teto=10 → mcp_limit=10;
+#                              teto=5 → mcp_limit=0; teto=1 → mcp_limit=1)
+#   origin == :discord       → false SÓ com count >= ceiling (sem overage)
+#   count NUNCA > ceiling    → regra absoluta do plano
+#
+# A coluna `count_discord` é observabilidade: sobe junto com `count` para
+# alimentar o dashboard F8. NÃO é segundo teto.
 
 require "minitest/autorun"
 require "active_record"
@@ -60,7 +67,7 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     SearchApiQuota.delete_all if ActiveRecord::Base.connected? && ActiveRecord::Base.connection.table_exists?(:search_api_quotas)
   end
 
-  # ── F3b D1: migration trouxe count_discord e count_mcp como inteiros default 0 ─
+  # ── Schema / defaults ──────────────────────────────────────────────────────
   def test_count_discord_e_count_mcp_default_zero_em_linha_nova
     SearchApiQuota.create!(api_name: "tavily", month: "2026-08")
     rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
@@ -68,13 +75,18 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_mcp
   end
 
-  # ── F3b D1: origem é opcional e default nil ────────────────────────────────
   def test_origin_default_nil
     rec = SearchApiQuota.create!(api_name: "tavily", month: "2026-08")
     assert_nil rec.origin
   end
 
-  # ── F3b métrica: reserve com origin=:mcp incrementa count_mcp ───────────────
+  def test_count_discord_e_count_mcp_sao_atributos_publicos
+    rec = SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count_discord: 7, count_mcp: 3)
+    assert_equal 7, rec.count_discord
+    assert_equal 3, rec.count_mcp
+  end
+
+  # ── Métrica por origem (count_mcp / count_discord) ─────────────────────────
   def test_reserve_com_origin_mcp_incrementa_count_mcp
     SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :mcp)
     rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
@@ -83,7 +95,6 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_discord, "count_discord não se mexe quando origin=:mcp"
   end
 
-  # ── F3b métrica: reserve com origin=:discord incrementa count_discord ──────
   def test_reserve_com_origin_discord_incrementa_count_discord
     SearchApiQuota.reserve_quota!("exa", ceiling: 100, month: "2026-08", origin: :discord)
     rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
@@ -92,7 +103,6 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_mcp
   end
 
-  # ── F3b métrica: reserve sem origin (nil) NÃO toca contadores de origem ────
   def test_reserve_sem_origin_nao_toca_contadores_de_origem
     SearchApiQuota.reserve_quota!("linkup", ceiling: 100, month: "2026-08")
     rec = SearchApiQuota.find_by(api_name: "linkup", month: "2026-08")
@@ -101,120 +111,160 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_mcp
   end
 
-  # ── F3b D1 piso: discord no teto principal ainda reserva do piso 5% ────────
-  # ceiling=100, count=100 (teto fechado). Discord reserva o 101º a 105º.
-  # floor(100 * 0.05) = 5 → max(1, 5) = 5. count_discord antes do reserve = 0.
-  #
-  # Por que count=100 e não 95? O brief diz "teto único intacto", e a
-  # decisão D1 do plano-fase2 é "um teto só". O piso só vale quando o teto
-  # principal ESTÁ fechado (count >= ceiling). Discord tem EXCEÇÃO ao teto
-  # para consumir os últimos 5% — não um segundo teto com margem de 95%.
-  def test_piso_discord_no_teto_principal_permite_reserva_ate_5_chamadas
-    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 100)
-
-    5.times do |i|
-      ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
-      assert ok, "reserva #{i + 1} do piso discord (count_discord sobe de #{i} para #{i + 1}) deve passar"
-    end
-
+  # ── Regra D1 canônica: teto + reserva dos últimos 5% ──────────────────────
+  # ceiling=100, count=95, origin=:mcp → FALSE (MCP para aos 95)
+  def test_mcp_recusa_aos_95_porcento_do_teto
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 95)
+    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :mcp)
+    refute ok, "MCP com count=95 >= mcp_limit(95) → recusa"
     rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 105, rec.count, "count final = 100 + 5 reservas do piso = 105"
-    assert_equal 5, rec.count_discord
+    assert_equal 95, rec.count, "count NÃO incrementa quando MCP recusa"
+    assert_equal 0, rec.count_mcp, "count_mcp NÃO incrementa quando MCP recusa"
   end
 
-  # ── F3b D1 piso: discord NÃO pode passar do piso (estouro do piso = recusa) ─
-  # 6ª chamada discord: count_discord=5 já no piso, recusa.
-  def test_piso_discord_apos_5_chamadas_no_piso_recusa
-    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 100, count_discord: 5)
+  # ceiling=100, count=94, origin=:mcp → TRUE (94 < 95, MCP ainda reserva)
+  def test_mcp_abaixo_do_95_porcento_ainda_reserva
+    SearchApiQuota.create!(api_name: "linkup", month: "2026-08", count: 94)
+    ok = SearchApiQuota.reserve_quota!("linkup", ceiling: 100, month: "2026-08", origin: :mcp)
+    assert ok, "MCP com count=94 < mcp_limit(95) → reserva"
+    rec = SearchApiQuota.find_by(api_name: "linkup", month: "2026-08")
+    assert_equal 95, rec.count
+    assert_equal 1, rec.count_mcp
+  end
 
+  # ceiling=100, count=95, origin=:discord → TRUE (reserva o 96º)
+  def test_discord_reserva_no_piso_95_ate_100
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 95)
     ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
-    refute ok, "6ª chamada discord com count_discord=5 (= piso) deve recusar"
+    assert ok, "Discord com count=95 < ceiling=100 → reserva (96º, dentro do piso)"
     rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 100, rec.count, "count NÃO incrementa quando piso recusa"
-    assert_equal 5, rec.count_discord, "count_discord NÃO incrementa quando piso recusa"
-  end
-
-  # ── F3b D1 piso: count=99 (ainda 1% do teto) → piso NÃO foi tocado, reserva normal
-  # O piso só ativa quando count >= ceiling. Discord com count=99 entra no
-  # caminho "teto principal tem espaço" e reserva normalmente, indo a 100.
-  # Daí em diante o piso começa a contar.
-  def test_discord_com_count_99_ainda_no_teto_principal_reserva_normal
-    SearchApiQuota.create!(api_name: "exa", month: "2026-08", count: 99)
-
-    ok = SearchApiQuota.reserve_quota!("exa", ceiling: 100, month: "2026-08", origin: :discord)
-    assert ok, "count=99 < ceiling=100 → reserva normal (count_discord sobe junto)"
-    rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
-    assert_equal 100, rec.count
+    assert_equal 96, rec.count
     assert_equal 1, rec.count_discord
   end
 
-  # ── F3b D1 piso: teto cheio + count_discord já no piso → recusa ───────────
-  def test_piso_discord_count_discord_ja_no_piso_recusa_desde_a_primeira
-    SearchApiQuota.create!(api_name: "linkup", month: "2026-08", count: 100, count_discord: 5)
-
-    ok = SearchApiQuota.reserve_quota!("linkup", ceiling: 100, month: "2026-08", origin: :discord)
-    refute ok, "count_discord=5 (= piso) e count=100 → discord não reserva"
-    rec = SearchApiQuota.find_by(api_name: "linkup", month: "2026-08")
-    assert_equal 100, rec.count
-    assert_equal 5, rec.count_discord
+  # origin=nil ≡ mcp: para aos 95% igualzinho
+  def test_origin_nil_recusa_aos_95_igual_mcp
+    SearchApiQuota.create!(api_name: "exa", month: "2026-08", count: 95)
+    ok = SearchApiQuota.reserve_quota!("exa", ceiling: 100, month: "2026-08", origin: nil)
+    refute ok, "origin=nil ≡ :mcp no gate; recusa quando count=95 >= mcp_limit=95"
+    rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
+    assert_equal 95, rec.count
+    assert_equal 0, rec.count_mcp, "origin=nil não incrementa coluna de origem"
   end
 
-  # ── F3b D1 piso: mcp NÃO tem piso — teto principal intacto ──────────────────
-  # ceiling=100, count=100 (teto fechado) → mcp recusa.
-  # Versão mais direta do "mcp recusa quando teto fechado":
-  def test_mcp_recusa_quando_count_atinge_ceiling
-    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 100)
-
-    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :mcp)
-    refute ok, "mcp NÃO tem piso — teto principal fechado = recusa"
+  # ceiling=100, count=99, origin=:discord → TRUE (vai pro 100); count=100 → FALSE
+  def test_discord_reserva_ate_ceiling_e_recusa_em_count_igual_ceiling
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 99)
+    ok1 = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
+    assert ok1, "count=99 < ceiling=100 → reserva (vai a 100)"
     rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 100, rec.count, "count NÃO mexe quando mcp recusa"
+    assert_equal 100, rec.count
+    assert_equal 1, rec.count_discord
+
+    ok2 = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
+    refute ok2, "count=100 >= ceiling=100 → recusa (teto cheio, sem overage)"
+    rec.reload
+    assert_equal 100, rec.count, "count NUNCA passa de ceiling — sem overage"
+    assert_equal 1, rec.count_discord, "count_discord NÃO incrementa em recusa"
+  end
+
+  # ceiling=0 → FALSE pra TODOS (kill-switch fecha o bot inclusive)
+  def test_kill_switch_ceiling_zero_bloqueia_discord
+    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 0, month: "2026-08", origin: :discord)
+    refute ok, "ceiling=0 é kill-switch; discord não escapa"
+    # Nenhuma linha deve ter sido criada (early-return antes do transaction).
+    refute SearchApiQuota.find_by(api_name: "tavily", month: "2026-08"),
+           "ceiling=0 → não cria registro (early-return antes do transaction)"
+  end
+
+  def test_kill_switch_ceiling_zero_bloqueia_mcp_e_nil
+    %i[mcp nil].each do |origin|
+      ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 0, month: "2026-08", origin: origin)
+      refute ok, "ceiling=0 bloqueia #{origin.inspect} também"
+    end
+  end
+
+  def test_kill_switch_ceiling_negativo_bloqueia
+    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: -1, month: "2026-08", origin: :discord)
+    refute ok
+  end
+
+  # ── Borda: tetos pequenos (1-2). `max(0, ...)` evita piso negativo ────────
+  def test_ceiling_2_discord_para_no_teto_unico_sem_reserva_de_piso
+    # mcp_limit = ceiling - bot_floor_size(2) = 2 - max(0, floor(0.10)) = 2 - 0 = 2
+    # Discord com count=1 → reserva normal (count vai a 2).
+    # Discord com count=2 → recusa (count >= ceiling).
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 1)
+    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 2, month: "2026-08", origin: :discord)
+    assert ok, "count=1 < ceiling=2 → reserva normal"
+    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
+    assert_equal 2, rec.count
+    assert_equal 1, rec.count_discord
+
+    ok2 = SearchApiQuota.reserve_quota!("tavily", ceiling: 2, month: "2026-08", origin: :discord)
+    refute ok2, "count=2 >= ceiling=2 → recusa (teto cheio)"
+  end
+
+  def test_ceiling_1_discord_para_no_teto_unico
+    # mcp_limit = ceiling - bot_floor_size(1) = 1 - max(0, floor(0.05)) = 1 - 0 = 1
+    # Discord com count=0 → reserva (vai a 1). count=1 → recusa.
+    SearchApiQuota.create!(api_name: "exa", month: "2026-08", count: 0)
+    ok = SearchApiQuota.reserve_quota!("exa", ceiling: 1, month: "2026-08", origin: :discord)
+    assert ok
+    rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
+    assert_equal 1, rec.count
+
+    ok2 = SearchApiQuota.reserve_quota!("exa", ceiling: 1, month: "2026-08", origin: :discord)
+    refute ok2
+  end
+
+  # ── Legado F3a: reserve sem origin com ceiling=10 (regressão) ──────────────
+  # Brief v8: "ceiling=10, origin=nil → count=0 TRUE e count=10 FALSE".
+  # bot_floor_size(10) = max(0, floor(10*0.05)) = max(0, 0) = 0;
+  # mcp_limit = 10 - 0 = 10. Sem origin ≡ :mcp no gate.
+  def test_legado_reserve_sem_origin_ceiling_10_count_0_reserva
+    SearchApiQuota.reserve_quota!("legacy_api", ceiling: 10, month: "2026-08")
+    rec = SearchApiQuota.find_by(api_name: "legacy_api", month: "2026-08")
+    assert_equal 1, rec.count, "ceiling=10, count=0 < mcp_limit=10 → reserva"
+  end
+
+  def test_legado_reserve_sem_origin_ceiling_10_count_10_recusa
+    SearchApiQuota.create!(api_name: "legacy_full", month: "2026-08", count: 10)
+    ok = SearchApiQuota.reserve_quota!("legacy_full", ceiling: 10, month: "2026-08")
+    refute ok, "ceiling=10, count=10 >= mcp_limit=10 → recusa (legado F3a volta a passar)"
+    rec = SearchApiQuota.find_by(api_name: "legacy_full", month: "2026-08")
+    assert_equal 10, rec.count, "count NÃO incrementa em recusa"
+  end
+
+  # ── MCP reserva enquanto count < mcp_limit ────────────────────────────────
+  def test_mcp_reserva_normalmente_abaixo_do_95_porcento
+    # ceiling=100, mcp_limit=ceiling - bot_floor_size = 100 - 5 = 95.
+    # MCP com count=4 → reserva (vai a 5).
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 4)
+    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :mcp)
+    assert ok, "MCP com count=4 < mcp_limit(95) → reserva"
+    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
+    assert_equal 5, rec.count
+    assert_equal 1, rec.count_mcp
+  end
+
+  # ── Regressão do contrato legado (reserve sem origin) ──────────────────────
+  def test_contrato_legado_reserve_sem_origin_continua_funcionando
+    3.times { SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08") }
+    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
+    assert_equal 3, rec.count
+    assert_equal 0, rec.count_discord
     assert_equal 0, rec.count_mcp
   end
 
-  # ── F3b D1 piso: discord NO TETO PRINCIPAL ESTOURADO MAS count_discord zero
-  #    ainda tem piso disponível → discord reserva do piso. Esse é o caso
-  #    crítico do plano: "campanha do perfil gastou quase tudo" (count > ceiling,
-  #    count_discord=0) e o bot AINDA pode gastar até o piso. Só recusa quando
-  #    o próprio count_discord atinge o piso (=5).
-  def test_discord_reserva_piso_com_count_maior_que_ceiling_e_count_discord_zero
-    SearchApiQuota.create!(api_name: "exa", month: "2026-08", count: 110, count_discord: 0)
-
-    ok = SearchApiQuota.reserve_quota!("exa", ceiling: 100, month: "2026-08", origin: :discord)
-    assert ok, "count_discord=0 < piso=5 → discord reserva DO PISO mesmo com count > ceiling"
-    rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
-    assert_equal 111, rec.count
-    assert_equal 1, rec.count_discord
+  def test_contrato_legado_reserve_sem_origin_para_no_teto
+    # Sem origin = mcp no gate. ceiling=100, count=95 → recusa.
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 95)
+    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08")
+    refute ok, "reserve sem origin ≡ mcp: para aos 95%"
   end
 
-  # ── F3b D1 piso: discord NO TETO PRINCIPAL ESTOURADO com count_discord já
-  #    no piso → recusa (piso esgotado, mesmo com count estourado).
-  def test_discord_recusa_quando_count_discord_no_piso_e_count_estourado
-    SearchApiQuota.create!(api_name: "exa", month: "2026-08", count: 110, count_discord: 5)
-
-    ok = SearchApiQuota.reserve_quota!("exa", ceiling: 100, month: "2026-08", origin: :discord)
-    refute ok, "count_discord=5 (= piso) → discord não reserva mesmo com count > ceiling"
-    rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
-    assert_equal 110, rec.count
-    assert_equal 5, rec.count_discord
-  end
-
-  # ── F3b piso: ceiling pequeno (5) — piso é max(1, floor(5*0.05)=floor(0.25)=0) = 1 ─
-  def test_piso_ceiling_5_permite_apenas_1_chamada_discord_no_piso
-    # count=4 (80% do teto). Discord pode fazer 1 reserva (count < ceiling, vai a 5).
-    # Depois: count=5 >= ceiling=5, count_discord=1 < max(1, 0)=1? 1 < 1 = false → recusa.
-    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 4)
-
-    ok1 = SearchApiQuota.reserve_quota!("tavily", ceiling: 5, month: "2026-08", origin: :discord)
-    ok2 = SearchApiQuota.reserve_quota!("tavily", ceiling: 5, month: "2026-08", origin: :discord)
-    assert ok1, "1ª reserva (count 4→5) deve passar"
-    refute ok2, "2ª reserva com count=5 >= ceiling=5 e count_discord=1 já no piso max=1 deve recuar"
-    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 5, rec.count
-    assert_equal 1, rec.count_discord
-  end
-
-  # ── F3b rollback: reverte count + count_discord quando origin=:discord ─────
+  # ── Rollback (métrica + count) ─────────────────────────────────────────────
   def test_rollback_quota_reverte_count_e_count_discord
     SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
     rec_before = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
@@ -227,20 +277,14 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec_after.count_discord
   end
 
-  # ── F3b rollback: reverte count + count_mcp quando origin=:mcp ──────────────
   def test_rollback_quota_reverte_count_e_count_mcp
     SearchApiQuota.reserve_quota!("exa", ceiling: 100, month: "2026-08", origin: :mcp)
-    rec_before = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
-    assert_equal 1, rec_before.count
-    assert_equal 1, rec_before.count_mcp
-
     SearchApiQuota.rollback_quota!("exa", month: "2026-08", origin: :mcp)
-    rec_after = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
-    assert_equal 0, rec_after.count
-    assert_equal 0, rec_after.count_mcp
+    rec = SearchApiQuota.find_by(api_name: "exa", month: "2026-08")
+    assert_equal 0, rec.count
+    assert_equal 0, rec.count_mcp
   end
 
-  # ── F3b rollback: sem origin reverte só count (legado intacto) ─────────────
   def test_rollback_quota_sem_origin_reverte_apenas_count
     SearchApiQuota.reserve_quota!("linkup", ceiling: 100, month: "2026-08")
     SearchApiQuota.rollback_quota!("linkup", month: "2026-08")
@@ -250,19 +294,6 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_mcp
   end
 
-  # ── F3b rollback: reverter uma reserva do piso discord decrementa corretamente
-  def test_rollback_quota_apos_reserva_do_piso_decrementa_count_discord
-    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 100, count_discord: 0)
-
-    SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
-    SearchApiQuota.rollback_quota!("tavily", month: "2026-08", origin: :discord)
-
-    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 100, rec.count, "rollback volta count para 100 (estado pré-piso)"
-    assert_equal 0, rec.count_discord, "rollback zera count_discord"
-  end
-
-  # ── F3b guarda: rollback não decrementa abaixo de 0 ──────────────────────
   def test_rollback_com_count_discord_zero_e_noop
     SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 5, count_discord: 0)
     SearchApiQuota.rollback_quota!("tavily", month: "2026-08", origin: :discord)
@@ -271,26 +302,6 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_discord
   end
 
-  # ── F3b integração: reserve+rollback para o piso deixa count_discord intacto
-  def test_reserva_piso_discord_com_sucesso_incrementa_count_e_count_discord
-    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 100, count_discord: 2)
-    ok = SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08", origin: :discord)
-    assert ok, "count_discord=2 < piso=5 → discord reserva do piso"
-    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 101, rec.count
-    assert_equal 3, rec.count_discord
-  end
-
-  # ── F3b regressão: contrato legado — reserve sem origin — não muda ─────────
-  def test_contrato_legado_reserve_sem_origin_continua_funcionando
-    3.times { SearchApiQuota.reserve_quota!("tavily", ceiling: 100, month: "2026-08") }
-    rec = SearchApiQuota.find_by(api_name: "tavily", month: "2026-08")
-    assert_equal 3, rec.count
-    assert_equal 0, rec.count_discord
-    assert_equal 0, rec.count_mcp
-  end
-
-  # ── F3b regressão: rollback múltiplo sem reserva não vai negativo ─────────
   def test_rollback_multiplo_sem_reserva_nao_vai_negativo
     SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 0)
     3.times { SearchApiQuota.rollback_quota!("tavily", month: "2026-08", origin: :discord) }
@@ -299,13 +310,65 @@ class SearchApiQuotaF3bPureTest < Minitest::Test
     assert_equal 0, rec.count_discord
   end
 
-  # ── F3b D7-readiness: método público para F8 (rake/search:report) ler contagem
-  # O plano-fase2 §D7 define que a métrica de origem deve ser legível. Aqui
-  # só cravamos que os contadores são atributos públicos do model (sem
-  # helper custom) — é o suficiente pro F8 grep+log.
-  def test_count_discord_e_count_mcp_sao_atributos_publicos
-    rec = SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count_discord: 7, count_mcp: 3)
-    assert_equal 7, rec.count_discord
-    assert_equal 3, rec.count_mcp
+  # ── exceeded_with_origin? (regra canônica do fast-path) ────────────────────
+  def test_exceeded_with_origin_kill_switch_ceiling_zero
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 0, month: "2026-08", origin: :discord
+    )
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 0, month: "2026-08", origin: :mcp
+    )
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 0, month: "2026-08", origin: nil
+    )
+  end
+
+  def test_exceeded_with_origin_mcp_bloqueia_em_count_95
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 95)
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 100, month: "2026-08", origin: :mcp
+    ), "MCP/legado com count=95 >= mcp_limit=95 → exceeded"
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 100, month: "2026-08", origin: nil
+    ), "origin=nil ≡ :mcp no gate"
+  end
+
+  def test_exceeded_with_origin_mcp_libera_abaixo_do_95
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 4)
+    assert_equal false, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 100, month: "2026-08", origin: :mcp
+    ), "count=4 < mcp_limit=95 → NÃO exceeded"
+  end
+
+  def test_exceeded_with_origin_discord_bloqueia_so_no_teto
+    SearchApiQuota.create!(api_name: "tavily", month: "2026-08", count: 99)
+    assert_equal false, SearchApiQuota.exceeded_with_origin?(
+      "tavily", ceiling: 100, month: "2026-08", origin: :discord
+    ), "Discord com count=99 < ceiling=100 → reserva o 100º (não exceeded)"
+
+    SearchApiQuota.create!(api_name: "exa", month: "2026-08", count: 100)
+    assert_equal true, SearchApiQuota.exceeded_with_origin?(
+      "exa", ceiling: 100, month: "2026-08", origin: :discord
+    ), "Discord com count=100 >= ceiling=100 → exceeded (sem overage)"
+  end
+
+  def test_exceeded_with_origin_sem_row_nao_bloqueia_quando_count_zero
+    SearchApiQuota.where(api_name: "new_api", month: "2026-08").delete_all
+    assert_equal false, SearchApiQuota.exceeded_with_origin?(
+      "new_api", ceiling: 100, month: "2026-08", origin: :discord
+    ), "linha inexistente + ceiling>0 → não exceeded (pode criar)"
+  end
+
+  # ── Sanity: count nunca ultrapassa ceiling ────────────────────────────────
+  def test_count_nunca_passa_de_ceiling_em_qualquer_caminho
+    api = "ceiling_guard"
+    SearchApiQuota.where(api_name: api, month: "2026-08").delete_all
+    50.times do
+      SearchApiQuota.reserve_quota!(api, ceiling: 100, month: "2026-08", origin: :discord)
+    end
+    rec = SearchApiQuota.find_by(api_name: api, month: "2026-08")
+    assert rec.count <= 100, "count=#{rec.count} violou o teto (sem overage)"
+    assert_equal 50, rec.count, "50 reservas com count<ceiling → count=50"
+    assert_equal 50, rec.count_discord, "count_discord sobe junto com count"
   end
 end

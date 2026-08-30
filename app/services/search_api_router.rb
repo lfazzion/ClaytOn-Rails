@@ -131,7 +131,7 @@ class SearchApiRouter
     # usar (via `type:` do schema), só esse provedor paga. Se ele falhar ou
     # devolver vazio, a cota já foi cobrada no attempt — chamar outro seria
     # gastar cota fora do tipo escolhido (violação do plano v2 F2).
-    if specialty_enabled?(specialty, providers)
+    if specialty_enabled?(specialty, providers, origin: origin)
       result, reason = attempt(specialty, query, limit, tr, today, origin: origin)
       elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
 
@@ -556,26 +556,31 @@ class SearchApiRouter
   # Fail-open intencional: se o banco estiver indisponível ou ocorrer erro
   # no modelo de cota, a busca externa não é bloqueada (retorna false).
   #
-  # F3b: com `origin: :discord`, considera o piso — se `count_discord < piso`,
-  # discord AINDA pode gastar (count > ceiling não bloqueia discord; o
-  # `reserve_quota!` que decide o caminho do piso na reserva atômica). Aqui
-  # só evitamos o fast-path em casos óbvios (count >= ceiling E piso
-  # esgotado) para não desperdiçar trabalho de pre-check.
+  # F3b: usa `exceeded_with_origin?` (regra canônica D1) em vez do
+  # `exceeded?` legado (F3a). O piso 96-100% é exclusivo de `:discord`:
+  # com origin :discord, o fast-path só bloqueia se count >= ceiling
+  # (sem overage); com origin :mcp/nil, bloqueia em count >= mcp_limit
+  # (95% do teto, ou teto=0 → bloqueia sempre).
+  #
+  # Kill-switch (ceiling <= 0) é checado ANTES da disponibilidade do AR:
+  # se o teto é 0, o método bloqueia MESMO sem banco conectado. Isso
+  # garante que `ceiling=0` fecha o router (defesa em profundidade contra
+  # alguém que desligaria o AR para contornar o teto — o teto é do
+  # plano, não da infra).
   def self.quota_exceeded?(provider, origin: nil)
+    ceiling = quota_ceiling(provider)
+    return true if ceiling <= 0
+
     return false unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
 
-    ceiling = quota_ceiling(provider)
-    if origin == :discord
-      # Discord pode ainda gastar do piso se count_discord não encheu o
-      # piso de 5%. O fast-path SÓ bloqueia se ambos: count >= ceiling E
-      # count_discord >= piso (= max(1, floor(ceiling*0.05))).
-      SearchApiQuota.exceeded_with_origin?(provider.to_s, ceiling: ceiling, origin: :discord, month: current_month)
-    else
-      # mcp/nil: teto único puro (legado intacto).
-      SearchApiQuota.exceeded?(provider.to_s, ceiling, month: current_month)
-    end
+    SearchApiQuota.exceeded_with_origin?(
+      provider.to_s,
+      ceiling: ceiling,
+      origin: origin,
+      month: current_month
+    )
   rescue StandardError => e
-    Rails.logger.warn("[SearchApiRouter] erro ao verificar cota de #{provider}: #{e.message}")
+    Rails.logger.warn "[SearchApiRouter] erro ao verificar cota de #{provider}: #{e.message}"
     false
   end
 

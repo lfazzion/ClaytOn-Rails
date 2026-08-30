@@ -53,56 +53,80 @@ class SearchApiQuota < ApplicationRecord
   end
 
   # ── F3b D1: piso 5% pro bot + métricas por origem ────────────────────────────
-  # Constantes da regra do plano-fase2 D1/F3-quota (linha 31). O piso é uma
-  # EXCEÇÃO do teto único, não um segundo teto: o `count` continua sendo o
-  # teto; `count_discord` é um CONTADOR de observabilidade que sustenta a
-  # exceção. Discorda do brief? Ver `plano-fase2.md` seção D1 — esse é o
-  # contrato canônico. O brief reconhece que o plano é a fonte de verdade.
+  # Regra canônica (plano-fase2 D1, linha 31 / aceite F3b, linha 109):
+  #
+  #   "Piso dos últimos 5%" — RESERVA, não overage. O teto único é `count`
+  #   e NUNCA passa de `ceiling`. Discord (o bot) tem acesso aos últimos 5%
+  #   da cota; MCP e demais origens param aos 95%.
+  #
+  # Concretamente:
+  #   ceiling <= 0  → kill-switch; ninguém reserva (nem Discord).
+  #   origin != :discord (inclui nil e mcp) + count >= max(0, floor(ceiling*0.95))
+  #                  → MCP/legado param aos 95% do teto.
+  #   origin == :discord
+  #     count <  ceiling                        → reserva normal (count_discord+1).
+  #     count >= ceiling (mas <= 95% ainda?)    → impossível: count >= ceiling ≥ 95%+.
+  #     count >= ceiling e ainda dentro do piso → reserva do piso (96–100).
+  #     count >= ceiling e piso esgotado        → recusa.
+  #
+  # A coluna `count_discord` é CONTADOR DE OBSERVABILIDADE da reserva: sobe
+  # junto com `count` e serve ao dashboard F8 (rake search:report). NÃO é um
+  # segundo teto — o teto é único.
   FLOOR_RATIO = 0.05
   private_constant :FLOOR_RATIO
 
-  # Coluna que recebe o incremento do contador de origem (nenhuma se nil).
-  # Símbolo (não string) para casar com o `increment!` do AR — strings não
-  # funcionam como argumento de `increment!`.
-  ORIGIN_COUNTER_COLUMN = {
-    discord: :count_discord,
-    mcp:     :count_mcp,
-    nil:     nil
-  }.freeze
-  private_constant :ORIGIN_COUNTER_COLUMN
-
-  # Tamanho do piso: `max(1, floor(ceiling * 0.05))`. Pelo menos 1 para
-  # não zerar o piso com tetos muito pequenos. `ceiling=100 → 5`,
-  # `ceiling=5 → 1`, `ceiling=1 → 0 → max(1, 0) = 1`.
+  # Tamanho da RESERVA de piso para o bot: `max(0, floor(ceiling * 0.05))`.
+  # `ceiling=100 → 5`, `ceiling=5 → 0`, `ceiling=1 → 0`, `ceiling=0 → 0`.
+  # `max(0, ...)` evita piso negativo com tetos pequenos (1-2) e zera o
+  # piso com `ceiling=0` (kill-switch — visto no early-return abaixo).
   def self.bot_floor_size(ceiling)
-    [1, (ceiling.to_i * FLOOR_RATIO).floor].max
+    [0, (ceiling.to_i * FLOOR_RATIO).floor].max
   end
   private_class_method :bot_floor_size
 
-  # ── F3a: reserva atômica de quota ──────────────────────────────────────────
+  # Coluna que recebe o incremento do contador de origem (nenhuma se nil).
+  # Símbolo (não string) para casar com o `increment!` do AR — strings não
+  # funcionam como argumento de `increment!`. Chave `nil => nil` explícita
+  # para legibilidade (a forma `nil:` em literal de hash vira símbolo `:nil`,
+  # o que confunde leitora — esse desenho evita a armadilha).
+  ORIGIN_COUNTER_COLUMN = {
+    discord: :count_discord,
+    mcp:     :count_mcp,
+    nil     => nil
+  }.freeze
+  private_constant :ORIGIN_COUNTER_COLUMN
+
+  # ── F3a: reserva atômica de quota — REGRA CANÔNICA F3b D1 (revisada) ───────
   # Funde `exceeded?` + `increment` numa única transação atômica para fechar
   # a janela TOCTOU do E10: dois `with_lock` separados davam espaço para uma
   # thread passar no check e a outra também passar antes do increment gravar.
   #
-  # Semântica:
-  #   - Abre transação + `with_lock` na linha (api_name, month) (cria se não
-  #     existir, com count=0).
-  #   - Lê count, compara com ceiling. Se count >= ceiling → verifica a
-  #     EXCEÇÃO DO PISO (F3b): só `origin == :discord` com
-  #     `count_discord < bot_floor_size(ceiling)` ainda reserva. Senão
-  #     retorna false SEM incrementar.
-  #   - Caso normal (count < ceiling) → increment!(:count), e se origin
-  #     não for nil, increment!(ORIGIN_COUNTER_COLUMN[origin]).
-  #   - Retorna true.
+  # Regra (F3b D1 — "RESERVA dos últimos 5%"):
+  #   1. ceiling <= 0 → false SEMPRE. Teto 0 é kill-switch (Discord não
+  #      escapa — o bot fica sem API). Early-return SEM incrementar.
+  #   2. origin != :discord (inclui nil ≡ mcp) e count >= max(0, floor(ceiling*0.95))
+  #      → false SEM incrementar. MCP/legado param aos 95%; a fatia 96–100 é
+  #      exclusiva do bot.
+  #   3. origin == :discord recusa SÓ com count >= ceiling (sem sobreposição):
+  #      o bot reserva os 5% finais (96–100) sob a MESMA contagem `count`.
+  #      Quando `count_discord` alcançar o tamanho do piso, recusa — sem
+  #      overage (`count` nunca ultrapassa `ceiling`).
+  #   4. Caso normal (count < ceiling para qualquer origem; ou
+  #      origin == :discord com count < ceiling) → increment!(:count),
+  #      e se origin não for nil, increment!(ORIGIN_COUNTER_COLUMN[origin]).
+  #   5. Em corrida na criação concorrente (RecordNotUnique), recupera o
+  #      registro já criado pela thread rival e re-tenta o lock — análogo
+  #      ao `increment` legado.
   #
-  # Em caso de corrida na criação concorrente (RecordNotUnique entre o
-  # find_or_create_by de uma transação e a outra), recupera o registro já
-  # criado pela thread rival e re-tenta o lock — análogo ao `increment`
-  # legado.
+  # `max(0, ...)` em (2) evita piso negativo com tetos 1-2 (e.g. ceiling=2 →
+  # floor(0.1)=0 → max(0,0)=0 → MCP com count>=0 já recusa — comportamento
+  # esperado: teto pequeno = sem reserva de piso).
   #
-  # @param origin [:discord, :mcp, nil] nil = chamada "sem origem" (legado)
+  # @param origin [:discord, :mcp, nil] nil = "sem origem" (legado).
   # @return [Boolean] true se reservou, false se teto/piso atingido.
   def self.reserve_quota!(api_name, ceiling:, month: current_month, origin: nil)
+    return false if ceiling <= 0
+
     transaction do
       rec = nil
       begin
@@ -117,28 +141,76 @@ class SearchApiQuota < ApplicationRecord
       end
 
       rec.with_lock do
-        if rec.count >= ceiling
-          # Teto principal fechado. Tenta a EXCEÇÃO DO PISO (F3b):
-          # só `origin == :discord` com count_discord abaixo do piso.
-          if origin == :discord && rec.count_discord < bot_floor_size(ceiling)
-            # Reservou do piso. `count` sobe junto (o teto principal
-            # também reflete o gasto — é o "count" que o orçamento vê);
-            # `count_discord` é a métrica que conta quantas dessas
-            # reservas vieram do bot. Sem o count, dashboards leriam
-            # só 95 e achariam que o bot não usou a API.
-            rec.increment!(:count)
-            rec.increment!(:count_discord)
-            true
-          else
-            false
+        if origin != :discord
+          # MCP/legado param aos 95%: o limite é `ceiling - bot_floor_size`.
+          # Concretamente: ceiling=100 → 95; ceiling=10 → 10; ceiling=1 → 1.
+          # Quando `bot_floor_size(ceiling) >= ceiling` (teto 0-5), o piso
+          # ocupa ou ultrapassa o teto inteiro; mcp_limit vira 0 e o MCP
+          # não reserva — comportamento esperado: teto pequeno demais para
+          # partilha. Discord usa o teto único (count < ceiling), sem
+          # overage.
+          mcp_limit = ceiling - bot_floor_size(ceiling)
+          if rec.count >= mcp_limit
+            # MCP/legado atingiu o limite dos 95% (ou teto pequeno demais
+            # para partilha). Reserva do piso é exclusiva do bot.
+            return false
           end
-        else
+          # Cabe no teto geral E no limite MCP — reserva normal.
           rec.increment!(:count)
           column = ORIGIN_COUNTER_COLUMN[origin]
           rec.increment!(column) if column
-          true
+          return true
         end
+
+        # origin == :discord: teto único puro. count NUNCA passa de ceiling
+        # — sem overage. O "piso" do bot é a ÚLTIMA fatia antes do teto
+        # (96–100 quando ceiling=100, ou 1 quando ceiling=1-2 com piso=0
+        # e teto único já fechado).
+        if rec.count >= ceiling
+          # Teto fechado — sem reserva possível. Discord não escapa do
+          # kill-switch nem da contagem `count` (que é o teto).
+          return false
+        end
+
+        rec.increment!(:count)
+        rec.increment!(:count_discord)
+        true
       end
+    end
+  end
+
+  # `exceeded_with_origin?` — MESMA regra do `reserve_quota!`, sem
+  # incrementar. Usado pelo fast-path do router (cascata padrão e
+  # specialty_enabled?) para evitar entrar em `attempt` quando a cota já
+  # está fechada. Kill-switch (ceiling<=0) bloqueia para TODOS.
+  #
+  # Diferença importante vs `exceeded?` legado: este método conhece a
+  # exceção do piso. `exceeded?` (legado, F3a) só olha count >= ceiling
+  # e foi mantido para compatibilidade com testes existentes; o fast-path
+  # F3b usa este.
+  #
+  # @return [Boolean] true se NÃO pode reservar (cota/piso esgotado).
+  def self.exceeded_with_origin?(api_name, ceiling:, month: current_month, origin: nil)
+    return true if ceiling <= 0
+
+    rec = find_by(api_name: api_name, month: month)
+    return false unless rec
+
+    rec.with_lock do
+      if origin != :discord
+        # MCP/legado: limite = `ceiling - bot_floor_size` (95% do teto, ou o
+        # teto inteiro quando `bot_floor_size == 0`, como em tetos 1-10).
+        mcp_limit = ceiling - bot_floor_size(ceiling)
+        # Se `mcp_limit == 0` (apenas com `ceiling <= bot_floor_size`,
+        # i.e. tetos 0-5 onde o piso ocupa o teto inteiro), MCP/legado NÃO
+        # reserva nada. Discord, por outro lado, usa o teto único
+        # (count < ceiling) — então tetos pequenos (1-2) ainda permitem
+        # ao bot uma reserva normal dentro do teto.
+        return rec.count >= mcp_limit
+      end
+
+      # origin == :discord: teto único puro, sem overage.
+      rec.count >= ceiling
     end
   end
 
