@@ -9,6 +9,10 @@
 # Cobertura do contrato fail-open:
 # - SearchApiRouter.quota_exceeded? retorna false se SearchApiQuota.exceeded? levantar erro.
 # - SearchApiRouter.increment_quota não levanta exceção e retorna nil se SearchApiQuota.increment levantar erro.
+# - SearchApiRouter.reserve_quota_or_skip retorna true (fail-open) se SearchApiQuota.reserve_quota!
+#   levantar erro (busca segue mesmo com DB fora).
+# - SearchApiRouter.rollback_quota_silently NÃO levanta exceção se SearchApiQuota.rollback_quota!
+#   levantar erro (busca não derruba por falha de rollback).
 
 require "json"
 require "date"
@@ -49,6 +53,17 @@ unless defined?(SearchApiQuota)
     def self.increment(*, **)
       raise StandardError, "DB write lock failed"
     end
+
+    # F3a: o caminho vivo do `attempt` usa `reserve_quota!` / `rollback_quota!`,
+    # não `exceeded?` / `increment`. Para o check ser fiel ao contrato novo,
+    # os envelopes também precisam ser fail-open.
+    def self.reserve_quota!(*, **)
+      raise StandardError, "DB connection lost (reserve)"
+    end
+
+    def self.rollback_quota!(*, **)
+      raise StandardError, "DB connection lost (rollback)"
+    end
   end
 end
 
@@ -82,6 +97,39 @@ begin
   end
 rescue StandardError => e
   puts "FAIL: increment_quota levantou exceção inesperada: #{e.message}"
+  failed += 1
+end
+
+# ── 3. reserve_quota_or_skip fail-open retorna true se SearchApiQuota.reserve_quota! levantar erro ─
+# O envelope do `attempt` (SearchApiRouter.reserve_quota_or_skip) DEVE propagar
+# `true` quando o `reserve_quota!` falha — a busca do usuário NÃO pode ser
+# bloqueada por erro de banco. Esse é o caminho vivo (F3a) que substituiu
+# `exceeded? + increment` legado.
+begin
+  result = SearchApiRouter.reserve_quota_or_skip(:linkup)
+  if result == true
+    passed += 1
+  else
+    puts "FAIL: reserve_quota_or_skip esperado true (fail-open), recebeu #{result.inspect}"
+    failed += 1
+  end
+rescue StandardError => e
+  puts "FAIL: reserve_quota_or_skip levantou exceção inesperada: #{e.message}"
+  failed += 1
+end
+
+# ── 4. rollback_quota_silently fail-open NÃO levanta exceção se SearchApiQuota.rollback_quota! levantar erro ─
+# O envelope do rollback (SearchApiRouter.rollback_quota_silently) deve engolir
+# erros do `rollback_quota!` — uma busca que JÁ falhou HTTP não pode virar
+# exceção por causa do rollback. Esse é o caminho vivo (F3a) que substituiu
+# o legado `increment_quota`.
+begin
+  result = SearchApiRouter.rollback_quota_silently(:linkup)
+  # Sem raise e retorno é o que o envelope fizer (nil nesse stub). O importante:
+  # não levantou exceção.
+  passed += 1
+rescue StandardError => e
+  puts "FAIL: rollback_quota_silently levantou exceção inesperada: #{e.message}"
   failed += 1
 end
 

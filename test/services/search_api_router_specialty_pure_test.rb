@@ -12,7 +12,9 @@
 #   `specialty:` ausente (`auto`) → fluxo legado intacto (cascata padrão por regex).
 #
 # Estes testes instanciam o router de VERDADE e fazem stub APENAS de
-# `http_post` / `quota_exceeded?` / `increment_quota` (NUNCA de `call`).
+# `http_post` / `quota_exceeded?` / `reserve_quota_or_skip` /
+# `rollback_quota_silently` (NUNCA de `call`). `increment_quota` virou
+# helper legado que o `attempt` NÃO chama mais, então não é mais stubado.
 # Rodáveis com `ruby test/services/search_api_router_specialty_pure_test.rb`.
 
 require "minitest/autorun"
@@ -113,7 +115,8 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
   def setup
     @original_http_post = SearchApiRouter.singleton_class.instance_method(:http_post)
     @original_quota_exceeded = SearchApiRouter.singleton_class.instance_method(:quota_exceeded?)
-    @original_increment_quota = SearchApiRouter.singleton_class.instance_method(:increment_quota)
+    @original_reserve_quota_or_skip = SearchApiRouter.singleton_class.instance_method(:reserve_quota_or_skip)
+    @original_rollback_quota_silently = SearchApiRouter.singleton_class.instance_method(:rollback_quota_silently)
     @saved_env = SEARCH_API_ENVS.to_h { |k| [k, ENV[k]] }
     SEARCH_API_ENVS.each { |k| ENV.delete(k) }
     @calls = []
@@ -122,7 +125,8 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
   def teardown
     SearchApiRouter.singleton_class.send(:define_method, :http_post, @original_http_post)
     SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?, @original_quota_exceeded)
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota, @original_increment_quota)
+    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip, @original_reserve_quota_or_skip)
+    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently, @original_rollback_quota_silently)
     @saved_env.each do |k, v|
       v.nil? ? ENV.delete(k) : ENV[k] = v
     end
@@ -160,8 +164,9 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     SearchApiRouter.singleton_class.send(:define_method, :quota_exceeded?) { |_| false }
   end
 
-  def stub_increment_quota_noop
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) { |_| }
+  def stub_quota_envelopes_noop
+    SearchApiRouter.singleton_class.send(:define_method, :reserve_quota_or_skip) { |_| true }
+    SearchApiRouter.singleton_class.send(:define_method, :rollback_quota_silently) { |_| }
   end
 
   # (a) preferred habilitado + sucesso → SÓ ELE é chamado.
@@ -170,7 +175,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post(
       { tavily: { ok: true, body: { "results" => [{ "title" => "N1", "url" => "https://n1.com", "content" => "c", "score" => 0.95 }], "usage" => { "credits" => 1 } }, reason: nil, retryable: false } }
     )
@@ -191,7 +196,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post({ tavily: { ok: false, body: nil, reason: "HTTP 401", retryable: false } })
 
     out = SearchApiRouter.call(query: "última notícia SpaceX agora", specialty: :tavily)
@@ -206,7 +211,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post({ tavily: { ok: true, body: { "results" => [] }, reason: nil, retryable: false } })
 
     out = SearchApiRouter.call(query: "última notícia SpaceX agora", specialty: :tavily)
@@ -223,7 +228,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
       ENV["EXA_API_KEY"] = "ex"
       ENV["LINKUP_API_KEY"] = "lk"
       stub_quota_exhausted_only(:tavily)
-      stub_increment_quota_noop
+      stub_quota_envelopes_noop
       calls = stub_http_post(
         {
           linkup: { ok: false, body: nil, reason: "HTTP 500", retryable: false },
@@ -246,7 +251,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
       ENV["LINKUP_API_KEY"] = "lk"
       # Sem TAVILY_API_KEY → specialty=:tavily não está habilitado.
       stub_quota_open
-      stub_increment_quota_noop
+      stub_quota_envelopes_noop
       calls = stub_http_post(
         {
           linkup: { ok: false, body: nil, reason: "HTTP 500", retryable: false },
@@ -268,7 +273,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post(
       { tavily: { ok: true, body: { "results" => [{ "title" => "N1", "url" => "https://n1.com", "content" => "c", "score" => 0.95 }], "usage" => { "credits" => 1 } }, reason: nil, retryable: false } }
     )
@@ -283,7 +288,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post({ tavily: { ok: false, body: nil, reason: "HTTP 401", retryable: false } })
 
     SearchApiRouter.call(query: "x", specialty: :tavily)
@@ -296,7 +301,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post({ tavily: { ok: true, body: { "results" => [] }, reason: nil, retryable: false } })
 
     SearchApiRouter.call(query: "x", specialty: :tavily)
@@ -310,7 +315,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post(
       { linkup: { ok: true, body: { "results" => [{ "name" => "L1", "url" => "https://l1.com", "content" => "c" }] }, reason: nil, retryable: false } }
     )
@@ -329,7 +334,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post({ linkup: { ok: true, body: { "results" => [] }, reason: nil, retryable: false } })
 
     out = SearchApiRouter.call(query: "preço do bitcoin hoje")
@@ -345,7 +350,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     ENV["EXA_API_KEY"] = "ex"
     ENV["LINKUP_API_KEY"] = "lk"
     stub_quota_open
-    stub_increment_quota_noop
+    stub_quota_envelopes_noop
     calls = stub_http_post(
       {
         linkup: { ok: true, body: { "results" => [] }, reason: nil, retryable: false },

@@ -220,9 +220,6 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
         { ok: true, body: fake_exa, reason: nil, retryable: false }
       end
     end
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
-      # no-op
-    end
 
     orig_tv = ENV["TAVILY_API_KEY"]
     orig_ex = ENV["EXA_API_KEY"]
@@ -261,9 +258,6 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
         { ok: true, body: fake_tavily, reason: nil, retryable: false }
       end
     end
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
-      # no-op
-    end
 
     orig_tv = ENV["TAVILY_API_KEY"]
     orig_ex = ENV["EXA_API_KEY"]
@@ -293,9 +287,6 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
     SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
       calls << provider
       { ok: true, body: fake_linkup, reason: nil, retryable: false }
-    end
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
-      # no-op
     end
 
     orig_tv = ENV["TAVILY_API_KEY"]
@@ -330,9 +321,6 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
       else
         { ok: true, body: fake_exa, reason: nil, retryable: false }
       end
-    end
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
-      # no-op
     end
 
     orig_tv = ENV["TAVILY_API_KEY"]
@@ -420,9 +408,6 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
     SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
       calls << provider
       { ok: true, body: fake_linkup, reason: nil, retryable: false }
-    end
-    SearchApiRouter.singleton_class.send(:define_method, :increment_quota) do |_provider|
-      # no-op
     end
 
     orig_tv = ENV["TAVILY_API_KEY"]

@@ -79,57 +79,83 @@ class SearchApiQuotaModelTest < ActiveSupport::TestCase
   # em arquivo (não :memory:). O race E10 existia porque `quota_exceeded?` e
   # `increment_quota` eram dois `with_lock` separados pelo HTTP. `reserve_quota!`
   # funde os dois em UMA transação atômica — só uma das threads passa.
-  test "reserve_quota! com ceiling=1 e 2 threads simultâneas reserva no máximo 1" do
-    SearchApiQuota.where(api_name: "race_api", month: "2026-08").delete_all
+  #
+  # Forma threads+barrier: `use_transactional_tests = false` na SUBCLASSE
+  # dedicada abaixo — caso contrário, o `transaction do ... with_lock ...` que
+  # compõe `reserve_quota!` rola dentro da transação Rails do teste e o
+  # `with_lock` perde o efeito de serialização (uma transação enxerga o estado
+  # da outra via savepoint, o que invalida a prova de isolamento). O schema
+  # usado aqui é o do `db/test.sqlite3` carregado pelo test_helper (não há
+  # override de conexão: a complexidade de um `establish_connection` para
+  # `tmp/test_race_<pid>.sqlite3` não cabe no escopo da blindagem pedida no
+  # review r1, e o arquivo SQLite real sob WAL do test_helper já garante
+  # isolamento entre conexões de threads diferentes — ver
+  # `SearchApiQuota.reserve_quota!` que abre uma `transaction` própria).
+  class SearchApiQuotaRaceTest < ActiveSupport::TestCase
+    # Blindagem F3a: o `transaction` do `reserve_quota!` precisa ser uma
+    # transação de VERDADE para que `with_lock` cumpra o contrato. Com
+    # `use_transactional_tests = true` (padrão do Rails), cada teste rola
+    # dentro de uma transação que captura savepoints e mascara o efeito do
+    # lock entre threads, tornando a prova do race falsa-verde.
+    self.use_transactional_tests = false
 
-    barrier_mutex = Mutex.new
-    barrier_cond = ConditionVariable.new
-    ready_count = 0
-    go = false
+    test "reserve_quota! com ceiling=1 e 2 threads simultâneas reserva no máximo 1" do
+      SearchApiQuota.where(api_name: "race_api", month: "2026-08").delete_all
 
-    results = Array.new(2)
+      barrier_mutex = Mutex.new
+      barrier_cond = ConditionVariable.new
+      ready_count = 0
+      go = false
 
-    threads = (0..1).map do |i|
-      Thread.new do
-        # Usa conexão própria para que ActiveRecord não compartilhe a mesma
-        # handle entre threads (ActiveRecord por padrão tem check-out por
-        # thread; aqui usamos ApplicationRecord.connection_pool.with_connection
-        # para garantir isolamento).
-        ActiveRecord::Base.connection_pool.with_connection do
-          barrier_mutex.synchronize do
-            ready_count += 1
-            barrier_cond.broadcast if ready_count == 2
-            barrier_cond.wait(barrier_mutex) until go
+      results = Array.new(2)
+
+      threads = (0..1).map do |i|
+        Thread.new do
+          # Usa conexão própria para que ActiveRecord não compartilhe a mesma
+          # handle entre threads (ActiveRecord por padrão tem check-out por
+          # thread; aqui usamos ApplicationRecord.connection_pool.with_connection
+          # para garantir isolamento).
+          ActiveRecord::Base.connection_pool.with_connection do
+            barrier_mutex.synchronize do
+              ready_count += 1
+              barrier_cond.broadcast if ready_count == 2
+              barrier_cond.wait(barrier_mutex) until go
+            end
+
+            # `reserve_quota!` será chamado pelas duas threads exatamente
+            # depois do "go". A primeira que pegar o lock do SQLite passa
+            # (count 0→1); a segunda deve ver count=1 e receber false.
+            results[i] = SearchApiQuota.reserve_quota!("race_api", ceiling: 1, month: "2026-08")
           end
-
-          # `reserve_quota!` será chamado pelas duas threads exatamente
-          # depois do "go". A primeira que pegar o lock do SQLite passa
-          # (count 0→1); a segunda deve ver count=1 e receber false.
-          results[i] = SearchApiQuota.reserve_quota!("race_api", ceiling: 1, month: "2026-08")
         end
       end
+
+      # Espera as duas threads prontas
+      barrier_mutex.synchronize do
+        barrier_cond.wait(barrier_mutex) until ready_count == 2
+      end
+
+      # Sinaliza largada simultânea
+      barrier_mutex.synchronize do
+        go = true
+        barrier_cond.broadcast
+      end
+
+      threads.each(&:join)
+
+      rec = SearchApiQuota.find_by(api_name: "race_api", month: "2026-08")
+      assert_not_nil rec, "row deve existir após reserva"
+      assert rec.count <= 1, "count (#{rec.count}) deve ser <= ceiling=1; reserve_quota! falhou em serializar"
+      trues = results.count(true)
+      falses = results.count(false)
+      assert_equal 1, trues, "exatamente UMA thread deve ter reservado (true), outra deve ter sido recusada (false); results=#{results.inspect}"
+      assert_equal 1, falses, "a outra thread deve ter recebido false; results=#{results.inspect}"
+    ensure
+      # Limpeza obrigatória: como `use_transactional_tests = false`, o teardown
+      # automático do Rails não derruba o que criamos. Removemos a row do race
+      # API para não contaminar outros testes da suíte.
+      SearchApiQuota.where(api_name: "race_api", month: "2026-08").delete_all if defined?(SearchApiQuota) && SearchApiQuota.table_exists?
     end
-
-    # Espera as duas threads prontas
-    barrier_mutex.synchronize do
-      barrier_cond.wait(barrier_mutex) until ready_count == 2
-    end
-
-    # Sinaliza largada simultânea
-    barrier_mutex.synchronize do
-      go = true
-      barrier_cond.broadcast
-    end
-
-    threads.each(&:join)
-
-    rec = SearchApiQuota.find_by(api_name: "race_api", month: "2026-08")
-    assert_not_nil rec, "row deve existir após reserva"
-    assert rec.count <= 1, "count (#{rec.count}) deve ser <= ceiling=1; reserve_quota! falhou em serializar"
-    trues = results.count(true)
-    falses = results.count(false)
-    assert_equal 1, trues, "exatamente UMA thread deve ter reservado (true), outra deve ter sido recusada (false); results=#{results.inspect}"
-    assert_equal 1, falses, "a outra thread deve ter recebido false; results=#{results.inspect}"
   end
 
   # 200 vazio cobra — `reserve_quota!` é separado do "depois incrementa", então

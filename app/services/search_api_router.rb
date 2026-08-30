@@ -337,9 +337,11 @@ class SearchApiRouter
   # novo — a reserva original cobre o retry. Apenas re-tenta o HTTP.
   def self.attempt(provider, query, limit, time_range, today, score_threshold: SearchApiRouter.score_threshold, retried: false)
     unless retried
-      # `reserve_quota!` já é fail-open lá dentro se o AR não estiver conectado,
-      # mas aqui a função é estritamente "decide se pode gastar". Se a cota
-      # está cheia, pula o provider sem gastar HTTP.
+      # `reserve_quota_or_skip` (envelope abaixo, :388-395) é o ponto
+      # fail-open: se AR não estiver conectado OU o `reserve_quota!` levantar
+      # erro, a busca segue (retorna `true`). Aqui a função é estritamente
+      # "decide se pode gastar": se a cota está cheia, pula o provider sem
+      # gastar HTTP. O fail-open do rollback vive em `:399-405`.
       reserved = reserve_quota_or_skip(provider)
       return [nil, "quota_exceeded"] if reserved == false
     end
