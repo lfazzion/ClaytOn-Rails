@@ -252,4 +252,20 @@ class SearchApiRouterPureTest < Minitest::Test
     assert_nil SearchApiRouter.specialty_for("company profile OpenAI")
     assert_nil SearchApiRouter.specialty_for("")
   end
+
+  # F1 do plano v2 (30/08/2026): Exa sem teto por highlight pode devolver
+  # paragrafos inteiros, fugindo do CONTENT_MAX_CHARS=200 do WebSearchTool.
+  # Travado em 2 frases = bem abaixo do teto de 200 chars e mata o vetor de
+  # UGC comprido (D4). O body vai serializado no `req.body`; lemos via JSON.parse
+  # para validar a chave aninhada sem depender de HTTP real.
+  def test_build_request_exa_carrega_num_sentences_2_em_highlights
+    ENV["EXA_API_KEY"] = "ex_fake"
+    _uri, req = SearchApiRouter.build_request(:exa, "papers sobre machine learning", 5, nil)
+
+    body = JSON.parse(req.body)
+    assert_equal 2, body.dig("contents", "highlights", "num_sentences"),
+                 "Exa deve pedir num_sentences=2 no highlights (F1 plano v2)"
+    assert_equal 5, body["numResults"], "numResults deve refletir o limit passado"
+    assert_equal "auto", body["type"], "type padrao do body Exa continua sendo 'auto'"
+  end
 end
