@@ -75,7 +75,7 @@ class SearchApiBenchmarkTest < ActiveSupport::TestCase
     refute_match(/Secret server error/, res[:error])
   end
 
-  test "clamps limit using 1..10 rule" do
+  test "clamps limit using 1..5 rule" do
     req1 = stub_request(:post, "https://api.tavily.com/search")
       .with(body: hash_including(max_results: 1, query: "zero"))
       .to_return(status: 200, body: { results: [], usage: { credits: 1 } }.to_json, headers: { "Content-Type" => "application/json" })
@@ -85,7 +85,7 @@ class SearchApiBenchmarkTest < ActiveSupport::TestCase
       .to_return(status: 200, body: { results: [], usage: { credits: 1 } }.to_json, headers: { "Content-Type" => "application/json" })
 
     req3 = stub_request(:post, "https://api.tavily.com/search")
-      .with(body: hash_including(max_results: 10, query: "large"))
+      .with(body: hash_including(max_results: 5, query: "large"))
       .to_return(status: 200, body: { results: [], usage: { credits: 1 } }.to_json, headers: { "Content-Type" => "application/json" })
 
     # We assume these run and the stub constraints assert the body max_results
