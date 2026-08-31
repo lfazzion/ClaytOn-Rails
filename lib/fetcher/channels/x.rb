@@ -8,6 +8,7 @@ require_relative "../browser_session"
 require_relative "../cookie_jar"
 require_relative "../host_rate_limiter"
 require_relative "../safe_http_client"
+require_relative "x_graphql"
 
 module Fetcher
   module Channels
@@ -73,6 +74,12 @@ module Fetcher
 
         def initialize(sintoma = "veio ilegível — o seletor mudou ou a página não é a da busca")
           super("busca de x.com #{sintoma}")
+        end
+      end
+
+      class InvalidTransport < Error
+        def initialize(value)
+          super("transporte inválido: #{value.inspect} — válidos: \"graphql\", \"browser\"")
         end
       end
 
@@ -309,10 +316,31 @@ module Fetcher
         #
         # Mesmo contrato de `Youtube.search` e `Reddit.search`: Array de Hash de
         # chaves STRING.
+        #
+        # Transporte: por padrão usa XGraphql (API GraphQL); para rollback temporário
+        # use X_SEARCH_TRANSPORT=browser. Outros valores levantam InvalidTransport.
+        # Timeline por perfil permanece em BrowserSession — este switch afeta apenas
+        # a busca por assunto.
         def search(query:, limit: 10)
           termo = query.to_s.strip
           return [] if termo.empty?
 
+          transport = ENV.fetch("X_SEARCH_TRANSPORT", "graphql").to_s
+          case transport
+          when "graphql"
+            XGraphql.search(query: termo, limit: limit)
+          when "browser"
+            search_via_browser(query: termo, limit: limit)
+          else
+            raise InvalidTransport, transport
+          end
+        end
+
+        # Corpo antigo de `search`: navegador Chrome com a sessão do dono. Usado como
+        # fallback quando `X_SEARCH_TRANSPORT=browser` ou quando XGraphql não está
+        # disponível (mas NUNCA como fallback automático).
+        def search_via_browser(query:, limit: 10)
+          termo = query.to_s.strip
           CookieJar.require!(COOKIE_DOMAIN)
           raise RateLimited.new(COOKIE_DOMAIN, SEARCH_BUDGET) if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **SEARCH_BUDGET)
 

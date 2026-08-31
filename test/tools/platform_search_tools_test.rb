@@ -280,7 +280,7 @@ class PlatformSearchToolsTest < ActiveSupport::TestCase
 
   # Busca por assunto no X que falha — a tool deve devolver erro nomeado (hash
   # com :error), espelhando o padrão do teste de erro da timeline acima.
-  test "busca ilegivel no x vira erro nomeado via SearchFailed, nao sucesso com zero posts" do
+  test "busca illegivel no x vira erro nomeado via SearchFailed, nao sucesso com zero posts" do
     Fetcher::Channels::X.stubs(:search).raises(Fetcher::Channels::X::SearchFailed.new)
 
     result = PlatformSearchTool.new.execute(query: "ruby rails", platform: "x")
