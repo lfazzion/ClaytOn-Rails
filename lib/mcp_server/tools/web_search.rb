@@ -14,11 +14,22 @@ module McpServer
     class WebSearch < MCP::Tool
       tool_name "web_search"
       title "Busca web com sinal de engine fora do ar"
+      # F4 do plano v2 (30/08/2026): a description carrega a matriz L5
+      # type -> provedor + cota. Sem essa tabela na description, o modelo do
+      # perfil le so o enum `type` do schema e nao sabe que `news` custa cota
+      # Tavily e `code` cai no SearXNG local (sem custo). O classificador e
+      # lido do schema, mas a matriz e lida daqui.
+      #
+      # Cotas L5 (30/08/2026): Tavily 1000/mo, Linkup 4000/mo, Exa 1400/mo.
+      # SearXNG e o provider local, sem cota paga.
       description(
         "Busca na web pelo SearXNG local. Devolve `results` e também `unresponsive`: os engines que " \
         "não responderam. Se `results` vier vazio COM `unresponsive` não vazio, isso NÃO significa que " \
         "o assunto não existe — significa que a busca não aconteceu; diga isso em vez de afirmar " \
-        "ausência. Para conteúdo dentro do YouTube, Reddit ou X, use platform_search."
+        "ausência. Para conteúdo dentro do YouTube, Reddit ou X, use platform_search. " \
+        "type routes provider: news->Tavily(1000/mo), factual->Linkup(4000/mo), " \
+        "entity|academic->Exa(1400/mo), code|auto->SearXNG local. " \
+        "Escolha type conforme a intencao; se duvidar, auto."
       )
 
       # Dois mecanismos INDEPENDENTES de validação do input_schema:
