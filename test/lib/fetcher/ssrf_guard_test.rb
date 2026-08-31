@@ -54,10 +54,24 @@ class Fetcher::SsrfGuardTest < ActiveSupport::TestCase
   end
 
   test "IP literal 127.0.0.1 é bloqueado" do
+    # REGRESSÃO F7 (plano-fase2 31/08/2026): o Extratto de 127.0.0.1 continua
+    # recusado pelo SsrfGuard. O guard já barra IP literal em
+    # `ensure_ip_allowed!` (loopback em IPV4_BLOCKED), e este teste trava a
+    # defesa — se alguém futuramente abrir uma exceção para algum host
+    # "interno confiável", a recusa do loopback NÃO pode ser removida junto.
     error = assert_raises(Fetcher::SsrfGuard::Blocked) do
       Fetcher::SsrfGuard.validate!("http://127.0.0.1/")
     end
     assert_match(/privado|loopback|interno/i, error.reason)
+  end
+
+  # REGRESSÃO F7: variantes de loopback também recusadas — `127.0.0.2` está
+  # dentro de 127.0.0.0/8 e o teste do host-only (sem resolver DNS) cobre o
+  # caminho literal. Defesa contra alguém que esquecesse que o range é /8.
+  test "REGRESSÃO F7: 127.0.0.2 (mesma /8) é bloqueado como loopback" do
+    assert_raises(Fetcher::SsrfGuard::Blocked) do
+      Fetcher::SsrfGuard.validate!("http://127.0.0.2/")
+    end
   end
 
   test "IP literal 10.0.0.5 (RFC1918) é bloqueado" do

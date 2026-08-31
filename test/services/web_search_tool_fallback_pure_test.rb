@@ -308,6 +308,58 @@ class WebSearchToolFallbackPureTest < Minitest::Test
     assert_empty router_calls, "queries com site:reddit.com/x.com/twitter.com nunca devem gastar cota do router externo"
   end
 
+  # REGRESSÃO F7 (plano-fase2 31/08/2026): mesmo se a regex de plataforma
+  # falhasse e o router fosse chamado com um site:reddit.com, o resultado
+  # da URL `reddit.com` carregaria `trust: :ugc` — NUNCA `:primary`. Defesa
+  # em profundidade contra um futuro relaxamento da regex de bloqueio do
+  # fallback: o classificador de trust precisa fechar a porta de "fonte
+  # primária" que veio de UGC. Aqui simulamos o caminho real do router —
+  # a normalização é a mesma de produção (via `SearchApiRouter.normalize_results`),
+  # então a chave `:trust` está presente em cada item como aconteceria em prod.
+  def test_resultado_reddit_para_site_reddit_carrega_trust_ugc_e_nunca_primary
+    # Reflete o que o router real devolveria: o resultado bruto da API
+    # (Tavily) passa por `normalize_results`, que adiciona `:trust` por host.
+    raw = {
+      "results" => [
+        { "title" => "Reddit", "url" => "https://reddit.com/r/ruby/x",
+          "content" => "post", "score" => 0.85 }
+      ]
+    }
+    normalized = SearchApiRouter.normalize_results(:tavily, raw, score_threshold: 0.7)
+    item = normalized.first
+    assert_equal :ugc, item[:trust],
+                 "URL reddit.com deve carregar trust :ugc após a normalização"
+    refute_equal :primary, item[:trust],
+                 "URL reddit.com NUNCA pode carregar trust :primary"
+  end
+
+  # Reforço do comportamento do tool: quando SearXNG falha e o router seria
+  # chamado, `site:reddit.com` mesmo assim pula o router (regex de plataforma).
+  # Confirma que o caminho "não cai no pago" do brief item 3 continua de pé.
+  def test_site_reddit_com_fallback_normalizado_carrega_trust_mas_nao_chama_router
+    with_fetch(nil)
+    # Stub do router: se for chamado (NÃO deve), devolve um resultado
+    # NORMALIZADO com trust :ugc — defesa em profundidade: mesmo se o
+    # bloqueador falhasse, o item carrega :ugc.
+    normalized = SearchApiRouter.normalize_results(
+      :tavily,
+      { "results" => [
+        { "title" => "R", "url" => "https://reddit.com/r/x", "content" => "c", "score" => 0.9 }
+      ] },
+      score_threshold: 0.5
+    )
+    set_fallback({ results: normalized, engine: :tavily, cost: nil })
+
+    res = @tool.run(query: "site:reddit.com ruby")
+
+    assert_empty router_calls, "regex de plataforma deve continuar bloqueando o router para site:reddit.com"
+    assert_equal :error, res[:status]
+    assert_equal "busca indisponível", res[:reason]
+    # A invariante fora do tool — trust do resultado hipotético seria :ugc.
+    assert_equal :ugc, normalized.first[:trust],
+                 "mesmo se o router fosse chamado, o trust seria :ugc"
+  end
+
   def test_query_com_site_plataforma_com_engine_caida_nao_chama_router
     with_fetch({ results: [], unresponsive: ["brave"] })
     set_fallback(fallback([{ title: "F", url: "https://f.com", content: "c" }]))
@@ -408,7 +460,7 @@ class WebSearchToolFallbackPureTest < Minitest::Test
     assert_empty router_calls, "site:www.reddit.com/r/ruby deve bloquear o router"
   end
 
-  def test_query_com_fakesite_reddit_com_nao_bloqueia_fallback
+  def test_fakesite_reddit_com_nao_bloqueia_fallback
     with_fetch(nil)
     set_fallback(fallback([{ title: "Fake", url: "https://fake.com", content: "c", engine: "tavily" }]))
 
@@ -417,6 +469,45 @@ class WebSearchToolFallbackPureTest < Minitest::Test
     assert_equal :success, res[:status]
     assert_equal "https://fake.com", res[:data].first[:url]
     assert_equal 1, router_calls.size, "fakesite:reddit.com não é site:reddit.com e deve chamar o router"
+  end
+
+  # F7 (plano-fase2 31/08/2026): o helper `ensure_trust!` aplica o classificador
+  # em todos os caminhos do tool (SearXNG direto + fallback). Mesmo quando o
+  # stub devolve item cru (sem `:trust`), o item chega ao `data` com o selo.
+  # Defesa contra bypass do router e contra stub de teste esquecer a chave.
+  def test_ensure_trust_aplica_classificador_em_item_cru_do_fallback
+    with_fetch(nil)
+    # Stub do router com itens CRUS (sem :trust) — exatamente o que um
+    # bypass futuro do router poderia devolver.
+    set_fallback({ results: [
+      { title: "R", url: "https://reddit.com/r/ruby/x", content: "post", engine: "tavily" },
+      { title: "G", url: "https://github.com/rails/rails", content: "code", engine: "tavily" },
+      { title: "X", url: "https://exemplo.com/x", content: "?", engine: "tavily" }
+    ], engine: :tavily, cost: nil })
+
+    res = @tool.run(query: "ruby")
+
+    assert_equal :success, res[:status]
+    assert_equal 3, res[:data].size
+    trusts = res[:data].map { |i| i[:trust] }
+    assert_includes trusts, :ugc, "reddit.com deve virar :ugc mesmo no stub cru"
+    assert_includes trusts, :primary, "github.com deve virar :primary mesmo no stub cru"
+    assert_includes trusts, :unknown, "exemplo.com deve virar :unknown mesmo no stub cru"
+  end
+
+  # F7: o helper `ensure_trust!` é idempotente — quando o router já rotulou
+  # (caminho real, não stub), o item NÃO é sobrescrito com valor diferente.
+  def test_ensure_trust_e_idempotente_quando_router_ja_rotulou
+    with_fetch(nil)
+    # Item JÁ com :trust vindo do router real (passou por normalize_results).
+    set_fallback({ results: [
+      { title: "R", url: "https://reddit.com/r/x", content: "c", engine: "tavily", trust: :ugc }
+    ], engine: :tavily, cost: nil })
+
+    res = @tool.run(query: "ruby")
+
+    assert_equal :success, res[:status]
+    assert_equal :ugc, res[:data].first[:trust], "trust do router deve ser preservado"
   end
 end
 
