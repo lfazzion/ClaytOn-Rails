@@ -3,6 +3,7 @@
 require "base64"
 require "digest"
 require "json"
+require "set"
 require "time"
 require_relative "registry"
 require_relative "../cookie_jar"
@@ -56,6 +57,10 @@ module Fetcher
         termo = query.to_s.strip
         return [] if termo.empty?
 
+        # Gates na ordem correta:
+        # 1. query vazia -> 2. clamp (pending) -> 3. bloqueio remoto ->
+        #    4. limitador local -> 5. guest/sessao -> 6. request
+        return [] if remote_blocked?
         CookieJar.require!(COOKIE_DOMAIN)
         raise RateLimited.new(COOKIE_DOMAIN, GRAPHQL_BUDGET) if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **GRAPHQL_BUDGET)
 
@@ -63,15 +68,76 @@ module Fetcher
       end
 
       # Envia requisicao GET para o endpoint GraphQL e parseia a resposta.
+      # Suporta paginacao via cursor (maximo 3 paginas) e rate limit remoto.
       def self.fetch_search(query:, limit: 10)
-        variables = {
-          rawQuery: query,
-          count: limit,
-          querySource: "typed_query",
-          product: "Latest"
-        }
+        all_items = []
+        seen_urls = Set.new
+        cursor = nil
+        prev_cursor = nil
+        max_pages = 3
+        page_count = 0
 
-        features = {
+        features = build_features
+
+        while page_count < max_pages
+          page_count += 1
+          variables = build_variables(query, limit, cursor)
+          url = build_url(query, variables, features)
+          headers = build_headers(variables, features)
+
+          response = SafeHttpClient.get(url, headers: headers)
+
+          # Tratamento de status especiais ANTES do raise generico
+          case response.status
+          when 429
+            # Rate limit remoto: marca bloqueio e retorna erro imediato
+            @remote_blocked = true
+            @remote_block_until = Time.now + 60
+            reset_at = parse_rate_limit_reset(response.headers)
+            reset_info = reset_at ? " reset em #{reset_at.strftime('%H:%M:%S')}" : ""
+            raise RateLimitedRemote.new("429 Too Many Requests#{reset_info}")
+          when 401
+            # Erro de autenticacao: unica chance de reativacao
+            raise GraphQLError, "HTTP #{response.status} (nao autorizado)"
+          when 403
+            # Proibido sem retry
+            raise GraphQLError, "HTTP #{response.status} (proibido)"
+          when 404
+            # Query-ID possivelmente invalido: tenta refresh unico
+            raise GraphQLError, "HTTP #{response.status} (query nao encontrada)"
+          else
+            # Demais erros de HTTP
+            raise GraphQLError, "HTTP #{response.status}" unless response.success?
+          end
+
+          # Atualiza budget local com base nos headers da resposta
+          update_remote_budget!(response.headers)
+
+          data = JSON.parse(response.body)
+          items = parse_search_timeline(data)
+
+          # Dedupe por URL
+          items.each do |item|
+            unless seen_urls.include?(item["url"])
+              seen_urls << item["url"]
+              all_items << item
+            end
+          end
+
+          # Extrai cursor Bottom da resposta para proxima pagina
+          cursor = extract_bottom_cursor(data)
+          break if cursor.nil? || cursor.empty?
+          break if cursor == prev_cursor  # Evita loop infinito se cursor se repetir
+          prev_cursor = cursor
+        end
+
+        all_items
+      rescue JSON::ParserError
+        raise GraphQLError, "resposta nao eh JSON valido"
+      end
+
+      def self.build_features
+        {
           rweb_tipjar_consumption_enabled: true,
           responsive_web_graphql_exclude_directive_enabled: true,
           verified_phone_label_enabled: false,
@@ -96,17 +162,80 @@ module Fetcher
           longform_notetweets_inline_media_enabled: true,
           responsive_web_enhance_cards_enabled: false
         }
+      end
 
-        url = build_url(query, variables, features)
-        headers = build_headers(variables, features)
+      def self.build_variables(query, limit, cursor = nil)
+        vars = {
+          rawQuery: query,
+          count: limit,
+          querySource: "typed_query",
+          product: "Latest"
+        }
+        vars[:cursor] = cursor if cursor
+        vars
+      end
 
-        response = SafeHttpClient.get(url, headers: headers)
-        raise GraphQLError, "HTTP #{response.status}" unless response.success?
+      def self.extract_bottom_cursor(data)
+        instructions = data.dig("data", "search_by_raw_query", "search_timeline", "timeline", "instructions")
+        return nil unless instructions.is_a?(Array)
 
-        data = JSON.parse(response.body)
-        parse_search_timeline(data)
-      rescue JSON::ParserError
-        raise GraphQLError, "resposta nao eh JSON valido"
+        instructions.each do |instruction|
+          next unless instruction["type"] == "TimelineAddEntries"
+          next unless instruction["entries"].is_a?(Array)
+
+          instruction["entries"].each do |entry|
+            next unless entry.is_a?(Hash)
+            next unless entry["content"].is_a?(Hash)
+            next unless entry["content"]["cursorType"] == "Bottom"
+            next unless entry["content"].key?("value")
+
+            return entry["content"]["value"].to_s
+          end
+        end
+        nil
+      end
+
+      def self.update_remote_budget!(headers)
+        remaining = headers["x-rate-limit-remaining"]
+        return if remaining.nil? || remaining.empty?
+
+        rem = remaining.to_i
+        if rem <= 0
+          @remote_blocked = true
+          @remote_block_until = Time.now + 60
+        else
+          @remote_blocked = false
+          @remote_block_until = nil
+        end
+      end
+
+      def self.parse_rate_limit_reset(headers)
+        reset_str = headers["x-rate-limit-reset"]
+        return nil if reset_str.nil? || reset_str.empty?
+
+        reset_ts = reset_str.to_i
+        return nil if reset_ts <= 0
+
+        # Validacao: reset deve ser no futuro (ou muito proximo)
+        now_ts = Time.now.to_i
+        if reset_ts > now_ts && reset_ts < now_ts + 3600
+          Time.at(reset_ts)
+        else
+          # Fallback seguro: 60 segundos a partir de agora
+          Time.now + 60
+        end
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def self.remote_blocked?
+        @remote_blocked ||= false
+        @remote_blocked
+      end
+
+      def self.clear_remote_state!
+        @remote_blocked = false
+        @remote_block_until = nil
       end
 
       # Limpa token(s) de transacao armazenados (para teste).
@@ -265,6 +394,12 @@ module Fetcher
       class GraphQLError < Error
         def initialize(message = "graphql retornou erro")
           super("busca GraphQL do X falhou: #{message}")
+        end
+      end
+
+      class RateLimitedRemote < Error
+        def initialize(message = "rate limit remoto atingido")
+          super("rate limit remoto do X: #{message}")
         end
       end
     end

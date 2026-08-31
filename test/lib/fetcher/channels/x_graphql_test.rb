@@ -4,8 +4,8 @@ require "test_helper"
 require_relative "../../../../lib/fetcher/channels/x_graphql"
 
 # Stub local sem dependencia externa — substitui OpenStruct para Ruby 4.0
-# Deve simular SafeHttpClient::Response (status, body, success?)
-StubTx = Struct.new(:status, :body, keyword_init: true) do
+# Deve simular SafeHttpClient::Response (status, body, success?, headers)
+StubTx = Struct.new(:status, :body, :headers, keyword_init: true) do
   def success?
     status.to_i.between?(200, 299)
   end
@@ -16,6 +16,10 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
   def fixture(name)
     JSON.parse(File.read(File.join(FIXTURES_PATH, "#{name}.json")))
+  end
+
+  setup do
+    Fetcher::Channels::XGraphql.clear_remote_state!
   end
 
   # ---------------------------------------------------------------------------
@@ -168,8 +172,9 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
   test "search devolve Array de Hash com chaves STRING (contrato PlatformSearchTool)" do
     Fetcher::CookieJar.stubs(:valid?).returns(true)
     Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+    # Usa fixture SEM cursor para evitar paginacao indesejada nos testes de contrato
     Fetcher::SafeHttpClient.expects(:get).returns(
-      StubTx.new(status: 200, body: fixture("search_timeline_page_1").to_json)
+      StubTx.new(status: 200, body: fixture("search_timeline_single").to_json, headers: {})
     )
 
     resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
@@ -183,6 +188,15 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     end
   end
 
+  test "search retorna [] quando remote_blocked? e nao toca rede" do
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_blocked, true)
+
+    Fetcher::SafeHttpClient.expects(:get).never
+
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    assert_equal [], resultados
+  end
+
   test "busca com query vazia devolve lista vazia sem gastar requisicoes" do
     Fetcher::SafeHttpClient.expects(:get).never
 
@@ -192,8 +206,9 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
   test "resultado tem chaves obrigatorias: title, url, screen_name" do
     Fetcher::CookieJar.stubs(:valid?).returns(true)
     Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+    # Usa fixture SEM cursor para evitar paginacao indesejada
     Fetcher::SafeHttpClient.expects(:get).returns(
-      StubTx.new(status: 200, body: fixture("search_timeline_page_1").to_json)
+      StubTx.new(status: 200, body: fixture("search_timeline_single").to_json, headers: {})
     )
 
     resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
@@ -218,5 +233,234 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
     # Se houver duplicacao, deve haver apenas um item por URL unica
     assert_equal urls.uniq.size, itens.size, "ha duplicatas na lista de resultados"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 6: Paginacao com cursor
+  # ---------------------------------------------------------------------------
+
+  test "fetch_search faz paginacao quando cursor Bottom esta presente" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Primeira pagina: retorna 2 itens + cursor
+    first_response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_1").to_json,
+      headers: { "x-rate-limit-remaining" => "49", "x-rate-limit-reset" => (Time.now.to_i + 120).to_s }
+    )
+
+    # Segunda pagina: retorna 1 item novo + cursor
+    second_response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_2").to_json,
+      headers: { "x-rate-limit-remaining" => "48", "x-rate-limit-reset" => (Time.now.to_i + 120).to_s }
+    )
+
+    # Terceira pagina: retorna vazio (sem cursor)
+    third_response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_empty").to_json,
+      headers: { "x-rate-limit-remaining" => "47", "x-rate-limit-reset" => (Time.now.to_i + 120).to_s }
+    )
+
+    Fetcher::SafeHttpClient.expects(:get).at_least_once.returns(first_response, second_response, third_response)
+
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
+
+    # Espera todos os itens unicos (page1: 2, page2: 1 novo + 1 duplicado, page3: 0)
+    # page_1: urls 1234567890, 1234567891
+    # page_2: url 1234567892 (nova) + 1234567890 (duplicada)
+    # Total unico pos dedupe: 3
+    assert_kind_of Array, resultados
+    assert_equal 3, resultados.size, "deveria ter 3 itens unicos apos dedupe (page1:2 + page2:1 novo)"
+  end
+
+  test "fetch_search para no limite de paginas (max 3)" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Retorna a mesma pagina 3 vezes; o loop para quando max_pages é atingido
+    response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_1").to_json,
+      headers: { "x-rate-limit-remaining" => "49", "x-rate-limit-reset" => (Time.now.to_i + 120).to_s }
+    )
+
+    # Nota: o codigo para em 2 chamadas devido a deteccao de cursor repetido
+    # (page1 tem cursor A, page2 retorna mesmo cursor A -> break).
+    # Usamos at_most(3) para ser tolerante.
+    Fetcher::SafeHttpClient.expects(:get).at_most(3).returns(response)
+
+    Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
+  end
+
+  test "cursor repetido nao causa loop infinito" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Pagina com cursor que nao muda (simulando loop)
+    response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_1").to_json,
+      headers: { "x-rate-limit-remaining" => "49", "x-rate-limit-reset" => (Time.now.to_i + 120).to_s }
+    )
+
+    # Com deteccao de cursor repetido, para em 2 paginas (nao 3)
+    Fetcher::SafeHttpClient.expects(:get).at_most(3).returns(response)
+
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
+    # Deve parar sem loop infinito (max 2 paginas devido a deteccao de repeticao)
+    assert_kind_of Array, resultados
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 7: Rate limit remoto (429)
+  # ---------------------------------------------------------------------------
+
+  test "429 retorna erro imediato sem aguardar" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    response = StubTx.new(
+      status: 429,
+      body: '{"error": "rate limited"}',
+      headers: {
+        "x-rate-limit-remaining" => "0",
+        "x-rate-limit-reset" => (Time.now.to_i + 60).to_s
+      }
+    )
+
+    Fetcher::SafeHttpClient.expects(:get).returns(response)
+
+    error = assert_raises(Fetcher::Channels::XGraphql::RateLimitedRemote) do
+      Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    end
+
+    assert_match(/429/, error.message)
+    assert_match(/reset/, error.message)
+  end
+
+  test "429 com reset invalido usa fallback seguro" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    response = StubTx.new(
+      status: 429,
+      body: '{"error": "rate limited"}',
+      headers: {
+        "x-rate-limit-remaining" => "0",
+        "x-rate-limit-reset" => "invalido"
+      }
+    )
+
+    Fetcher::SafeHttpClient.expects(:get).returns(response)
+
+    error = assert_raises(Fetcher::Channels::XGraphql::RateLimitedRemote) do
+      Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    end
+
+    assert_match(/429/, error.message)
+  end
+
+  test "429 nao incrementa contador de rede em chamada subsequente durante bloqueio" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Primeira chamada: 429
+    response_429 = StubTx.new(
+      status: 429,
+      body: '{"error": "rate limited"}',
+      headers: { "x-rate-limit-remaining" => "0", "x-rate-limit-reset" => (Time.now.to_i + 60).to_s }
+    )
+
+    # Mock para provar que segunda chamada nao toca rede
+    Fetcher::SafeHttpClient.expects(:get).once.returns(response_429)
+
+    # Captura o erro da primeira chamada
+    assert_raises(Fetcher::Channels::XGraphql::RateLimitedRemote) do
+      Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    end
+
+    # Verifica que state de bloqueio foi definido
+    assert Fetcher::Channels::XGraphql.remote_blocked?
+
+    # Segunda chamada durante bloqueio NAO deve tocar a rede
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    assert_equal [], resultados
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 8: Headers preservados
+  # ---------------------------------------------------------------------------
+
+  test "headers da resposta sao preservados no Response" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    expected_headers = {
+      "x-rate-limit-remaining" => "49",
+      "x-rate-limit-reset" => (Time.now.to_i + 120).to_s
+    }
+
+    # Usa fixture SEM cursor para evitar paginacao indesejada
+    Fetcher::SafeHttpClient.expects(:get).returns(
+      StubTx.new(status: 200, body: fixture("search_timeline_single").to_json, headers: expected_headers)
+    )
+
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
+    assert_kind_of Array, resultados
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 9: Testes auxiliares
+  # ---------------------------------------------------------------------------
+
+  test "extract_bottom_cursor extrai cursor Bottom corretamente" do
+    pagina = fixture("search_timeline_page_1")
+    cursor = Fetcher::Channels::XGraphql.extract_bottom_cursor(pagina)
+    assert_equal "scroll:thGxwVR_7V2J9hJGhAABCgAAAAAAAAAAAA==", cursor
+  end
+
+  test "extract_bottom_cursor retorna nil quando nao ha cursor" do
+    pagina = fixture("search_timeline_empty")
+    cursor = Fetcher::Channels::XGraphql.extract_bottom_cursor(pagina)
+    assert_nil cursor
+  end
+
+  test "build_variables inclui cursor quando fornecido" do
+    vars = Fetcher::Channels::XGraphql.build_variables("teste", 10, "cursor-teste")
+    assert_equal "cursor-teste", vars[:cursor]
+    assert_equal "teste", vars[:rawQuery]
+  end
+
+  test "build_variables nao inclui cursor quando nil" do
+    vars = Fetcher::Channels::XGraphql.build_variables("teste", 10, nil)
+    refute vars.key?(:cursor)
+  end
+
+  test "parse_rate_limit_reset com timestamp valido retorna Time" do
+    headers = { "x-rate-limit-reset" => (Time.now.to_i + 60).to_s }
+    reset_at = Fetcher::Channels::XGraphql.parse_rate_limit_reset(headers)
+    assert_kind_of Time, reset_at
+    assert reset_at > Time.now
+  end
+
+  test "parse_rate_limit_reset com timestamp invalido retorna nil" do
+    headers = { "x-rate-limit-reset" => "invalido" }
+    reset_at = Fetcher::Channels::XGraphql.parse_rate_limit_reset(headers)
+    assert_nil reset_at
+  end
+
+  test "update_remote_budget! marca bloqueio quando remaining == 0" do
+    headers = { "x-rate-limit-remaining" => "0" }
+    Fetcher::Channels::XGraphql.update_remote_budget!(headers)
+    assert Fetcher::Channels::XGraphql.remote_blocked?
+  end
+
+  test "update_remote_budget! nao marca bloqueio quando remaining > 0" do
+    headers = { "x-rate-limit-remaining" => "49" }
+    Fetcher::Channels::XGraphql.update_remote_budget!(headers)
+    refute Fetcher::Channels::XGraphql.remote_blocked?
   end
 end

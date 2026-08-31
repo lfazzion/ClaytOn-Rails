@@ -1,0 +1,95 @@
+{
+  "data": {
+    "search_by_raw_query": {
+      "search_timeline": {
+        "timeline": {
+          "instructions": [
+            {
+              "type": "TimelineAddEntries",
+              "entries": [
+                {
+                  "entryId": "tweet-1234567892",
+                  "sortIndex": "1234567892",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "itemContent": {
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "legacy": {
+                            "id_str": "1234567892",
+                            "created_at": "Mon Aug 31 19:00:00 +0000 2026",
+                            "full_text": "Second page result: more GraphQL content!",
+                            "lang": "en"
+                          },
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "__typename": "User",
+                                "legacy": {
+                                  "screen_name": "graphql_fan",
+                                  "name": "GraphQL Enthusiast"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "tweet-1234567890",
+                  "sortIndex": "1234567890",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "itemContent": {
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "legacy": {
+                            "id_str": "1234567890",
+                            "created_at": "Mon Aug 31 20:00:00 +0000 2026",
+                            "full_text": "Ruby on Rails 8.1 is amazing for building APIs quickly!",
+                            "lang": "en"
+                          },
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "__typename": "User",
+                                "legacy": {
+                                  "screen_name": "railsdev",
+                                  "name": "Rails Developer"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "cursor-bottom-1234567892",
+                  "sortIndex": "1234567892",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "value": "scroll:thGxwVR_8W3K0iKHkBBCDgAAAAAAAAAAAA=="
+                  }
+                },
+                {
+                  "entryId": "cursor-top-1234567892",
+                  "sortIndex": "1234567892",
+                  "content": {
+                    "cursorType": "Top",
+                    "value": "scroll:thGxwVR_8W3K0iKHkBBCDgAAAAAAAAAAAA=="
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
