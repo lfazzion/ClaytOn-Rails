@@ -138,19 +138,30 @@ class WebSearchTool < ToolBase
     # nestes dois early-returns, e isso inflaria o teto artificialmente.
     # (D2-F5a-v7 removeu o ensure.)
     #
-    # F2 do plano v2 (30/08/2026): classifica o `type` UMA vez, antes de
-    # ramificar. `provider` é o que vai para o fallback (specialty_first),
-    # ou nil quando o tipo é "auto"/inválido (comportamento atual preservado).
-    # Código defensivo: modelo pode mandar valor fora do enum.
-    resolved_type = ALLOWED_TYPES.include?(type.to_s) ? type.to_s : "auto"
-    provider = self.class.provider_for_type(resolved_type)
-
     # F3b (30/08/2026): origem do caller lida do Thread.current. Setada em
     # `ChatSessionManager#ask` (caminho Discord/bot) ou `McpController#handle`
     # (caminho MCP) — fora desses dois entrypoints vale nil (caller sem
     # origem). Lida UMA vez aqui para propagar idêntica nas duas chamadas
     # ao router (specialty_first e cascata legado) e evitar divergência.
     origin = Thread.current[:cleitin_origin]
+
+    # F2 do plano v2 (30/08/2026): classifica o `type` UMA vez, antes de
+    # ramificar. `provider` é o que vai para o fallback (specialty_first),
+    # ou nil quando o tipo é "auto"/inválido (comportamento atual preservado).
+    # Código defensivo: modelo pode mandar valor fora do enum.
+    #
+    # F4 do plano-fase2 (30/08/2026): Discord NÃO tem `type:` no schema e
+    # o caminho do bot não pode ser poluído. Quando origin=:discord, o
+    # `type` injetado é IGNORADO: provider volta a nil e o run cai no
+    # fluxo legado (cascata padrão sem specialty). MCP preserva o contrato
+    # F2 — type→specialty_first permanece.
+    if origin == :discord
+      resolved_type = "auto"
+      provider = nil
+    else
+      resolved_type = ALLOWED_TYPES.include?(type.to_s) ? type.to_s : "auto"
+      provider = self.class.provider_for_type(resolved_type)
+    end
 
     # F3c do plano-fase2 (30/08/2026): TTL por tipo∩time_range (plano D2).
     # `SearchApiCache` é o único ponto que decide TTL e que grava; aqui só
