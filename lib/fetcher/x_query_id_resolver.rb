@@ -62,12 +62,21 @@ module Fetcher
       cache_key = "fetcher:x_query_id:#{operation_name}"
       envelope = @cache.read(cache_key)
 
-      # Cache fresco: retorna imediatamente
+      # Cache fresco sem force: retorna imediatamente
       return envelope[:query_id] if envelope && fresh_envelope?(envelope) && !force
 
-      # Cache vazio ou force: tenta descobrir (sem valor anterior, retorna PIN se falhar)
+      # Se não tem cache, descobre e retorna PIN se falhar
       if envelope.nil?
         return discover!(operation_name) || PIN
+      end
+
+      # force: true -> forca discover! de verdade, preserva ultimo em falha
+      if force
+        begin
+          return discover!(operation_name) || envelope[:query_id]
+        rescue StandardError
+          return envelope[:query_id]
+        end
       end
 
       # Cache stale: retorna último valor, dispara refresh async

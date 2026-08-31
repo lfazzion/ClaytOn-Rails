@@ -33,11 +33,19 @@ module Fetcher
 
       # Par dict fa0311: key -> { animationKey, verification }
       # Usado para assinatura do header x-client-transaction-id.
+      # O par "WebKit" é dummy (bytes fixos), pares reais têm verification mais longo.
+      # O primeiro par válido (índice >= 1) do dicionário real foi medido ao vivo.
       PAIR_DICT = {
         "WebKit" => {
           animation_key: "WebKit",
           verification: Base64.decode64(
             "V0lwcklQY2dFQUFCQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+          )
+        },
+        "fast_path" => {
+          animation_key: "766e10fae147ae147ae02e147ae147ae1402e147ae147ae140fae147ae147ae00",
+          verification: Base64.decode64(
+            "6xwJgFKyZ5cdDQ3HxUIVmnzvgmnBux+RbfUoTCXMm0oUcEcmfV3aC4ss+3xrvoIt"
           )
         }
       }.freeze
@@ -78,11 +86,14 @@ module Fetcher
         page_count = 0
 
         features = build_features
+        query_id_resolver = XQueryIdResolver.new
+        last_query_id = query_id_resolver.resolve("SearchTimeline")
+        @refreshed_404 = false
 
         while page_count < max_pages
           page_count += 1
           variables = build_variables(query, limit, cursor)
-          url = build_url(query, variables, features)
+          url = build_url(query, variables, features, last_query_id)
           headers = build_headers(variables, features)
 
           response = SafeHttpClient.get(url, headers: headers)
@@ -104,6 +115,16 @@ module Fetcher
             raise GraphQLError, "HTTP #{response.status} (proibido)"
           when 404
             # Query-ID possivelmente invalido: tenta refresh unico
+            unless @refreshed_404
+              @refreshed_404 = true
+              new_id = query_id_resolver.resolve("SearchTimeline", force: true)
+              if new_id && new_id != last_query_id
+                last_query_id = new_id
+                # Desconta a pagina atual pois vamos refazer com o mesmo cursor
+                page_count -= 1
+                next
+              end
+            end
             raise GraphQLError, "HTTP #{response.status} (query nao encontrada)"
           else
             # Demais erros de HTTP
@@ -229,8 +250,13 @@ module Fetcher
       end
 
       def self.remote_blocked?
-        @remote_blocked ||= false
-        @remote_blocked
+        if @remote_blocked && @remote_block_until && @remote_block_until > Time.now
+          true
+        else
+          @remote_blocked = false
+          @remote_block_until = nil
+          false
+        end
       end
 
       def self.clear_remote_state!
@@ -307,7 +333,8 @@ module Fetcher
       class BuildTxid
         attr_reader :pair_key, :verification_bytes, :animation_key, :payload
 
-        def initialize(pair_key = PAIR_DICT.keys.first)
+        # Por padrão usa o par "fast_path" (algoritmo real medido ao vivo).
+        def initialize(pair_key = "fast_path")
           @pair_key = pair_key
           @pair = PAIR_DICT[pair_key]
           raise ArgumentError, "par dict desconhecido: #{pair_key}" unless @pair
@@ -316,9 +343,9 @@ module Fetcher
           @verification_bytes = @pair[:verification]
         end
 
-        def evidence_header(now_ms = Time.now.to_f.to_i * 1000)
+        def evidence_header(query_id = QUERY_ID, path_suffix = "SearchTimeline", now_ms = Time.now.to_f.to_i * 1000)
           seconds = (now_ms - 1_682_924_400_000) / 1000
-          path = "/i/api/graphql/#{QUERY_ID}/SearchTimeline"
+          path = "/i/api/graphql/#{query_id}/#{path_suffix}"
           @payload = "GET!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
 
           digest = Digest::SHA256.hexdigest(@payload)
@@ -329,7 +356,7 @@ module Fetcher
                           digest.bytes[0...16] +
                           [3]).map { |b| b ^ mask }
 
-          Base64.urlsafe_encode64(signed_bytes.pack("C*")).rstrip("=")
+          Base64.urlsafe_encode64(signed_bytes.pack("C*")).gsub(/=+$/, '')
         end
 
         def self.evidence_header(payload, now_ms)
@@ -343,11 +370,13 @@ module Fetcher
       # Internals
       # ---------------------------------------------------------------------------
 
-      def self.build_url(query, variables, features)
+      def self.build_url(query, variables, features, query_id = nil)
         encoded_vars = URI.encode_www_form_component(variables.to_json)
         encoded_feats = URI.encode_www_form_component(features.to_json)
 
-        "https://#{COOKIE_DOMAIN}/i/api/graphql/#{QUERY_ID}/SearchTimeline?" \
+        resolved_id = query_id || XQueryIdResolver.new.resolve("SearchTimeline")
+
+        "https://#{COOKIE_DOMAIN}/i/api/graphql/#{resolved_id}/SearchTimeline?" \
           "variables=#{encoded_vars}&features=#{encoded_feats}"
       end
 
@@ -355,11 +384,19 @@ module Fetcher
         txid = BuildTxid.new
         now_ms = Time.now.to_f.to_i * 1000
 
+        cookies = CookieJar.for(COOKIE_DOMAIN)
+        auth_token = cookies.find { |c| c["name"] == "auth_token" }&.dig("value") || ""
+        ct0 = cookies.find { |c| c["name"] == "ct0" }&.dig("value") || ""
+
+        cookie_header = cookies.map { |c| "#{c['name']}=#{c['value']}" }.join("; ")
+
         {
           "x-client-transaction-id" => txid.evidence_header(now_ms),
           "x-twitter-auth-type" => "OAuth2Session",
           "x-twitter-active-user" => "yes",
           "x-twitter-client-language" => "en",
+          "x-csrf-token" => ct0,
+          "Cookie" => cookie_header,
           "Authorization" => "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
           "User-Agent" => "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Accept" => "*/*",

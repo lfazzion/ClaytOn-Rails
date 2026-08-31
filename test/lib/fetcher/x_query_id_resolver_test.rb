@@ -126,5 +126,43 @@ module Fetcher
       assert_not_nil cached
       assert_equal 'flaR-PUMshxFWZWPNpq4zA', cached[:query_id]
     end
+
+    test 'force: true chama discover! de verdade mesmo com cache stale' do
+      stale_envelope = {
+        query_id: 'stale-id-456',
+        fetched_at: Time.now.to_i - 90_000,
+        stale_at: Time.now.to_i - 3_600
+      }
+      @cache.write('fetcher:x_query_id:SearchTimeline', stale_envelope)
+
+      stub_request(:get, 'https://x.com/home')
+        .to_return(status: 200, body: @home_html, headers: { 'Content-Type' => 'text/html' })
+      stub_request(:get, 'https://abs.twimg.com/responsive-web/client-web/main.132b4bba.js')
+        .to_return(status: 200, body: @bundle_js, headers: { 'Content-Type' => 'application/javascript' })
+
+      # Com force: true, deve chamar discover! e retornar o novo ID descoberto
+      result = @resolver.resolve('SearchTimeline', force: true)
+      assert_equal 'flaR-PUMshxFWZWPNpq4zA', result
+
+      # Cache deve ter sido atualizado
+      cached = @cache.read('fetcher:x_query_id:SearchTimeline')
+      assert_not_nil cached
+      assert_equal 'flaR-PUMshxFWZWPNpq4zA', cached[:query_id]
+    end
+
+    test 'force: true preserva ultimo valor quando discover! falha' do
+      stale_envelope = {
+        query_id: 'fallback-id-789',
+        fetched_at: Time.now.to_i - 90_000,
+        stale_at: Time.now.to_i - 3_600
+      }
+      @cache.write('fetcher:x_query_id:SearchTimeline', stale_envelope)
+
+      stub_request(:get, 'https://x.com/home').to_timeout
+
+      # Com force: true e falha no discover!, deve preservar o valor anterior
+      result = @resolver.resolve('SearchTimeline', force: true)
+      assert_equal 'fallback-id-789', result
+    end
   end
 end

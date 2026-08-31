@@ -20,6 +20,15 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
   setup do
     Fetcher::Channels::XGraphql.clear_remote_state!
+    # Pré-popula o cache do resolver para evitar requisições de rede.
+    # O resolver usa Faraday (não SafeHttpClient), então stubs de rede não o capturam.
+    @cache = ActiveSupport::Cache::MemoryStore.new
+    @cache.write(
+      "fetcher:x_query_id:SearchTimeline",
+      { query_id: "test-query-id", fetched_at: Time.now.to_i, stale_at: Time.now.to_i + 86_400 }
+    )
+    @resolver_with_cache = Fetcher::XQueryIdResolver.new(cache: @cache)
+    Fetcher::XQueryIdResolver.stubs(:new).returns(@resolver_with_cache)
   end
 
   # ---------------------------------------------------------------------------
@@ -189,7 +198,11 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
   end
 
   test "search retorna [] quando remote_blocked? e nao toca rede" do
+    # Define estado de bloqueio completo (required por remote_blocked?)
     Fetcher::Channels::XGraphql.instance_variable_set(:@remote_blocked, true)
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_block_until, Time.now + 60)
+    # require! tambem deve ser stubado para nao levantar Expired
+    Fetcher::CookieJar.stubs(:require!)
 
     Fetcher::SafeHttpClient.expects(:get).never
 
@@ -478,5 +491,234 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     assert_includes erro.message, "x.com"
     assert_includes erro.message, "graphql_search"
     assert Fetcher::Channels::XGraphql::RateLimited < Fetcher::Channels::Error
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 10: Cookie e x-csrf-token nos headers (CRÍTICO 1)
+  # ---------------------------------------------------------------------------
+
+  test "build_headers envia Cookie e x-csrf-token" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth-token" },
+      { "name" => "ct0", "value" => "test-ct0-token" }
+    ]
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
+
+    headers = Fetcher::Channels::XGraphql.build_headers({}, {})
+
+    assert_match(/auth_token=test-auth-token/, headers["Cookie"])
+    assert_match(/ct0=test-ct0-token/, headers["Cookie"])
+    assert_equal "test-ct0-token", headers["x-csrf-token"]
+  end
+
+  test "build_headers envia Cookie mesmo sem ct0" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth-token" }
+    ]
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
+
+    headers = Fetcher::Channels::XGraphql.build_headers({}, {})
+
+    assert_match(/auth_token=test-auth-token/, headers["Cookie"])
+    assert_equal "", headers["x-csrf-token"]
+  end
+
+  test "WebMock prova que Cookie e x-csrf-token sao enviados na requisicao" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::CookieJar.stubs(:for).returns([
+      { "name" => "auth_token", "value" => "test-token" },
+      { "name" => "ct0", "value" => "test-ct0" }
+    ])
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Stub explícito do resolver para evitar fetch de rede via Faraday.
+    # O stub do setup pode não propagar em execução isolada; aqui garantimos
+    # que build_url receba query_id já resolvido sem tocar x.com/home.
+    cache = ActiveSupport::Cache::MemoryStore.new
+    cache.write(
+      "fetcher:x_query_id:SearchTimeline",
+      { query_id: "test-query-id", fetched_at: Time.now.to_i, stale_at: Time.now.to_i + 86_400 }
+    )
+    resolver = Fetcher::XQueryIdResolver.new(cache: cache)
+    Fetcher::XQueryIdResolver.stubs(:new).returns(resolver)
+
+    # Stubs a URL REAL com query params (regex no path)
+    stub_request(:get, %r{\Ahttps://x\.com/i/api/graphql/test-query-id/SearchTimeline})
+      .to_return(
+        status: 200,
+        body: fixture("search_timeline_single").to_json,
+        headers: { "Content-Type" => "application/json" }
+      )
+
+    Fetcher::Channels::XGraphql.search(query: "ruby rails")
+
+    # Verifica que o request foi feito com os headers corretos
+    # Usa lookup case-insensitivo pois o Net::HTTP normaliza chaves para lowercase
+    assert_requested :get, %r{\Ahttps://x\.com/i/api/graphql/test-query-id/SearchTimeline} do |req|
+      h = req.headers
+      cookie = h["Cookie"] || h["cookie"]
+      csrf = h["x-csrf-token"] || h["X-CSRF-Token"] || h["X-Csrf-Token"]
+      cookie&.include?("auth_token=test-token") && csrf == "test-ct0"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 11: Testes 401 e 403 (CRÍTICO 6)
+  # ---------------------------------------------------------------------------
+
+  test "401 levanta GraphQLError sem retry automatico" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    response = StubTx.new(
+      status: 401,
+      body: '{"error": "unauthorized"}',
+      headers: {}
+    )
+
+    Fetcher::SafeHttpClient.expects(:get).returns(response)
+
+    error = assert_raises(Fetcher::Channels::XGraphql::GraphQLError) do
+      Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    end
+
+    assert_match(/401/, error.message)
+    assert_match(/nao autorizado/, error.message)
+  end
+
+  test "403 levanta GraphQLError sem retry automatico" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    response = StubTx.new(
+      status: 403,
+      body: '{"error": "forbidden"}',
+      headers: {}
+    )
+
+    Fetcher::SafeHttpClient.expects(:get).returns(response)
+
+    error = assert_raises(Fetcher::Channels::XGraphql::GraphQLError) do
+      Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    end
+
+    assert_match(/403/, error.message)
+    assert_match(/proibido/, error.message)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 12: remote_blocked? com tempo (CRÍTICO 5)
+  # ---------------------------------------------------------------------------
+
+  test "remote_blocked? retorna false quando tempo expirou" do
+    # Marca como bloqueado com tempo no passado
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_blocked, true)
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_block_until, Time.now - 10)
+
+    refute Fetcher::Channels::XGraphql.remote_blocked?
+  end
+
+  test "remote_blocked? retorna true enquanto tempo nao expirou" do
+    # Marca como bloqueado com tempo no futuro
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_blocked, true)
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_block_until, Time.now + 60)
+
+    assert Fetcher::Channels::XGraphql.remote_blocked?
+  end
+
+  test "remote_blocked? limpa estado quando tempo expira" do
+    # Marca como bloqueado com tempo no passado
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_blocked, true)
+    Fetcher::Channels::XGraphql.instance_variable_set(:@remote_block_until, Time.now - 10)
+
+    Fetcher::Channels::XGraphql.remote_blocked?
+
+    # Estado deve ser limpo
+    refute Fetcher::Channels::XGraphql.instance_variable_get(:@remote_blocked)
+    assert_nil Fetcher::Channels::XGraphql.instance_variable_get(:@remote_block_until)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 13: Testes 404 com query ID refresh (fix retry sem rescue)
+  # ---------------------------------------------------------------------------
+
+  test "404 com query ID invalido tenta refresh uma unica vez" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Resolver customizado com cache pré-populado para evitar rede
+    custom_cache = ActiveSupport::Cache::MemoryStore.new
+    custom_cache.write(
+      "fetcher:x_query_id:SearchTimeline",
+      { query_id: "old-query-id", fetched_at: Time.now.to_i, stale_at: Time.now.to_i + 86_400 }
+    )
+    resolver = Fetcher::XQueryIdResolver.new(cache: custom_cache)
+    # Override resolve para simular o comportamento esperado
+    def resolver.resolve(type, force: false)
+      if force
+        "new-query-id"
+      else
+        "old-query-id"
+      end
+    end
+    Fetcher::XQueryIdResolver.stubs(:new).returns(resolver)
+
+    # Primeira resposta: 404 (query ID invalido)
+    # Segunda resposta: 200 (depois do refresh)
+    response_404 = StubTx.new(
+      status: 404,
+      body: '{"errors": [{"message": "Query not found"}]}',
+      headers: {}
+    )
+    response_200 = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_single").to_json,
+      headers: {}
+    )
+
+    Fetcher::SafeHttpClient.expects(:get).twice.returns(response_404, response_200)
+
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    assert_kind_of Array, resultados
+  end
+
+  test "404 apos refresh ainda falha levanta GraphQLError" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # Resolver customizado com cache pré-populado
+    custom_cache = ActiveSupport::Cache::MemoryStore.new
+    custom_cache.write(
+      "fetcher:x_query_id:SearchTimeline",
+      { query_id: "test-query-id", fetched_at: Time.now.to_i, stale_at: Time.now.to_i + 86_400 }
+    )
+    resolver = Fetcher::XQueryIdResolver.new(cache: custom_cache)
+    # Override resolve para simular o comportamento esperado
+    def resolver.resolve(type, force: false)
+      if force
+        "new-query-id"
+      else
+        "test-query-id"
+      end
+    end
+    Fetcher::XQueryIdResolver.stubs(:new).returns(resolver)
+
+    response_404 = StubTx.new(
+      status: 404,
+      body: '{"errors": [{"message": "Query not found"}]}',
+      headers: {}
+    )
+
+    # Primeira chamada com test-query-id -> 404
+    # Refresh: resolve com force retorna new-query-id (diferente) -> retry
+    # Segunda chamada com new-query-id -> 404 -> levanta GraphQLError
+    Fetcher::SafeHttpClient.expects(:get).twice.returns(response_404, response_404)
+
+    error = assert_raises(Fetcher::Channels::XGraphql::GraphQLError) do
+      Fetcher::Channels::XGraphql.search(query: "ruby rails")
+    end
+
+    assert_match(/404/, error.message)
+    assert_match(/query nao encontrada/, error.message)
   end
 end
