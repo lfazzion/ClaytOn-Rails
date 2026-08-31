@@ -444,7 +444,7 @@ class SearchApiRouter
            when :tavily
              { title: r["title"], url: url, content: r["content"], engine: "tavily", _score: r["score"] }
            when :exa
-             content = Array(r["highlights"]).first || r["text"]
+             content = r["text"] || Array(r["highlights"]).first
              { title: r["title"], url: url, content: content, engine: "exa" }
            when :linkup
              { title: r["name"], url: url, content: r["content"], engine: "linkup" }
@@ -676,11 +676,7 @@ class SearchApiRouter
       uri = URI("https://api.exa.ai/search")
       body = {
         query: query, type: "auto", numResults: limit,
-        # `num_sentences: 2` (F1 plano v2): Exa sem teto por highlight pode
-        # devolver parágrafos inteiros, fugindo do CONTENT_MAX_CHARS=200 do
-        # WebSearchTool. Travado em 2 frases = bem abaixo do teto de 200
-        # chars e mata o vetor de UGC comprido (D4).
-        contents: { highlights: { num_sentences: 2 } }
+        contents: { text: true }
       }
       body[:startPublishedDate] = time_filter if time_filter
       req = Net::HTTP::Post.new(uri)

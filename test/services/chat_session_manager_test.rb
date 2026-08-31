@@ -516,30 +516,23 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_nil Thread.current[:cleitin_origin]
   end
 
-  test "D2-F5a-v3: reset! fecha conversa ativa; proxima ask abre nova row com web_search_count zero" do
-    # F5a (30/08/2026): `/new` fecha a conversa ativa. A fronteira entre
-    # tetos é a própria row: a NOVA row começa com web_search_count=0
-    # (default da migration) — sem precisar zerar manualmente. Este teste
-    # amarra a invariante: depois do reset, a próxima `ask` abre row com
-    # count=0, mesmo que a antiga estivesse saturada.
+  test "reset! fecha conversa ativa e preserva histórico da antiga" do
+    # F5a foi removida (teto morreu), mas a invariante de reset! continua:
+    # conversa antiga fica com active=false e count preservado; nova ask
+    # abre row nova。
     antiga = Conversation.open_for(scope: @scope.key, channel_id: @scope.channel_id, user_id: @scope.user_id)
-    antiga.update!(web_search_count: Conversation::MAX_WEB_SEARCH_PER_CONVERSATION)
+    antiga.update!(web_search_count: 5)
 
     ChatSessionManager.reset!(@scope)
-    assert_not antiga.reload.active
+    assert_not antiga.reload.active, "conversa antiga deve ficar inativa após /new"
+    assert_equal 5, antiga.reload.web_search_count, "count da antiga é preservado (não é zerado)"
 
-    # Nova ask → nova row (count=0). Sem isso, o teto continuaria travado
-    # mesmo após /new, e o usuário nunca mais conseguiria pesquisar.
     stub_chat("resposta")
     ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "101", username: "joao")
     nova = Conversation.active_for(@scope.key)
 
-    assert_not_nil nova
+    assert_not_nil nova, "deve existir conversa ativa após ask"
     assert_not_equal antiga.id, nova.id, "deve ser uma row nova, não a antiga reaberta"
-    assert_equal 0, nova.web_search_count, "/new libera o teto (nova row, count=0)"
-    # E o histórico da antiga é preservado (não é resetada em memória, só
-    # fechada) — é o que o usuário vê no /history.
-    assert_equal Conversation::MAX_WEB_SEARCH_PER_CONVERSATION, antiga.reload.web_search_count
   end
 end
 
