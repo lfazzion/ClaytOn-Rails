@@ -228,6 +228,13 @@ class WebSearchTool < ToolBase
         fallback_results = fallback[:results].first(limit).map do |r|
           r.merge(content: truncate(r[:content]))
         end
+        # F7 (plano-fase2 31/08/2026): aplica `trust` aos itens vindos do
+        # fallback. O `SearchApiRouter.normalize_results` já adiciona a chave
+        # quando o router processa o payload cru da API paga — mas o stub em
+        # teste e um futuro bypass do router poderiam devolver itens sem
+        # trust. `ensure_trust!` cobre os dois casos sem custo no caminho
+        # comum (no-op em item já rotulado).
+        fallback_results = fallback_results.map { |r| ensure_trust!(r) }
         # Refinamento SOTA 5: o resultado do fallback passa pelo MESMO fluxo de
         # cache do run() (a TTL/key foi calculada antes do fetch). Gravamos
         # aqui para que a próxima chamada igual acerte o cache e não gaste cota.
@@ -260,7 +267,10 @@ class WebSearchTool < ToolBase
         fallback_results = fallback[:results].first(limit).map do |r|
           r.merge(content: truncate(r[:content]))
         end
-        # F3c: TTL derivado do tipo via SearchApiCache — auto=900s (15min),
+        # F7 (plano-fase2 31/08/2026): ver comentário idêntico no path
+        # specialty acima — `ensure_trust!` cobre o caso de stub/bypass.
+        fallback_results = fallback_results.map { |r| ensure_trust!(r) }
+        # F3c: TTL via SearchApiCache — auto=900s (15min),
         # factual=10800s (3h) etc., conforme tabela do plano-fase2 D2.
         SearchApiCache.write(query: q, limit: limit, time_range: tr,
                              type: resolved_type, provider: provider,
@@ -350,6 +360,12 @@ class WebSearchTool < ToolBase
     # externo NÃO passam pelo RelevanceGuard — ver comentário no SearchApiRouter
     # e no retorno de fallback acima: as APIs ranqueiam por relevância própria.)
     data = verdict.approved.first(limit)
+    # F7 (plano-fase2 31/08/2026): classificador `trust` no resultado do
+    # SearXNG local também. O router já adiciona via `normalize_results`, mas
+    # o SearXNG é o caminho comum — sem esta linha, metade dos resultados
+    # chegaria ao modelo sem o selo. `ensure_trust!` é no-op em item já
+    # rotulado (defesa em profundidade).
+    data = data.map { |r| ensure_trust!(r) }
     # F3c: TTL via SearchApiCache — news=600s, factual=10800s, entity/academic
     # =86400s, code/auto=900s; time_range aperta nunca alarga (plano-fase2 D2).
     SearchApiCache.write(query: q, limit: limit, time_range: tr,
@@ -478,6 +494,17 @@ class WebSearchTool < ToolBase
     return nil if text.nil?
 
     text.length > CONTENT_MAX_CHARS ? "#{text[0, CONTENT_MAX_CHARS]}…" : text
+  end
+
+  # F7 (plano-fase2 31/08/2026): aplica `trust` no item se ainda não tiver.
+  # Idempotente — quando o router já normalizou o item, o `:trust` está lá
+  # e o helper é no-op. Quando o item vem cru (SearXNG direto, stub de
+  # teste, ou bypass futuro), calcula pelo host da URL. Cobre os 3 caminhos
+  # (SearXNG, specialty fallback, cascata padrão) sem custo extra no comum.
+  def ensure_trust!(item)
+    return item if item.is_a?(Hash) && item.key?(:trust)
+
+    item.merge(trust: SearchApiRouter.trust_for(item[:url]))
   end
 
   # Guarda lexical de relevância — Ruby puro, sem rede e sem modelo.

@@ -288,4 +288,163 @@ class SearchApiRouterPureTest < Minitest::Test
     assert_equal 5, body["numResults"], "numResults deve refletir o limit passado"
     assert_equal "auto", body["type"], "type padrao do body Exa continua sendo 'auto'"
   end
+
+  # ── F7 (plano-fase2 31/08/2026): campo `trust` na normalização ─────────────
+  # Classificador primary|ugc|unknown por host. A lista calibrada pela
+  # amostra E7 de 50 hosts está em `SearchApiRouter::TRUST_TABLE` (uma única
+  # fonte) e é consultada por sufixo de hostname. Hospedeiro default: `:unknown`
+  # (agregador / blog pessoal / mídia não listada).
+  def test_trust_for_hosts_ugc
+    assert_equal :ugc, SearchApiRouter.trust_for("https://reddit.com/r/ruby/x")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://www.reddit.com/r/ruby/x")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://old.reddit.com/")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://x.com/user/foo")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://twitter.com/user/status/1")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://www.linkedin.com/in/johndoe")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://stackoverflow.com/questions/1")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://forum.alura.com.br/t/x")
+    assert_equal :ugc, SearchApiRouter.trust_for("https://forum.example.org/topic")
+  end
+
+  def test_trust_for_hosts_primary
+    assert_equal :primary, SearchApiRouter.trust_for("https://gov.br/noticias/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://www.gov.br/pt-br")
+    assert_equal :primary, SearchApiRouter.trust_for("https://arxiv.org/abs/1")
+    assert_equal :primary, SearchApiRouter.trust_for("https://reuters.com/world/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://nature.com/articles/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://who.int/news/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://imf.org/external/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://nytimes.com/2026/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://apnews.com/article/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://bcb.gov.br/pt-br/x")
+    assert_equal :primary, SearchApiRouter.trust_for("https://github.com/rails/rails")
+    assert_equal :primary, SearchApiRouter.trust_for("https://www.bcb.gov.br/x")
+  end
+
+  def test_trust_for_host_desconhecido_e_unknown
+    assert_equal :unknown, SearchApiRouter.trust_for("https://exemplo.com/x")
+    assert_equal :unknown, SearchApiRouter.trust_for("https://blog.exemplo.com/post")
+    assert_equal :unknown, SearchApiRouter.trust_for("https://medium.com/p/x")
+    assert_equal :unknown, SearchApiRouter.trust_for("https://dev.to/article")
+  end
+
+  def test_trust_for_input_invalido_e_unknown_sem_levantar
+    assert_equal :unknown, SearchApiRouter.trust_for(nil)
+    assert_equal :unknown, SearchApiRouter.trust_for("")
+    assert_equal :unknown, SearchApiRouter.trust_for("   ")
+  end
+
+  # Match por sufixo: forum.* casa qualquer forum.* mesmo TLD; `gov.*` casa
+  # gov.br E gov.uk (defesa em profundidade, embora gov.uk não esteja na lista
+  # calibrada — só `gov.*` no brief).
+  def test_trust_for_match_por_sufixo_de_hostname
+    assert_equal :ugc, SearchApiRouter.trust_for("https://forum.dev.to/t/x"),
+                 "forum.* é UGC por sufixo mesmo que o host não esteja na lista"
+    assert_equal :primary, SearchApiRouter.trust_for("https://gov.uk/news"),
+                 "gov.* é primary por sufixo, independente do TLD (.uk)"
+  end
+
+  # `x.com` casa sufixo `x.com` (ugc) E não casa `x.com.br` (não está na lista).
+  # Defesa contra falso positivo de substring — `x.com.br` ≠ `x.com`.
+  def test_trust_for_x_com_br_nao_e_ugc
+    refute_equal :ugc, SearchApiRouter.trust_for("https://x.com.br/noticia"),
+                 "x.com.br não é x.com — não pode virar :ugc por substring"
+    assert_equal :unknown, SearchApiRouter.trust_for("https://x.com.br/noticia"),
+                 "x.com.br cai em :unknown por não estar na lista calibrada"
+  end
+
+  # `reddit.com` ugc NÃO pode aparecer como `:primary` mesmo se algum
+  # mecanismo futuro permitir — defesa em profundidade.
+  def test_trust_reddit_nunca_e_primary
+    refute_equal :primary, SearchApiRouter.trust_for("https://reddit.com/")
+    refute_equal :primary, SearchApiRouter.trust_for("https://www.reddit.com/")
+  end
+
+  # D4-F7-v2 (revisor r1 grok REPROVA): o wildcard antigo `"gov."` com
+  # `start_with?` casava QUALQUER host que COMEÇASSE com "gov." — incluindo
+  # `gov.example.evil`, que virava `:primary`. Semântica correta é match
+  # por SUFIXO de TLD real: `host.end_with?(".gov")`, `".gov.br"`, etc.
+  # Cobre os 4 casos canônicos do brief:
+  #   - gov.example.evil → :unknown  (não termina em .gov/.gov.br)
+  #   - www.gov.br       → :primary  (termina em .gov.br)
+  #   - evil.com/gov.fake→ :unknown  (path com "gov." não casa; match é por HOST)
+  #   - www.reddit.com   → :ugc      (sufixo `.reddit.com` continua valendo)
+  def test_trust_wildcard_gov_nao_casa_subdominio_falso
+    assert_equal :unknown, SearchApiRouter.trust_for("https://gov.example.evil/x"),
+                 "gov.example.evil NÃO é gov — start_with?('gov.') era o bug; agora é :unknown"
+    assert_equal :primary, SearchApiRouter.trust_for("https://www.gov.br/anexo"),
+                 "www.gov.br é gov.br real — sufixo .gov.br casa"
+    assert_equal :unknown, SearchApiRouter.trust_for("https://evil.com/gov.fake"),
+                 "gov.fake no PATH não casa — match é por HOST, não pela URL inteira"
+    assert_equal :ugc, SearchApiRouter.trust_for("https://www.reddit.com/r/x"),
+                 "reddit.com continua :ugc — sufixo .reddit.com não foi afetado pelo fix"
+  end
+
+  # Tabela exposta como constante — single source of truth para o classificador.
+  def test_trust_table_e_constante_exposta
+    assert defined?(SearchApiRouter::TRUST_TABLE), "tabela deve ser constante pública do módulo"
+    table = SearchApiRouter::TRUST_TABLE
+    assert table.is_a?(Hash)
+    assert_equal :ugc, table["reddit.com"], "reddit.com deve estar na tabela como :ugc"
+    assert_equal :primary, table["github.com"], "github.com deve estar na tabela como :primary"
+    assert_equal :primary, table["arxiv.org"], "arxiv.org deve estar na tabela como :primary"
+    # sanidade: a lista calibrada (brief F7) tem TODOS os hosts do brief.
+    %w[
+      reddit.com x.com twitter.com linkedin.com stackoverflow.com
+      gov.br arxiv.org reuters.com nature.com who.int imf.org
+      nytimes.com apnews.com bcb.gov.br github.com
+    ].each do |host|
+      refute_nil table[host], "host #{host} deveria estar em TRUST_TABLE (brief F7)"
+    end
+  end
+
+  # Cada item normalizado carrega `:trust` por host. Validação direta na
+  # normalização (TDD: o resultado da API bruta vira lista com a chave).
+  def test_normalize_results_inclui_campo_trust_por_item
+    raw = {
+      "results" => [
+        { "title" => "T1", "url" => "https://reddit.com/r/ruby/x", "content" => "snip", "score" => 0.9 },
+        { "title" => "T2", "url" => "https://github.com/rails/rails", "content" => "snip", "score" => 0.8 },
+        { "title" => "T3", "url" => "https://exemplo.com/x", "content" => "snip", "score" => 0.7 }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:tavily, raw, score_threshold: 0.5)
+    assert_equal :ugc, out[0][:trust], "URL reddit.com deve vir com trust :ugc"
+    assert_equal :primary, out[1][:trust], "URL github.com deve vir com trust :primary"
+    assert_equal :unknown, out[2][:trust], "URL desconhecida deve vir com trust :unknown"
+  end
+
+  # Exa/Linkup também ganham :trust (todas as APIs do router passam pela mesma
+  # normalização — sem `trust`, um item Tavily+um item Exa do mesmo host
+  # ficariam com campos diferentes).
+  def test_normalize_results_inclui_trust_emexa_e_linkup
+    exa_raw = {
+      "results" => [
+        { "title" => "H", "url" => "https://arxiv.org/abs/1", "highlights" => ["t"] }
+      ]
+    }
+    assert_equal :primary, SearchApiRouter.normalize_results(:exa, exa_raw, score_threshold: 0.5).first[:trust]
+
+    linkup_raw = {
+      "results" => [
+        { "name" => "L", "url" => "https://reddit.com/r/x", "content" => "c" }
+      ]
+    }
+    assert_equal :ugc, SearchApiRouter.normalize_results(:linkup, linkup_raw, score_threshold: 0.5).first[:trust]
+  end
+
+  # Dedupe canônica não pode perder o `trust`: como o dedupe mantém a
+  # primeira ocorrência por URL canônica, o item mantido carrega o trust da
+  # primeira ocorrência (e como dedupe é por URL, hosts são iguais — invariante).
+  def test_dedupe_preserva_trust
+    raw = {
+      "results" => [
+        { "title" => "A", "url" => "https://reddit.com/r/ruby/x?utm=1", "content" => "1", "score" => 0.9 },
+        { "title" => "B", "url" => "https://reddit.com/r/ruby/x/", "content" => "2", "score" => 0.8 }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:tavily, raw, score_threshold: 0.5)
+    assert_equal 1, out.size
+    assert_equal :ugc, out.first[:trust], "dedupe precisa preservar trust do item mantido"
+  end
 end

@@ -69,6 +69,150 @@ class SearchApiRouter
   # Mapa de time_range (day/week/month/year) → dias para recuar a data inicial.
   TIME_RANGE_DAYS = { "day" => 1, "week" => 7, "month" => 30, "year" => 365 }.freeze
 
+  # ── Classificador `trust` (F7, plano-fase2 31/08/2026) ───────────────────
+  # Categoriza hosts por nível de confiança para o leitor humano do chatbot:
+  #
+  #   :primary — fonte original/autoral (gov, jornal reputado, arxiv, repo).
+  #              Pode ser citada como fato sem segunda fonte quando escassa.
+  #   :ugc     — conteúdo gerado por usuário (reddit, x, linkedin, stackoverflow,
+  #              forum.*). Pode ser fonte ÚNICA em técnico, mas não em notícia.
+  #   :unknown — agregador/blog pessoal/wikipedia/mídia não listada. NÃO conta
+  #              como fonte confiável sozinha — exige segunda fonte primária.
+  #
+  # Lista calibrada pela amostra E7 de 50 hosts (brief F7). Wildcards ficam em
+  # TRUST_WILDCARDS (sufixo com ponto: `forum.` casa forum.alura.com.br,
+  # `gov.` casa gov.br/gov.uk). Match exato em TRUST_TABLE é verificado
+  # ANTES do wildcard — assim `reddit.com` continua :ugc mesmo se algum
+  # futuro wildcard global existir.
+  #
+  # Contrato: a tabela é a única fonte do classificador. Adicionar/rotular
+  # um novo host é aqui, não em código espalhado.
+  TRUST_TABLE = {
+    # UGC (conteúdo gerado por usuário)
+    "reddit.com"        => :ugc,
+    "x.com"             => :ugc,
+    "twitter.com"       => :ugc,
+    "linkedin.com"      => :ugc,
+    "stackoverflow.com" => :ugc,
+    # Primary (fonte original/autoral)
+    "gov.br"        => :primary,
+    "gov.uk"        => :primary,
+    "arxiv.org"     => :primary,
+    "reuters.com"   => :primary,
+    "nature.com"    => :primary,
+    "who.int"       => :primary,
+    "imf.org"       => :primary,
+    "nytimes.com"   => :primary,
+    "apnews.com"    => :primary,
+    "bcb.gov.br"    => :primary,
+    "github.com"    => :primary
+  }.freeze
+
+  # Wildcards de sufixo: a chave é o sufixo COM ponto (inicial pra end_with,
+# sem ponto inicial pra start_with), e o match é `host.start_with?(chave)`
+# OU `host.end_with?(chave)` conforme a entrada. Cobre:
+  #   `forum.alura.com.br`, `forum.example.org` — `start_with?("forum.")`
+  #   `gov.br`, `www.gov.br`, `bcb.gov.br`, `gov.uk` — `end_with?(".gov*")`
+  #
+  # D4-F7-v2: o wildcard antigo era `"gov."` com `start_with?`, o que fazia
+  # QUALQUER host começando com "gov." virar `:primary` — incluindo o
+  # canônico `gov.example.evil` (host malicioso hipotético). A semântica
+  # correta para gov é match por SUFIXO de TLD real: o host precisa TERMINAR
+  # em `.gov`, `.gov.br`, `.gov.uk`. Isso é seguro porque `.gov` é restrito
+  # por IANA — nenhum domínio malicioso comum termina em `.gov`.
+  #
+  # O `forum.` continua como `start_with?` (sufixo com ponto à direita):
+  # `forum.X` é UGC por convenção — o sufixo é "forum." (não ".forum" nem
+  # `.com`); nenhum host legítimo é "forum" como TLD. O `start_with?` é
+  # seguro aqui porque exige o ponto à direita, então não casa "forum" solto
+  # nem "forumXYZ" (sem ponto).
+  #
+  # Mantidos separados da TRUST_TABLE para o lookup ser óbvio (hash de
+  # sufixos vs hash de hosts). Resultado da ordem de avaliação:
+  # match exato > sufixo de TRUST_TABLE > TRUST_WILDCARDS_START >
+  # TRUST_WILDCARDS_END > :unknown.
+  TRUST_WILDCARDS_START = {
+    "forum." => :ugc
+  }.freeze
+  TRUST_WILDCARDS_END = {
+    ".gov"    => :primary,
+    ".gov.br" => :primary,
+    ".gov.uk" => :primary
+  }.freeze
+  # Alias preservado para compatibilidade de testes/inspect existentes;
+  # união lógica (apenas leitura conceitual).
+  TRUST_WILDCARDS = TRUST_WILDCARDS_START.merge(TRUST_WILDCARDS_END).freeze
+
+  # Classifica o host por trust. Aceita URL completa ou só o hostname. Default
+  # :unknown (agregador / blog pessoal / mídia não listada — o leitor humano
+  # precisa de uma segunda fonte primária antes de afirmar). Nunca levanta:
+  # input vazio/nil/whitespace cai em :unknown.
+  #
+  # Ordem de avaliação (defesa em profundidade):
+  #   1. TRUST_TABLE[host] exato
+  #   2. TRUST_TABLE por sufixo `.suffix` — `www.reddit.com` casa `.reddit.com`.
+  #      NÃO usado para hosts curtos demais (≤ suffix.length) para evitar
+  #      `x.com.br` casar `.x.com` (defesa testada em `x.com.br`).
+  #   3a. TRUST_WILDCARDS_START por start_with (sufixo `xxx.`) — `forum.`
+  #   3b. TRUST_WILDCARDS_END   por end_with   (sufixo `.xxx`) — `.gov` /
+  #        `.gov.br` / `.gov.uk`. D4-F7-v2: era `start_with?("gov.")` e
+  #        casava QUALQUER host começando com "gov." (inclusive
+  #        `gov.example.evil`). Agora exige TERMINAR no TLD `.gov*` — `.gov`
+  #        é restrito por IANA, então não há colisão com host malicioso.
+  #   4. :unknown
+  #
+  # @param url_or_host [String, nil]
+  # @return [Symbol] :primary, :ugc, ou :unknown
+  def self.trust_for(url_or_host)
+    host = host_from(url_or_host)
+    return :unknown if host.empty?
+
+    # 1. Match exato na tabela calibrada (caso `reddit.com`, `github.com`...).
+    return TRUST_TABLE[host] if TRUST_TABLE.key?(host)
+
+    # 2. Match por sufixo `.suffix` — `www.reddit.com` casa `.reddit.com`.
+    #    Guarda: host precisa ser mais longo que o suffix para evitar
+    #    `x.com.br` casar `.x.com` (string contém o suffix mas não é subdomínio).
+    TRUST_TABLE.each do |suffix, label|
+      next if host.length <= suffix.length
+      return label if host.end_with?(".#{suffix}")
+    end
+
+    # 3a. Wildcard por PREFIXO (`xxx.`) — `forum.alura.com.br` casa.
+    #     Sufixo termina com ponto, então exige fronteira de label.
+    TRUST_WILDCARDS_START.each do |suffix, label|
+      return label if host.start_with?(suffix)
+    end
+
+    # 3b. Wildcard por SUFIXO (`.xxx`) — `www.gov.br` casa `.gov.br`.
+    #     D4-F7-v2: exige TLD real (host.end_with? — sem ambiguidade de prefix).
+    TRUST_WILDCARDS_END.each do |suffix, label|
+      return label if host.end_with?(suffix)
+    end
+
+    # 4. Default
+    :unknown
+  end
+
+  # Extrai o hostname de uma URL ou devolve o próprio valor se já for hostname.
+  # Robusto contra nil/whitespace/invalid URI — qualquer falha → "".
+  def self.host_from(url_or_host)
+    s = url_or_host.to_s.strip
+    return "" if s.empty?
+
+    # Se tem scheme, parseia como URI; senão, é hostname cru.
+    if s.include?("://")
+      begin
+        uri = URI.parse(s)
+        return uri.host.to_s.downcase.strip
+      rescue URI::InvalidURIError
+        return ""
+      end
+    end
+
+    s.downcase
+  end
+
   # ── Classificador de especialidade ─────────────────────────────────────────
 
   # Identifica a especialidade da query para decidir se continua a cascata após miss vazio.
@@ -295,17 +439,25 @@ class SearchApiRouter
   end
 
   def self.normalize_one(provider, r)
-    case provider
-    when :tavily
-      { title: r["title"], url: r["url"], content: r["content"], engine: "tavily", _score: r["score"] }
-    when :exa
-      content = Array(r["highlights"]).first || r["text"]
-      { title: r["title"], url: r["url"], content: content, engine: "exa" }
-    when :linkup
-      { title: r["name"], url: r["url"], content: r["content"], engine: "linkup" }
-    else
-      nil
-    end
+    url = r["url"]
+    base = case provider
+           when :tavily
+             { title: r["title"], url: url, content: r["content"], engine: "tavily", _score: r["score"] }
+           when :exa
+             content = Array(r["highlights"]).first || r["text"]
+             { title: r["title"], url: url, content: content, engine: "exa" }
+           when :linkup
+             { title: r["name"], url: url, content: r["content"], engine: "linkup" }
+           else
+             return nil
+           end
+    # F7 (plano-fase2 31/08/2026): classificador `trust` por host. Cada item
+    # do resultado carrega o selo junto com title/url/content/engine, e chega
+    # ao modelo do perfil via `Responder.from` (MCP) e `success(data)` (bot).
+    # Default :unknown para hosts ausentes da lista calibrada — o leitor humano
+    # precisa de uma segunda fonte primária antes de afirmar como fato.
+    base[:trust] = trust_for(url)
+    base
   end
 
   # Refinamento SOTA 1: remove query string e barra final ANTES de deduplicar,
