@@ -51,7 +51,12 @@ class SearchApiRouter
 
   # Regexes de especialidade para continuação de cascata após 200 vazio (miss).
   EXA_SPECIALTY_PATTERN = /paper|arxiv|pubmed|semelhante|o que [eé]|conceitual|machine learning|pesquisa/i
-  TAVILY_SPECIALTY_PATTERN = /como instalar|gem install|pattern matching|documenta[cç][aã]o|lookup|instala[cç][aã]o/i
+  # F4 do plano-fase2 (30/08/2026): `notícia`/`noticias`/`news`/`headline`/
+  # `breaking` entram na lista Tavily. Antes só lookup técnico casava. Agora
+  # o regex de Tavily captura o que ele já é pago pra fazer (recência +
+  # manchetes) — a entrada é ADITIVA, não substitui nada. Sinais PT-BR
+  # e EN convivem; ordem não importa (regex alternation).
+  TAVILY_SPECIALTY_PATTERN = /como instalar|gem install|pattern matching|documenta[cç][aã]o|lookup|instala[cç][aã]o|not[ií]cia|noticias|news|headline|breaking/i
 
   # Timeout idêntico ao do WebSearchTool (Spec 1.a).
   OPEN_TIMEOUT = 5
@@ -160,12 +165,25 @@ class SearchApiRouter
     # aqui e aplicamos a cascata padrão (linkup → exa → tavily) com a regra
     # de regex (`specialty_for(query)`) que decide se o 200-vazio de um
     # provider deve avançar para outro de especialidade compatível.
+    #
+    # F4 do plano-fase2 (30/08/2026): o 1º pago da cascata passa a ser a
+    # ESPECIALIDADE (quando `specialty_for(query)` casa). Antes era sempre
+    # Linkup (1º do PROVIDERS estático). NUNCA alteramos PROVIDERS — só a
+    # ordem de TRABALHO interna. Cobertura do plano:
+    #   - arxiv + SearXNG down → Exa primeiro no pago
+    #   - time_range=day + notícia no Discord → Tavily primeiro no pago
+    #   - generic factual → Linkup primeiro (comportamento atual preservado)
     query_specialty = specialty_for(query)
 
     # Specialty explícito que NÃO está habilitado NÃO interfere na cascata
     # padrão (o caller pediu, mas o provider não estava disponível). A
     # cascata segue a ordem de fallback por chave presente.
-    providers_to_try = providers.dup
+    #
+    # F4: reordenação interna (NÃO muda PROVIDERS). Quando `query_specialty`
+    # é :tavily ou :exa, ele vira o 1º da fila; os demais pagam caem depois
+    # na ordem original do PROVIDERS. Sem especialidade (factual genérico) a
+    # fila permanece como `PROVIDERS` — Linkup 1º preservado.
+    providers_to_try = reorder_by_specialty(providers, query_specialty)
 
     until providers_to_try.empty?
       provider = providers_to_try.shift
@@ -215,6 +233,24 @@ class SearchApiRouter
   end
 
   # ── Helpers do contrato de specialty ────────────────────────────────────────
+
+  # F4 do plano-fase2 (30/08/2026): reordena a FILA de trabalho (NÃO o
+  # PROVIDERS estático). Quando `specialty` é :tavily ou :exa, esse provider
+  # vira o 1º da fila. Sem especialidade (nil) ou especialidade fora de
+  # PROVIDERS, devolve `providers` na ordem original — comportamento
+  # legado preservado.
+  #
+  # Importante: `providers` aqui é o resultado de `ordered_providers`
+  # (filtrado por chave). Se `specialty` não estiver nessa lista (sem
+  # chave), caímos no fallback de `PROVIDERS` para preservar a ordem
+  # original e o caller não vê diferença.
+  def self.reorder_by_specialty(providers, specialty)
+    return providers.dup if specialty.nil?
+    return providers.dup unless PROVIDERS.include?(specialty)
+    return providers.dup unless providers.include?(specialty)
+
+    [specialty, *providers.reject { |p| p == specialty }]
+  end
 
   # `specialty:` só está habilitado se: (1) for um provider válido da
   # cascata paga, (2) tiver chave em ENV (provider apareceu em

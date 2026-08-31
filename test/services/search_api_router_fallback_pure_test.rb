@@ -206,18 +206,22 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
   end
 
   def test_call_linkup_200_vazio_continua_para_exa_em_query_de_papers
+    # F4 do plano-fase2 (30/08/2026): Path B reordenado — query de papers
+    # (regex exa) faz Exa ser o 1º pago da cascata, NÃO Linkup. Stubber
+    # legado de F3 esperava `[:linkup, :exa]` (linkup 200 vazio → exa serve);
+    # F4 mudou a ordem de TRABALHO para `[:exa]` (exa serve direto).
+    # O contrato semântico preservado: papers → exa (não linkup).
     calls = []
-    fake_linkup = { "results" => [], "sources" => [] }
     fake_exa = {
       "results" => [{ "title" => "E1", "url" => "https://exa.ai/paper1", "highlights" => ["attention"] }]
     }
 
     SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
       calls << provider
-      if provider == :linkup
-        { ok: true, body: fake_linkup, reason: nil, retryable: false }
-      else
+      if provider == :exa
         { ok: true, body: fake_exa, reason: nil, retryable: false }
+      else
+        { ok: false, body: nil, reason: "NÃO DEVERIA TER SIDO CHAMADO", retryable: false }
       end
     end
 
@@ -231,10 +235,10 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
       ENV["LINKUP_API_KEY"] = "lk"
 
       result = SearchApiRouter.call(query: "papers sobre machine learning", limit: 5)
-      refute_nil result, "deve obter resultado do Exa após miss vazio do Linkup em query de papers"
+      refute_nil result, "deve obter resultado do Exa após query de papers"
       assert_equal "exa", result[:engine]
       assert_equal 1, result[:results].size
-      assert_equal [:linkup, :exa], calls, "deve tentar Linkup e depois Exa (especialidade da query)"
+      assert_equal [:exa], calls, "F4: papers → Exa 1º no pago (não mais [:linkup, :exa])"
     ensure
       ENV["TAVILY_API_KEY"] = orig_tv
       ENV["EXA_API_KEY"] = orig_ex
@@ -243,8 +247,12 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
   end
 
   def test_call_linkup_200_vazio_continua_para_tavily_em_query_de_lookup_pulando_exa
+    # F4 do plano-fase2 (30/08/2026): Path B reordenado — query de lookup
+    # (regex tavily) faz Tavily ser o 1º pago da cascata, NÃO Linkup. Stubber
+    # legado de F3 esperava `[:linkup, :tavily]` (linkup 200 vazio → tavily serve);
+    # F4 mudou a ordem de TRABALHO para `[:tavily]` (tavily serve direto).
+    # O contrato semântico preservado: lookup → tavily (não exa).
     calls = []
-    fake_linkup = { "results" => [], "sources" => [] }
     fake_tavily = {
       "results" => [{ "title" => "T1", "url" => "https://tavily.com/doc", "content" => "c", "score" => 0.9 }],
       "usage" => { "credits" => 1 }
@@ -252,10 +260,10 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
 
     SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
       calls << provider
-      if provider == :linkup
-        { ok: true, body: fake_linkup, reason: nil, retryable: false }
-      else
+      if provider == :tavily
         { ok: true, body: fake_tavily, reason: nil, retryable: false }
+      else
+        { ok: false, body: nil, reason: "NÃO DEVERIA TER SIDO CHAMADO", retryable: false }
       end
     end
 
@@ -269,10 +277,10 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
       ENV["LINKUP_API_KEY"] = "lk"
 
       result = SearchApiRouter.call(query: "como instalar rails", limit: 5)
-      refute_nil result, "deve obter resultado do Tavily após miss vazio do Linkup em query de lookup"
+      refute_nil result, "deve obter resultado do Tavily em query de lookup"
       assert_equal "tavily", result[:engine]
       assert_equal 1, result[:results].size
-      assert_equal [:linkup, :tavily], calls, "deve pular Exa e ir direto para Tavily (especialidade lookup)"
+      assert_equal [:tavily], calls, "F4: lookup → Tavily 1º no pago (não mais [:linkup, :tavily])"
     ensure
       ENV["TAVILY_API_KEY"] = orig_tv
       ENV["EXA_API_KEY"] = orig_ex
@@ -425,6 +433,165 @@ class SearchApiRouterFallbackPureTest < Minitest::Test
       assert_equal 1, result[:results].size,
                    "Linkup não tem filtro de score — item sem score NÃO é descartado"
       assert_equal [:linkup], calls, "não deve tentar Exa ou Tavily quando Linkup respondeu 200"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  # F4 do plano-fase2 (30/08/2026): Path B reordena a lista de trabalho.
+  # Quando `specialty_for(query)` casa com Exa, o 1º pago da cascata é Exa
+  # (não mais Linkup). NUNCA muda `PROVIDERS` — só a ordem de trabalho
+  # interna. Cobertura do aceite do plano:
+  #   arxiv + SearXNG down + type=academic (ou regex) -> Exa primeiro no pago
+  def test_call_query_papers_exa_e_primeiro_pago_path_b_f4
+    calls = []
+    fake_exa = {
+      "results" => [{ "title" => "E1", "url" => "https://exa.ai/p1", "highlights" => ["attention"] }]
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :exa
+        { ok: true, body: fake_exa, reason: nil, retryable: false }
+      else
+        { ok: false, body: nil, reason: "NÃO DEVERIA TER SIDO CHAMADO", retryable: false }
+      end
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "arxiv transformers attention", limit: 5)
+      refute_nil result
+      assert_equal "exa", result[:engine]
+      assert_equal [:exa], calls,
+                   "Path B reordenado: query com specialty exa → Exa 1º (Linkup/Tavily NÃO são tentados no caminho feliz)"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  # F4 (30/08/2026): query de notícia → Tavily 1º pago. Cobre o aceite
+  # "time_range=day no Discord -> Tavily primeiro no pago (via regex
+  # notícia, não type)". Sem `type:` explícito, o regex `notícia` agora
+  # reordena a fila para Tavily primeiro.
+  def test_call_query_noticia_tavily_e_primeiro_pago_path_b_f4
+    calls = []
+    fake_tavily = {
+      "results" => [{ "title" => "N1", "url" => "https://n.com", "content" => "c", "score" => 0.9 }],
+      "usage" => { "credits" => 1 }
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :tavily
+        { ok: true, body: fake_tavily, reason: nil, retryable: false }
+      else
+        { ok: false, body: nil, reason: "NÃO DEVERIA TER SIDO CHAMADO", retryable: false }
+      end
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "última notícia do SpaceX agora", limit: 5, time_range: "day")
+      refute_nil result
+      assert_equal "tavily", result[:engine]
+      assert_equal [:tavily], calls,
+                   "Path B reordenado: query de notícia (regex F4) → Tavily 1º no pago"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  # F4 (30/08/2026): generic factual (sem regex de especialidade) → Linkup
+  # continua sendo o 1º pago. Comportamento atual PRESERVADO.
+  def test_call_query_generica_sem_especialidade_linkup_continua_primeiro_path_b_f4
+    calls = []
+    fake_linkup = {
+      "results" => [{ "name" => "L1", "url" => "https://l.com", "content" => "c" }],
+      "sources" => []
+    }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :linkup
+        { ok: true, body: fake_linkup, reason: nil, retryable: false }
+      else
+        { ok: false, body: nil, reason: "NÃO DEVERIA TER SIDO CHAMADO", retryable: false }
+      end
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "preço do bitcoin hoje", limit: 5)
+      refute_nil result
+      assert_equal "linkup", result[:engine]
+      assert_equal [:linkup], calls,
+                   "Path B sem especialidade: Linkup continua 1º (comportamento preservado)"
+    ensure
+      ENV["TAVILY_API_KEY"] = orig_tv
+      ENV["EXA_API_KEY"] = orig_ex
+      ENV["LINKUP_API_KEY"] = orig_lk
+    end
+  end
+
+  # F4 (30/08/2026): query Tavily-especialidade 200 vazio → o próximo da
+  # fila é Tavily-especialidade? Não: já estava nele. Path B reordenado
+  # com Tavily 1º e 200 vazio significa: query SEM match para próximo
+  # (Tavily é o último da especialidade) → para. Cobertura de regressão
+  # para que Path B não introduza cascata extra descontrolada.
+  def test_call_query_noticia_tavily_primeiro_200_vazio_para_sem_chamar_outro_pago_f4
+    calls = []
+    fake_tavily_vazio = { "results" => [] }
+
+    SearchApiRouter.singleton_class.send(:define_method, :http_post) do |provider, query, limit, tf|
+      calls << provider
+      if provider == :tavily
+        { ok: true, body: fake_tavily_vazio, reason: nil, retryable: false }
+      else
+        { ok: false, body: nil, reason: "NÃO DEVERIA TER SIDO CHAMADO", retryable: false }
+      end
+    end
+
+    orig_tv = ENV["TAVILY_API_KEY"]
+    orig_ex = ENV["EXA_API_KEY"]
+    orig_lk = ENV["LINKUP_API_KEY"]
+
+    begin
+      ENV["TAVILY_API_KEY"] = "tv"
+      ENV["EXA_API_KEY"] = "ex"
+      ENV["LINKUP_API_KEY"] = "lk"
+
+      result = SearchApiRouter.call(query: "última notícia SpaceX agora", limit: 5)
+      assert_nil result
+      assert_equal [:tavily], calls,
+                   "Path B com Tavily 1º + 200 vazio: para a cascata (sem cascata adicional)"
     ensure
       ENV["TAVILY_API_KEY"] = orig_tv
       ENV["EXA_API_KEY"] = orig_ex

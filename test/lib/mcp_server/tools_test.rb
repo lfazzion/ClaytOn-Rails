@@ -25,6 +25,27 @@ class McpServerToolsTest < ActiveSupport::TestCase
     assert_equal 5, schema[:inputSchema][:properties][:limit][:maximum]
   end
 
+  # F4 do plano v2 (30/08/2026): a description da tool expoe a matriz L5
+  # type -> provedor + cota. Sem isto, o modelo do perfil le so "type" do
+  # schema, sem saber que `news` custa cota Tavily e `code` nao custa nada.
+  # Travado: o texto precisa mencionar Tavily e SearXNG pra que o classificador
+  # fique visivel.
+  test "web_search description expoe matriz L5 type -> provedor + cota" do
+    schema = McpServer::Tools::WebSearch.to_h
+    description = schema[:description].to_s
+    assert_match(/Tavily/, description)
+    assert_match(/SearXNG/, description)
+  end
+
+  # REGRESSAO: a matriz L5 e so texto na description. O enum do schema e
+  # intocado. Se um dia alguem trocar o enum por "blog"/"shopping" pra
+  # "simplificar", a classificacao que o modelo faz quebra.
+  test "REGRESSAO: enum de type permanece news|entity|academic|factual|code|auto" do
+    schema = McpServer::Tools::WebSearch.to_h
+    assert_equal %w[news entity academic factual code auto],
+                 schema[:inputSchema][:properties][:type][:enum]
+  end
+
   test "sucesso vira conteudo de texto com structuredContent e sem isError" do
     ::PlatformSearchTool.any_instance.stubs(:execute).returns(
       status: :success, data: { platform: "x", query: "EXM7777", count: 1, results: [{ "url" => "https://x.com/EXM7777/status/1" }] }

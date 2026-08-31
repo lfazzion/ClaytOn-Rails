@@ -150,37 +150,39 @@ class SearchApiRouterTest < ActiveSupport::TestCase
     assert_equal "tavily", out[:engine]
   end
 
-  # ── Linkup 200 com results=[]: continua por especialidade ou para em factual ──
+  # F4: query de papers casa EXA_SPECIALTY_PATTERN, então a cascata
+  # REORDENADA põe Exa como 1º. Exa serve 200 com 1 resultado e a
+  # cascata para aí — Linkup nunca é chamado. Stub do Linkup com
+  # `.to_raise` foi removido (não há caminho que toque Linkup); ENV de
+  # LINKUP removido para refletir que só Exa paga nessa busca.
+  # Assert de quota mira Exa (o provider que reservou). Espelha o teste
+  # de lookup logo abaixo — mesmo padrão aplicado aos dois.
   test "Linkup 200 com results vazio em query de papers continua para Exa" do
-    ENV["LINKUP_API_KEY"] = "lk"
     ENV["EXA_API_KEY"] = "ex"
-    stub_request(:post, "https://api.linkup.so/v1/search")
-      .with(body: hash_including(q: "papers sobre machine learning"))
-      .to_return(status: 200, body: { results: [] }.to_json, headers: { "Content-Type" => "application/json" })
     stub_exa_success("papers sobre machine learning", [{ title: "E1", url: "https://e1.com", text: "c" }])
 
     out = SearchApiRouter.call(query: "papers sobre machine learning", limit: 5)
     refute_nil out
     assert_equal "exa", out[:engine]
     assert_equal 1, out[:results].size
-    assert_equal 1, SearchApiQuota.find_by(api_name: "linkup", month: SearchApiRouter.current_month).count
+    assert_equal 1, SearchApiQuota.find_by(api_name: "exa", month: SearchApiRouter.current_month).count
   end
 
+  # F4: query de lookup casa TAVILY_SPECIALTY_PATTERN, então a cascata
+  # REORDENADA põe Tavily como 1º. Tavily serve 200 com 1 resultado e a
+  # cascata para aí — Linkup e Exa nunca são chamados. Stub do Exa com
+  # `.to_raise` foi removido (não há caminho que toque Exa); ENV de
+  # EXA/LINKUP removidos para refletir que só Tavily paga nessa busca.
+  # Assert de quota mira Tavily (o provider que reservou).
   test "Linkup 200 com results vazio em query de lookup continua para Tavily pulando Exa" do
-    ENV["LINKUP_API_KEY"] = "lk"
-    ENV["EXA_API_KEY"] = "ex"
     ENV["TAVILY_API_KEY"] = "tv"
-    stub_request(:post, "https://api.linkup.so/v1/search")
-      .with(body: hash_including(q: "como instalar rails"))
-      .to_return(status: 200, body: { results: [] }.to_json, headers: { "Content-Type" => "application/json" })
-    stub_request(:post, "https://api.exa.ai/search").to_raise("Exa não devia ser chamada para lookup")
     stub_tavily_success("como instalar rails", [{ title: "T1", url: "https://t1.com", content: "c", score: 0.9 }])
 
     out = SearchApiRouter.call(query: "como instalar rails", limit: 5)
     refute_nil out
     assert_equal "tavily", out[:engine]
     assert_equal 1, out[:results].size
-    assert_equal 1, SearchApiQuota.find_by(api_name: "linkup", month: SearchApiRouter.current_month).count
+    assert_equal 1, SearchApiQuota.find_by(api_name: "tavily", month: SearchApiRouter.current_month).count
   end
 
   test "Linkup 200 com results vazio em query factual generica para a cascata e retorna nil" do

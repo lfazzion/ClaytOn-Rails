@@ -348,6 +348,91 @@ class F2SchemaTypePureTest < Minitest::Test
     assert_empty router_calls, "SearXNG serviu — type não deve pagar nada"
   end
 
+  # ── F4 do plano-fase2 (30/08/2026): origin=discord IGNORA `type` ────────
+  # F2 vazou o `type` na tool Rails — Discord não tem `type:` no schema e
+  # o caminho não pode ser poluído. No Discord, `type` é forçado a nil
+  # e o WebSearchTool cai no fluxo legado (cascata padrão, sem specialty).
+  def test_discord_com_type_news_injetado_e_ignorado_sem_specialty
+    with_fetch(nil)
+    state_calls = @state[:calls]
+    fb = fallback([{ title: "Cascata", url: "https://c.com",
+                     content: "c", engine: "linkup" }], engine: :linkup)
+    SearchApiRouter.singleton_class.send(:define_method, :call) do |**kw|
+      state_calls << kw
+      # Se origin=:discord mandaria specialty=:tavily, este stub devolve
+      # nil — provando que NÃO entrou nessa branch.
+      next nil if kw[:specialty] == :tavily
+      fb
+    end
+
+    begin
+      Thread.current[:cleitin_origin] = :discord
+      res = @tool.run(query: "última notícia SpaceX agora", type: "news")
+      assert_equal :success, res[:status], "Discord ignora type=news injetado — deve cair em cascata padrão"
+      assert_equal 1, state_calls.size
+      refute state_calls.first.key?(:specialty),
+             "Discord: type=news injetado NÃO pode virar specialty=:tavily (sem specialty no caminho Discord)"
+    ensure
+      Thread.current[:cleitin_origin] = nil
+    end
+  end
+
+  def test_discord_com_type_news_injetado_e_path_b_reordenado_ainda_sem_specialty
+    # F4 cobre as duas camadas: (a) ignora type (sem specialty); (b) Path B
+    # reordenado usa o regex `specialty_for(query)` interno. Se (a) falha,
+    # o teste pega. Para origin=:discord a fila da cascata segue a ordem
+    # LEGADA (linkup 1º), porque o `provider` interno é nil.
+    with_fetch(nil)
+    state_calls = @state[:calls]
+    linkup_called = false
+    fb = fallback([{ title: "Cascata", url: "https://c.com",
+                     content: "c", engine: "linkup" }], engine: :linkup)
+    SearchApiRouter.singleton_class.send(:define_method, :call) do |**kw|
+      state_calls << kw
+      linkup_called = true
+      fb
+    end
+
+    begin
+      Thread.current[:cleitin_origin] = :discord
+      res = @tool.run(query: "última notícia SpaceX agora", type: "news")
+      assert_equal :success, res[:status]
+      assert linkup_called, "Discord sem specialty: linkup é chamado (cascata padrão)"
+      assert_equal 1, state_calls.size
+      refute state_calls.first.key?(:specialty),
+             "Discord ignora type e cai no fluxo legacy sem specialty"
+    ensure
+      Thread.current[:cleitin_origin] = nil
+    end
+  end
+
+  def test_mcp_com_type_news_segue_normalmente_sem_ignorar_type
+    # F4: a regra de ignorar `type` é EXCLUSIVA do Discord. MCP path mantém
+    # o contrato da F2 — type=news → Tavily primeiro.
+    with_fetch(nil)
+    state_calls = @state[:calls]
+    tavily_called = false
+    fb = fallback([{ title: "N", url: "https://n.com",
+                     content: "c", engine: "tavily" }], engine: :tavily)
+    SearchApiRouter.singleton_class.send(:define_method, :call) do |**kw|
+      state_calls << kw
+      if kw[:specialty] == :tavily
+        tavily_called = true
+        next fb
+      end
+      nil
+    end
+
+    begin
+      Thread.current[:cleitin_origin] = :mcp
+      res = @tool.run(query: "última notícia SpaceX agora", type: "news")
+      assert_equal :success, res[:status], "MCP path: type=news continua acionando Tavily"
+      assert tavily_called, "MCP NÃO ignora type — Tavily primeiro preservado (F2)"
+    ensure
+      Thread.current[:cleitin_origin] = nil
+    end
+  end
+
   # ── F2.11: contracto type→provider documentado e fixo ─────────────────────
   # Quem mantém a tabela: o WebSearchTool tem um método de classe que devolve
   # o provider preferencial. A tabela É O CONTRATO com o schema MCP.

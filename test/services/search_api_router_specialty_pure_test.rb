@@ -348,8 +348,11 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     assert_equal [:linkup], calls, "factual genérica: cascata para no linkup; exa/tavily NÃO podem ser chamados"
   end
 
-  # (f.3) auto/sem specialty + Linkup 200 vazio em query de papers → continua para Exa.
-  # (cobre o comportamento legado do specialty_for via regex que NÃO pode quebrar).
+  # (f.3) auto/sem specialty + query de papers → Exa serve direto (F4).
+  # Antes do F4 (cascata legada): linkup 200 vazio → exa ([:linkup, :exa]).
+  # Depois do F4 (Path B reordenado): exa é o 1º pago da cascata quando
+  # `specialty_for(query)` casa com :exa — linkup nem entra ([:exa]).
+  # O contrato semântico preservado: papers → exa serve.
   def test_sem_specialty_linkup_200_vazio_em_query_de_papers_continua_para_exa
     ENV["TAVILY_API_KEY"] = "tv"
     ENV["EXA_API_KEY"] = "ex"
@@ -358,7 +361,6 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
     stub_quota_envelopes_noop
     calls = stub_http_post(
       {
-        linkup: { ok: true, body: { "results" => [] }, reason: nil, retryable: false },
         exa: { ok: true, body: { "results" => [{ "title" => "E1", "url" => "https://e1.com", "highlights" => ["attention"] }] }, reason: nil, retryable: false }
       }
     )
@@ -367,7 +369,7 @@ class SearchApiRouterSpecialtyPureTest < Minitest::Test
 
     refute_nil out
     assert_equal "exa", out[:engine]
-    assert_equal [:linkup, :exa], calls, "query de papers: linkup miss → exa (regex de especialidade preservado)"
+    assert_equal [:exa], calls, "F4: query de papers → Exa 1º (não mais [:linkup, :exa])"
   end
 
   # (g) type=news + query com site:reddit.com → plataforma bloqueada.
