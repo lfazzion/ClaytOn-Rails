@@ -463,4 +463,20 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     Fetcher::Channels::XGraphql.update_remote_budget!(headers)
     refute Fetcher::Channels::XGraphql.remote_blocked?
   end
+
+  test "rate limit local estoura RateLimited com orcamento graphql_search" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.expects(:exceeded?)
+                            .with("x.com", **Fetcher::Channels::XGraphql::GRAPHQL_BUDGET)
+                            .returns(true)
+    Fetcher::SafeHttpClient.expects(:get).never
+
+    erro = assert_raises(Fetcher::Channels::XGraphql::RateLimited) do
+      Fetcher::Channels::XGraphql.search(query: "ruby")
+    end
+
+    assert_includes erro.message, "x.com"
+    assert_includes erro.message, "graphql_search"
+    assert Fetcher::Channels::XGraphql::RateLimited < Fetcher::Channels::Error
+  end
 end
