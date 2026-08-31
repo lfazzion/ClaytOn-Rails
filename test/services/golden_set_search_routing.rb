@@ -73,38 +73,62 @@ module GoldenSet
     { query: "site:twitter.com typescript",      expected_provider: nil,     expected_on_empty_linkup: nil, reason: "Twitter — plataforma dedicada, router bloqueado" },
     { query: "site:twitter.com/bar",             expected_provider: nil,     expected_on_empty_linkup: nil, reason: "Twitter subpath — plataforma dedicada, router bloqueado" },
 
-    # ── Fatos únicos verificáveis → 1ª tentativa Linkup; após 200 vazio PARA (nil) ──
-    { query: "preço do bitcoin hoje",          expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "fato verificável — 1ª tentativa Linkup; para em 200 vazio" },
-    { query: "qual o custo da OpenAI em 2025", expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "fato financeiro — 1ª tentativa Linkup; para em 200 vazio" },
-    { query: "quantos habitantes tem o Japão",  expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "demografia — 1ª tentativa Linkup; para em 200 vazio" },
+    # ── Fatos únicos verificáveis → 1º Linkup; após 200 vazio PARA (nil) ──
+    { query: "preço do bitcoin hoje",          expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "fato verificável — 1º Linkup; para em 200 vazio (sem regex de especialidade)" },
+    { query: "qual o custo da OpenAI em 2025", expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "fato financeiro — 1º Linkup; para em 200 vazio" },
+    { query: "quantos habitantes tem o Japão",  expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "demografia — 1º Linkup; para em 200 vazio" },
 
-    # ── Corporativo / Empresas → 1ª tentativa Linkup; após 200 vazio PARA (nil) ──
-    { query: "company profile OpenAI",         expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "corporativo — 1ª tentativa Linkup; para em 200 vazio" },
-    { query: "relatório anual da Apple",       expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "relatório anual — 1ª tentativa Linkup; para em 200 vazio" },
-    { query: "linkedin empresa tech 2025",     expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "termo corporativo — 1ª tentativa Linkup; para em 200 vazio" },
+    # ── Corporativo / Empresas → 1º Linkup; após 200 vazio PARA (nil) ──
+    { query: "company profile OpenAI",         expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "corporativo — 1º Linkup; para em 200 vazio" },
+    { query: "relatório anual da Apple",       expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "relatório anual — 1º Linkup; para em 200 vazio" },
+    { query: "linkedin empresa tech 2025",     expected_provider: :linkup, expected_on_empty_linkup: nil, reason: "termo corporativo — 1º Linkup; para em 200 vazio" },
 
-    # ── Acadêmico / Papers / Neural → 1ª tentativa Linkup; após 200 vazio CONTINUA para Exa ──
-    { query: "papers sobre machine learning",   expected_provider: :linkup, expected_on_empty_linkup: :exa, reason: "acadêmico/papers — 1ª tentativa Linkup; continua para Exa em 200 vazio" },
-    { query: "arxiv transformers attention",    expected_provider: :linkup, expected_on_empty_linkup: :exa, reason: "arxiv — 1ª tentativa Linkup; continua para Exa em 200 vazio" },
-    { query: "pubmed covid vaccine",            expected_provider: :linkup, expected_on_empty_linkup: :exa, reason: "pubmed — 1ª tentativa Linkup; continua para Exa em 200 vazio" },
+    # ── Acadêmico / Papers / Neural → 1º Exa (Path B reordenado, F4) ──
+    # F4 (30/08/2026): antes do F4 era [:linkup, :exa]; agora é [:exa].
+    # `expected_on_empty_linkup` aqui é o provider que serve se linkup
+    # (1º da cascata LEGADA) devolver 200 vazio. Como F4 reordenou a
+    # fila para começar em exa, linkup nem é chamado no caminho feliz
+    # — o stubber legacy simula o cenário forçando linkup 200 vazio;
+    # exa serve no else (provider_used = :exa). Resultado final = :exa.
+    { query: "papers sobre machine learning",   expected_provider: :exa, expected_on_empty_linkup: :exa, reason: "acadêmico/papers — F4: 1º Exa; cascata com linkup 200 vazio cai em exa" },
+    { query: "arxiv transformers attention",    expected_provider: :exa, expected_on_empty_linkup: :exa, reason: "arxiv — F4: 1º Exa; cascata com linkup 200 vazio cai em exa" },
+    { query: "pubmed covid vaccine",            expected_provider: :exa, expected_on_empty_linkup: :exa, reason: "pubmed — F4: 1º Exa; cascata com linkup 200 vazio cai em exa" },
 
-    # ── Conceitual / Explicação → 1ª tentativa Linkup; após 200 vazio CONTINUA para Exa ──
-    { query: "o que é Ruby on Rails",           expected_provider: :linkup, expected_on_empty_linkup: :exa, reason: "conceitual — 1ª tentativa Linkup; continua para Exa em 200 vazio" },
-    { query: "o que é semelhante a Kubernetes", expected_provider: :linkup, expected_on_empty_linkup: :exa, reason: "semântica — 1ª tentativa Linkup; continua para Exa em 200 vazio" },
+    # ── Conceitual / Explicação → 1º Exa (F4) ──
+    { query: "o que é Ruby on Rails",           expected_provider: :exa, expected_on_empty_linkup: :exa, reason: "conceitual — F4: 1º Exa; linkup 200 vazio cai em exa" },
+    { query: "o que é semelhante a Kubernetes", expected_provider: :exa, expected_on_empty_linkup: :exa, reason: "semântica — F4: 1º Exa; linkup 200 vazio cai em exa" },
 
-    # ── Código / Lookup técnico → 1ª tentativa Linkup; após 200 vazio CONTINUA para Tavily ──
-    { query: "como instalar rails",             expected_provider: :linkup, expected_on_empty_linkup: :tavily, reason: "código/lookup — 1ª tentativa Linkup; continua para Tavily em 200 vazio" },
-    { query: "ruby 3.4 pattern matching",       expected_provider: :linkup, expected_on_empty_linkup: :tavily, reason: "lookup técnico — 1ª tentativa Linkup; continua para Tavily em 200 vazio" },
-    { query: "gem install devise",              expected_provider: :linkup, expected_on_empty_linkup: :tavily, reason: "documentação — 1ª tentativa Linkup; continua para Tavily em 200 vazio" }
+    # ── Código / Lookup técnico → 1º Tavily (F4) ──
+    { query: "como instalar rails",             expected_provider: :tavily, expected_on_empty_linkup: :tavily, reason: "código/lookup — F4: 1º Tavily; linkup 200 vazio cai em tavily" },
+    { query: "ruby 3.4 pattern matching",       expected_provider: :tavily, expected_on_empty_linkup: :tavily, reason: "lookup técnico — F4: 1º Tavily; linkup 200 vazio cai em tavily" },
+    { query: "gem install devise",              expected_provider: :tavily, expected_on_empty_linkup: :tavily, reason: "documentação — F4: 1º Tavily; linkup 200 vazio cai em tavily" },
+
+    # ── Notícias (F4: novidade) → 1º Tavily via regex `notícia/news` ──
+    # Cobertura do aceite do plano "time_range=day no Discord → Tavily
+    # primeiro no pago (via regex notícia, NÃO type)". O golden set
+    # order-sensitive reflete o 1º pago de produção.
+    { query: "última notícia do SpaceX agora",   expected_provider: :tavily, expected_on_empty_linkup: :tavily, reason: "notícia — F4: 1º Tavily (regex `notícia` ADITIVA em TAVILY_SPECIALTY_PATTERN)" },
+    { query: "noticias de hoje sobre IA",        expected_provider: :tavily, expected_on_empty_linkup: :tavily, reason: "noticias — F4: 1º Tavily (regex `noticias` ADITIVA)" }
   ].freeze
 
   # Determina qual provider deve ser tentado primeiro em produção para uma query.
+  #
+  # F4 do plano-fase2 (30/08/2026): Path B reordenado. O 1º pago da cascata
+  # agora é a ESPECIALIDADE (quando `specialty_for(query)` casa) — não mais
+  # `ordered_providers.first`. PROVIDERS estático permanece intocado.
   def self.first_attempt_provider(query, **provider_keys)
     q = query.to_s.strip
     return nil if q.match?(PLATFORM_PATTERN)
 
     keys = provider_keys.empty? ? { linkup: "mock_lk", exa: "mock_ex", tavily: "mock_tv" } : provider_keys
-    SearchApiRouter.ordered_providers(**keys).first
+    available = SearchApiRouter.ordered_providers(**keys)
+    return nil if available.empty?
+
+    # F4: reordena pela especialidade. Sem especialidade (factual genérico) →
+    # 1º do `available` (que reflete PROVIDERS filtrado por chave). Com
+    # especialidade → especialidade vira 1º, resto na ordem original.
+    specialty = SearchApiRouter.specialty_for(q)
+    SearchApiRouter.reorder_by_specialty(available, specialty).first
   end
 
   # Simula execução real de SearchApiRouter.call quando o primeiro provider (Linkup) retorna 200 vazio.

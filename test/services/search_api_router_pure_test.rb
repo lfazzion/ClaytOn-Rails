@@ -245,6 +245,26 @@ class SearchApiRouterPureTest < Minitest::Test
     assert_equal :tavily, SearchApiRouter.specialty_for("instalacao do docker")
   end
 
+  # F4 do plano-fase2 (30/08/2026): `specialty_for` ganha `notícia -> :tavily`
+  # para que o Path B reordenado coloque Tavily como 1º pago em queries
+  # noticiosas, mesmo sem `type:` explícito vindo do MCP. O contrato Tavily
+  # original (lookup técnico) é preservado — `notícia/notícias/news` é
+  # ADITIVO, não substitui.
+  def test_specialty_for_tavily_queries_de_noticia_f4
+    assert_equal :tavily, SearchApiRouter.specialty_for("última notícia do SpaceX agora")
+    assert_equal :tavily, SearchApiRouter.specialty_for("noticias de hoje sobre IA")
+    assert_equal :tavily, SearchApiRouter.specialty_for("breaking news bitcoin")
+    assert_equal :tavily, SearchApiRouter.specialty_for("headline sobre o mercado")
+  end
+
+  # F4: queries de notícia COM time_range=day no Discord → Tavily primeiro
+  # no pago via regex `notícia`, NÃO via `type`. Cobre a interação F2-F4:
+  # specialty_for dispara pelo regex mesmo sem `type:` no schema.
+  def test_specialty_for_noticia_no_discord_ignora_type_e_vai_tavily_primeiro
+    assert_equal :tavily, SearchApiRouter.specialty_for("site:g1.globo.com última notícia agora"),
+                 "regex de notícia deve classificar como Tavily independente do `type`"
+  end
+
   def test_specialty_for_generic_factual_returns_nil
     assert_nil SearchApiRouter.specialty_for("preço do bitcoin hoje")
     assert_nil SearchApiRouter.specialty_for("qual o custo da OpenAI em 2025")
