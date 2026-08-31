@@ -5,6 +5,7 @@ require "json"
 require "digest"
 require "set"
 require_relative "../services/search_api_cache"
+require_relative "../services/search_metric"
 
 class WebSearchTool < ToolBase
   description "Pesquisa web em tempo real via SearXNG. Use para fatos atuais, notícias, " \
@@ -203,6 +204,14 @@ class WebSearchTool < ToolBase
     # mas as chamadas estão guardadas também por clareza). O contador só
     # NÃO é incrementado para os early-returns ACIMA do `begin` (cache
     # hit, query vazia, gate F5a, empty debounce) — buscas não executadas.
+    #
+    # F8 (plano-fase2 D7, 31/08/2026): cronômetro do run para a métrica
+    # `latency_ms`. O helper `record_search_metric!` é chamado em CADA
+    # return pós-fetch (busca executou). Cache hit / empty debounce hit /
+    # gate F5a / query vazia ficam de fora (busca NÃO executou). O
+    # `started_at` é definido uma vez aqui para que latency cubra
+    # SearXNG+fallback (a busca completa, não só um hop).
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     begin
       payload = fetch(q, limit, tr)
 
@@ -246,6 +255,13 @@ class WebSearchTool < ToolBase
                              payload: fallback_results)
         # F5a: busca REAL disparada (custou API paga) → incrementa.
         increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+        # F8: métrica do caminho specialty (provider=tavily/exa/linkup).
+        record_search_metric!(
+          q: q, results: fallback_results, source: "router",
+          cost_usd: fallback[:cost], latency_ms: elapsed_ms(fallback, started_at),
+          unresponsive_count: (payload && payload[:unresponsive] || []).size,
+          error: nil, type: resolved_type, provider: provider, origin: origin
+        )
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end
 
@@ -277,6 +293,17 @@ class WebSearchTool < ToolBase
                              payload: fallback_results)
         # F5a: busca REAL disparada (custou API paga) → incrementa.
         increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+        # F8: métrica do caminho cascata padrão (provider efetivo decidido
+        # pelo router — tavily/exa/linkup). `provider` local continua nil
+        # (type=auto), mas a métrica carrega o provider que REALMENTE serviu
+        # via fallback[:engine].
+        record_search_metric!(
+          q: q, results: fallback_results, source: "router",
+          cost_usd: fallback[:cost], latency_ms: elapsed_ms(fallback, started_at),
+          unresponsive_count: (payload && payload[:unresponsive] || []).size,
+          error: nil, type: resolved_type,
+          provider: fallback[:engine], origin: origin
+        )
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end
     end
@@ -295,6 +322,14 @@ class WebSearchTool < ToolBase
     # também nos outros caminhos, dobrando a contagem.
     if payload.nil?
       increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+      # F8: busca executou (HTTP saiu, SearXNG falhou, router tentou ou
+      # não) → erro terminal "busca indisponível".
+      record_search_metric!(
+        q: q, results: nil, source: "searxng", cost_usd: nil,
+        latency_ms: elapsed_ms(nil, started_at),
+        unresponsive_count: 0, error: "indisponivel",
+        type: resolved_type, provider: provider, origin: origin
+      )
       return error("busca indisponível")
     end
 
@@ -313,6 +348,18 @@ class WebSearchTool < ToolBase
         # F5a: HTTP disparado e fallback tentado (gastou) → incrementa.
         # Decisão D4: "HTTP disparado = gastou, incrementa".
         increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+        # F8: métrica da busca que voltou vazia com engines caídas.
+        # `results=nil` no helper para a contagem ficar 0 (sem itens para
+        # trust). O provider efetivo da cascata não foi achado — usamos
+        # o `provider` local (nil em type=auto, ou :tavily/:exa/:linkup
+        # em type=news/entity/etc.) e marcamos como "router" para a
+        # tabela do report separar SearXNG vs pago.
+        record_search_metric!(
+          q: q, results: nil, source: "router", cost_usd: nil,
+          latency_ms: elapsed_ms(nil, started_at),
+          unresponsive_count: unreachable.size, error: "nao_aconteceu",
+          type: resolved_type, provider: provider, origin: origin
+        )
         return error("busca não aconteceu: engines fora do ar (#{unreachable.join(', ')}) e nenhum " \
                      "resultado devolvido — tente de novo em alguns minutos")
       end
@@ -340,6 +387,14 @@ class WebSearchTool < ToolBase
       # (gate/cache hit/empty debounce) — é busca REAL que só não
       # devolveu resultados.
       increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+      # F8: métrica da busca vazia SEM engine caída (SearXNG respondeu
+      # limpo com `[]`). source=searxng, cost=nil.
+      record_search_metric!(
+        q: q, results: nil, source: "searxng", cost_usd: nil,
+        latency_ms: elapsed_ms(nil, started_at),
+        unresponsive_count: 0, error: nil,
+        type: resolved_type, provider: provider, origin: origin
+      )
       return success([]).merge(unresponsive: unreachable)
     end
 
@@ -351,6 +406,15 @@ class WebSearchTool < ToolBase
       # que envenenados — busca de fato aconteceu). Decisão D4:
       # "HTTP disparado = gastou, incrementa".
       increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+      # F8: métrica da busca envenenada — SearXNG respondeu, mas a guarda
+      # de relevância reprovou. results_count reflete os APROVADOS pela
+      # guarda (zero quando poisoned), e error carrega o motivo.
+      record_search_metric!(
+        q: q, results: verdict.approved, source: "searxng", cost_usd: nil,
+        latency_ms: elapsed_ms(nil, started_at),
+        unresponsive_count: 0, error: "irrelevantes",
+        type: resolved_type, provider: provider, origin: origin
+      )
       return error("resultados irrelevantes: só #{verdict.approved.size} de #{verdict.judged_count} " \
                    "resultados cobriram os termos de #{q.inspect} — o buscador respondeu outra pergunta, " \
                    "reformule a query")
@@ -375,11 +439,81 @@ class WebSearchTool < ToolBase
     # → incrementa. Único ponto de incremento do caminho "tudo deu certo" do
     # SearXNG local.
     increment_discord_search! if Thread.current[:cleitin_origin] == :discord
+    # F8: métrica do caminho principal OK (SearXNG direto, sem fallback).
+    # O `engine` é o do 1º resultado — representativo do que efetivamente
+    # serviu (SearXNG devolve múltiplos engines mas só 1º entra na métrica).
+    record_search_metric!(
+      q: q, results: data, source: "searxng", cost_usd: nil,
+      latency_ms: elapsed_ms(nil, started_at),
+      unresponsive_count: unreachable.size, error: nil,
+      type: resolved_type, provider: provider, origin: origin,
+      engine: data.first && data.first[:engine]
+    )
     success(data).merge(unresponsive: unreachable)
     end
   end
 
   private
+
+  # F8 (plano-fase2 D7, 31/08/2026): helper que consolida a emissão da
+  # métrica. Chamado em cada return pós-fetch. É o ÚNICO ponto do tool que
+  # fala com `SearchMetric` (defesa em profundidade — mudanças no schema
+  # da métrica ficam isoladas aqui).
+  #
+  # @param q [String] query (para query_len).
+  # @param results [Array<Hash>, nil] lista de itens para trust counts;
+  #   nil → contagens 0 (busca vazia/erro).
+  # @param source [String] "searxng" ou "router".
+  # @param cost_usd [Numeric, nil] custo da API paga (nil SearXNG).
+  # @param latency_ms [Integer] latência total da busca.
+  # @param unresponsive_count [Integer] nº de engines caídas.
+  # @param error [String, nil] código do erro (nil=sucesso).
+  # @param type [String] tipo resolvido (news/factual/...).
+  # @param provider [Symbol, String, nil] provider efetivo (:tavily/:exa/
+  #   :linkup/:searxng/nil para type=auto sem fallback).
+  # @param origin [Symbol, nil] :discord/:mcp/nil.
+  # @param engine [String, nil] engine do 1º resultado (opcional, default "").
+  def record_search_metric!(q:, results:, source:, cost_usd:, latency_ms:,
+                            unresponsive_count:, error:, type:, provider:,
+                            origin:, engine: "")
+    primary, ugc, unknown = trust_counts(results)
+    SearchMetric.record(
+      origin: origin,
+      provider: provider,
+      type: type,
+      query_len: q.to_s.length,
+      results_count: results&.size.to_i,
+      latency_ms: latency_ms,
+      source: source,
+      engine: engine,
+      cost_usd: cost_usd,
+      trust_primary: primary,
+      trust_ugc: ugc,
+      trust_unknown: unknown,
+      unresponsive_count: unresponsive_count,
+      error: error
+    )
+  end
+
+  # F8: contagem de trust por nível. `nil` (sem resultados) → tudo zero.
+  # Usa o classificador canônico `SearchApiRouter.trust_for` (única fonte
+  # do classificador por host, plano-fase2 D6).
+  def trust_counts(results)
+    return [0, 0, 0] if results.nil?
+
+    counts = { primary: 0, ugc: 0, unknown: 0 }
+    results.each do |r|
+      trust = r[:trust] || SearchApiRouter.trust_for(r[:url])
+      counts[trust] += 1 if counts.key?(trust)
+    end
+    [counts[:primary], counts[:ugc], counts[:unknown]]
+  end
+
+  # F8: latência do run em ms. `fetch_started_at` é capturado antes do
+  # `begin` (linha ~210) e cobre SearXNG+fallback (busca completa).
+  def elapsed_ms(_fallback_unused, started_at)
+    ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
+  end
 
   # F5a (30/08/2026): gate de teto por conversa ativa (plano-fase2 §D4).
   # Lê a conversa ATIVA do scope key gravado em `Thread.current` pelo
