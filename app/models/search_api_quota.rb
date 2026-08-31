@@ -31,8 +31,10 @@ class SearchApiQuota < ApplicationRecord
 
   # Incrementa a contagem do mês DENTRO de with_lock (transação serializa
   # leitura + gravação, evitando corrida de incremento concorrente).
-  # Em caso de corrida no find_or_create_by (RecordNotUnique), recupera o
-  # registro criado concorrentemente sem perder sucesso.
+  # Em caso de corrida no find_or_create_by (RecordNotUnique ou BusyException),
+  # recupera o registro criado concorrentemente sem perder sucesso.
+  # BusyException em find_or_create_by concorrente = corrida de CREATE,
+  # recuperável; retry após a outra thread commitar.
   #
   # NOTA F3a: `increment` foi mantido por compatibilidade com
   # test/services/search_api_quota_test.rb (minitest puro sem Rails) e com
@@ -44,8 +46,10 @@ class SearchApiQuota < ApplicationRecord
       find_or_create_by(api_name: api_name, month: month) do |r|
         r.count = 0
       end
-    rescue ActiveRecord::RecordNotUnique
-      find_by(api_name: api_name, month: month) || retry
+    rescue ActiveRecord::RecordNotUnique, SQLite3::BusyException
+      # Concorrente acabou de criar a linha. `retry` re-executa o bloco;
+      # o find_or_create_by vai agora encontrar a row já criada.
+      rec = find_by(api_name: api_name, month: month) || retry
     end
     rec.with_lock do
       rec.increment!(:count)
@@ -146,7 +150,7 @@ class SearchApiQuota < ApplicationRecord
         rec = find_or_create_by(api_name: api_name, month: month) do |r|
           r.count = 0
         end
-      rescue ActiveRecord::RecordNotUnique
+      rescue ActiveRecord::RecordNotUnique, SQLite3::BusyException
         # Concorrente acabou de criar a linha entre o nosso find e o create.
         # `retry` re-executa o bloco begin..rescue; o find_or_create_by vai
         # agora encontrar a row já criada.

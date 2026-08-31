@@ -99,6 +99,18 @@ class SearchApiQuotaModelTest < ActiveSupport::TestCase
     # lock entre threads, tornando a prova do race falsa-verde.
     self.use_transactional_tests = false
 
+    setup do
+      # pool=1 serializa escritas no SQLite; checkout_timeout=30 dá tempo
+      # suficiente para a 2a thread esperar a conexao da 1a terminar a
+      # transacao (ms) em vez de estourar ConnectionTimeoutError em 5s.
+      @orig_conn = ActiveRecord::Base.connection_db_config.configuration_hash
+      ActiveRecord::Base.establish_connection(@orig_conn.merge(pool: 1, checkout_timeout: 30))
+    end
+
+    teardown do
+      ActiveRecord::Base.establish_connection(@orig_conn) if defined?(@orig_conn)
+    end
+
     test "reserve_quota! com ceiling=1 e 2 threads simultâneas reserva no máximo 1" do
       SearchApiQuota.where(api_name: "race_api", month: "2026-08").delete_all
 
@@ -111,18 +123,23 @@ class SearchApiQuotaModelTest < ActiveSupport::TestCase
 
       threads = (0..1).map do |i|
         Thread.new do
-          # Usa conexão própria para que ActiveRecord não compartilhe a mesma
-          # handle entre threads (ActiveRecord por padrão tem check-out por
+          # Barrera ANTES do with_connection: evita deadlock com pool=1
+          # (thr1 segurando a unica conexao enquanto espera na barreira
+          # bloquearia thr2 no checkout ate timeout). Com a barrera fora,
+          # as duas threads aguardam go sem conexao; depois do sinal,
+          # serializamos reserve_quota! via pool=1 real.
+          barrier_mutex.synchronize do
+            ready_count += 1
+            barrier_cond.broadcast if ready_count == 2
+            barrier_cond.wait(barrier_mutex) until go
+          end
+
+          # Usa conexao propria para que ActiveRecord nao compartilhe a mesma
+          # handle entre threads (ActiveRecord por padrao tem check-out por
           # thread; aqui usamos ApplicationRecord.connection_pool.with_connection
           # para garantir isolamento).
           ActiveRecord::Base.connection_pool.with_connection do
-            barrier_mutex.synchronize do
-              ready_count += 1
-              barrier_cond.broadcast if ready_count == 2
-              barrier_cond.wait(barrier_mutex) until go
-            end
-
-            # `reserve_quota!` será chamado pelas duas threads exatamente
+            # `reserve_quota!` sera chamado pelas duas threads exatamente
             # depois do "go". A primeira que pegar o lock do SQLite passa
             # (count 0→1); a segunda deve ver count=1 e receber false.
             results[i] = SearchApiQuota.reserve_quota!("race_api", ceiling: 1, month: "2026-08")
