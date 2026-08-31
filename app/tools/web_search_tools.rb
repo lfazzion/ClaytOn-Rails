@@ -32,12 +32,6 @@ class WebSearchTool < ToolBase
         required: false
 
   BASE_URL          = ENV.fetch("SEARXNG_URL", "http://searxng:8080/search")
-  # F1 do plano v2 (30/08/2026): payload magro. 400 chars por snippet era a
-  # tolerância antiga; o L5 mediu que 200 basta para a manchete caber, e o
-  # snipamento menor reduz drasticamente o espaço que UGC/snippet ocupa no
-  # contexto da conversa (D4 do plano). Teto UNICO aqui — MCP e Discord usam
-  # a mesma constante (camada única no cleitin, plano v2 D6).
-  CONTENT_MAX_CHARS = 200
   # F1: teto de 5 hits por busca (era 10). Plataforma única, sem fan-out
   # paralelo — `SearchApiRouter` também clampa em MAX_RESULTS=5.
   MAX_LIMIT         = 5
@@ -112,33 +106,6 @@ class WebSearchTool < ToolBase
     limit = clamp(limit, 1, MAX_LIMIT)
     tr = ALLOWED_TIME_RANGES.include?(time_range.to_s) ? time_range.to_s : nil
 
-    # F5a (30/08/2026): gate de teto por conversa ativa (plano-fase2 §D4).
-    # Vale SÓ para o caminho Discord in-process (origem `:discord`). MCP,
-    # testes e callers sem origem pulam o gate — D4 explicita que o teto é
-    # do caminho Discord, e o teto MCP está no plugin do perfil (F5b, fora
-    # deste PR). Memória curta e sem expor quota/API: apenas "atingiu o
-    # limite, use /new".
-    #
-    # Este gate é early-return EXPLÍCITO e não incrementa contador:
-    # recusa ≠ execução. O incremento é chamado SÓ nos pontos do fluxo
-    # em que a busca foi de fato disparada (HTTP saiu / fallback custou),
-    # ver comentários nos `increment_discord_search!` adiante. Não há
-    # mais `ensure` global — D2-F5a-v7 removeu (ensure rodava em cache
-    # hit e empty debounce, inflacionando o teto).
-    if Thread.current[:cleitin_origin] == :discord
-      limite = check_discord_conversation_limit!
-      return error(limite) if limite
-    end
-
-    # F5a (30/08/2026): cache hit e empty debounce NÃO incrementam contador
-    # — são a mesma busca cacheada (não execução nova) e absorção de rajada,
-    # respectivamente. D4 é literal: "Cache hit NÃO incrementa". O
-    # incremento é explícito nos returns ABAIXO do `begin`, nos pontos em
-    # que a busca foi disparada de fato. Não há `ensure` global:
-    # `ensure` em Ruby roda em QUALQUER return do método, inclusive
-    # nestes dois early-returns, e isso inflaria o teto artificialmente.
-    # (D2-F5a-v7 removeu o ensure.)
-    #
     # F3b (30/08/2026): origem do caller lida do Thread.current. Setada em
     # `ChatSessionManager#ask` (caminho Discord/bot) ou `McpController#handle`
     # (caminho MCP) — fora desses dois entrypoints vale nil (caller sem
@@ -235,7 +202,7 @@ class WebSearchTool < ToolBase
 
       if fallback && fallback[:results]&.any?
         fallback_results = fallback[:results].first(limit).map do |r|
-          r.merge(content: truncate(r[:content]))
+          r.merge(content: r[:content])
         end
         # F7 (plano-fase2 31/08/2026): aplica `trust` aos itens vindos do
         # fallback. O `SearchApiRouter.normalize_results` já adiciona a chave
@@ -253,8 +220,6 @@ class WebSearchTool < ToolBase
         SearchApiCache.write(query: q, limit: limit, time_range: tr,
                              type: resolved_type, provider: provider,
                              payload: fallback_results)
-        # F5a: busca REAL disparada (custou API paga) → incrementa.
-        increment_discord_search! if Thread.current[:cleitin_origin] == :discord
         # F8: métrica do caminho specialty (provider=tavily/exa/linkup).
         record_search_metric!(
           q: q, results: fallback_results, source: "router",
@@ -281,7 +246,7 @@ class WebSearchTool < ToolBase
 
       if fallback && fallback[:results]&.any?
         fallback_results = fallback[:results].first(limit).map do |r|
-          r.merge(content: truncate(r[:content]))
+          r.merge(content: r[:content])
         end
         # F7 (plano-fase2 31/08/2026): ver comentário idêntico no path
         # specialty acima — `ensure_trust!` cobre o caso de stub/bypass.
@@ -291,8 +256,6 @@ class WebSearchTool < ToolBase
         SearchApiCache.write(query: q, limit: limit, time_range: tr,
                              type: resolved_type, provider: provider,
                              payload: fallback_results)
-        # F5a: busca REAL disparada (custou API paga) → incrementa.
-        increment_discord_search! if Thread.current[:cleitin_origin] == :discord
         # F8: métrica do caminho cascata padrão (provider efetivo decidido
         # pelo router — tavily/exa/linkup). `provider` local continua nil
         # (type=auto), mas a métrica carrega o provider que REALMENTE serviu
@@ -321,7 +284,6 @@ class WebSearchTool < ToolBase
     # dereferenciar nil. O incremento anterior era INCONDICIONAL e batia
     # também nos outros caminhos, dobrando a contagem.
     if payload.nil?
-      increment_discord_search! if Thread.current[:cleitin_origin] == :discord
       # F8: busca executou (HTTP saiu, SearXNG falhou, router tentou ou
       # não) → erro terminal "busca indisponível".
       record_search_metric!(
@@ -347,7 +309,6 @@ class WebSearchTool < ToolBase
         # chave). Mantém o erro original do SearXNG; o router já foi tentado.
         # F5a: HTTP disparado e fallback tentado (gastou) → incrementa.
         # Decisão D4: "HTTP disparado = gastou, incrementa".
-        increment_discord_search! if Thread.current[:cleitin_origin] == :discord
         # F8: métrica da busca que voltou vazia com engines caídas.
         # `results=nil` no helper para a contagem ficar 0 (sem itens para
         # trust). O provider efetivo da cascata não foi achado — usamos
@@ -381,12 +342,6 @@ class WebSearchTool < ToolBase
       rescue StandardError => e
         Rails.logger.warn("[WebSearchTool] debounce write falhou: #{e.class}: #{e.message}")
       end
-      # F5a: SearXNG respondeu com `[]` sem engine caída (HTTP saiu, gastou).
-      # Pela D4 ("HTTP disparado = gastou, incrementa"), incrementa aqui
-      # também. Esse caminho NÃO está nos "não incrementar" do brief 2d
-      # (gate/cache hit/empty debounce) — é busca REAL que só não
-      # devolveu resultados.
-      increment_discord_search! if Thread.current[:cleitin_origin] == :discord
       # F8: métrica da busca vazia SEM engine caída (SearXNG respondeu
       # limpo com `[]`). source=searxng, cost=nil.
       record_search_metric!(
@@ -402,10 +357,6 @@ class WebSearchTool < ToolBase
     if verdict.poisoned?
       Rails.logger.warn "[WebSearchTool] busca envenenada para #{q.inspect}: " \
                         "#{verdict.approved.size}/#{verdict.judged_count} aprovados"
-      # F5a: HTTP disparado contra SearXNG e resultados chegaram (mesmo
-      # que envenenados — busca de fato aconteceu). Decisão D4:
-      # "HTTP disparado = gastou, incrementa".
-      increment_discord_search! if Thread.current[:cleitin_origin] == :discord
       # F8: métrica da busca envenenada — SearXNG respondeu, mas a guarda
       # de relevância reprovou. results_count reflete os APROVADOS pela
       # guarda (zero quando poisoned), e error carrega o motivo.
@@ -435,10 +386,6 @@ class WebSearchTool < ToolBase
     SearchApiCache.write(query: q, limit: limit, time_range: tr,
                          type: resolved_type, provider: provider,
                          payload: data)
-    # F5a: busca REAL disparada (HTTP saiu, SearXNG respondeu, guarda aprovou)
-    # → incrementa. Único ponto de incremento do caminho "tudo deu certo" do
-    # SearXNG local.
-    increment_discord_search! if Thread.current[:cleitin_origin] == :discord
     # F8: métrica do caminho principal OK (SearXNG direto, sem fallback).
     # O `engine` é o do 1º resultado — representativo do que efetivamente
     # serviu (SearXNG devolve múltiplos engines mas só 1º entra na métrica).
@@ -515,48 +462,6 @@ class WebSearchTool < ToolBase
     ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
   end
 
-  # F5a (30/08/2026): gate de teto por conversa ativa (plano-fase2 §D4).
-  # Lê a conversa ATIVA do scope key gravado em `Thread.current` pelo
-  # `ChatSessionManager#ask`. Se `web_search_count >= MAX`, devolve a mensagem
-  # de recusa (curta, sugere /new, sem expor quota/API). Devolve nil se o
-  # gate passa (busca pode prosseguir). Ausência de scope key (caller sem
-  # origem Discord) também devolve nil — defesa em profundidade.
-  WEB_SEARCH_LIMIT_MESSAGE = "🔎 Atingiu o limite de buscas desta conversa. " \
-                            "Use `/new` para começar outra e continuar pesquisando."
-
-  def check_discord_conversation_limit!
-    scope_key = Thread.current[:cleitin_conversation_scope_key]
-    return nil if scope_key.nil?
-
-    conv = Conversation.active_for(scope_key)
-    return nil if conv.nil?
-    return nil if conv.web_search_count < Conversation::MAX_WEB_SEARCH_PER_CONVERSATION
-
-    WEB_SEARCH_LIMIT_MESSAGE
-  rescue StandardError => e
-    # Falha de banco no gate é fail-open: teto é melhor-esforço, e derrubar
-    # a busca por erro de contagem seria pior que deixar uma busca extra
-    # passar. Loga e segue.
-    Rails.logger.warn "[WebSearchTool] Falha no gate F5a: #{e.class}: #{e.message}"
-    nil
-  end
-
-  # F5a: incrementa `web_search_count` da conversa ativa. Atômico via
-  # `increment_counter` (UPDATE por PK) — não precisa reload. Falha de banco
-  # aqui NÃO derruba a busca (a busca já foi executada e a resposta já está
-  # a caminho); loga e segue. Sem scope key (não veio do bot) → no-op.
-  def increment_discord_search!
-    scope_key = Thread.current[:cleitin_conversation_scope_key]
-    return if scope_key.nil?
-
-    conv = Conversation.active_for(scope_key)
-    return if conv.nil?
-
-    Conversation.increment_counter(:web_search_count, conv.id)
-  rescue StandardError => e
-    Rails.logger.warn "[WebSearchTool] Falha ao incrementar F5a: #{e.class}: #{e.message}"
-  end
-
   def platform_query?(query)
     query.to_s.match?(PLATFORM_FALLBACK_BLOCK_PATTERN)
   end
@@ -604,7 +509,7 @@ class WebSearchTool < ToolBase
       {
         title:   r["title"],
         url:     r["url"],
-        content: truncate(r["content"]),
+        content: r["content"],
         engine:  r["engine"]
       }
     end
@@ -622,12 +527,6 @@ class WebSearchTool < ToolBase
       name = entry.is_a?(Array) ? entry.first : entry
       name.to_s.strip
     end.reject(&:empty?).uniq
-  end
-
-  def truncate(text)
-    return nil if text.nil?
-
-    text.length > CONTENT_MAX_CHARS ? "#{text[0, CONTENT_MAX_CHARS]}…" : text
   end
 
   # F7 (plano-fase2 31/08/2026): aplica `trust` no item se ainda não tiver.

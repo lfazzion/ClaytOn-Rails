@@ -6,12 +6,6 @@
 # conversas é o comando /new, e não mais o TTL de 30 minutos.
 class Conversation < ApplicationRecord
   TITLE_LIMIT = 80
-  # F5a (30/08/2026) — teto de buscas web por conversa ativa do Discord
-  # (plano-fase2 §D4). 5 buscas, 6ª = erro curto sugerindo `/new`. A fronteira
-  # entre tetos é a própria row: `/new` cria outra row (default 0), não há
-  # zerar manual. `MAX_WEB_SEARCH_PER_CONVERSATION` é a constante canônica
-  # consultada tanto pelo `WebSearchTool` (gate) quanto pelos testes.
-  MAX_WEB_SEARCH_PER_CONVERSATION = 5
 
   has_many :chat_messages, dependent: :destroy
 

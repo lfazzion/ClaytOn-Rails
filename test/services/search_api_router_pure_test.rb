@@ -121,7 +121,7 @@ class SearchApiRouterPureTest < Minitest::Test
   end
 
   # ── Normalização Exa ──────────────────────────────────────────────────────
-  def test_normaliza_exa_usando_highlights_quando_presente
+  def test_normaliza_exa_prefere_text_sobre_highlights
     raw = {
       "results" => [
         { "title" => "H", "url" => "https://ex.com/h", "highlights" => ["trecho destacado"], "text" => "corpo longo" },
@@ -131,8 +131,19 @@ class SearchApiRouterPureTest < Minitest::Test
     out = SearchApiRouter.normalize_results(:exa, raw, score_threshold: 0.7)
     assert_equal 2, out.size
     assert_equal "exa", out.first[:engine]
-    assert_equal "trecho destacado", out.first[:content]
+    assert_equal "corpo longo", out.first[:content], "text deve ter prioridade sobre highlights"
     assert_equal "só texto", out.last[:content]
+  end
+
+  def test_normaliza_exa_usa_highlights_quando_text_falta
+    raw = {
+      "results" => [
+        { "title" => "H", "url" => "https://ex.com/h", "highlights" => ["trecho destacado"] }
+      ]
+    }
+    out = SearchApiRouter.normalize_results(:exa, raw, score_threshold: 0.7)
+    assert_equal 1, out.size
+    assert_equal "trecho destacado", out.first[:content]
   end
 
   # ── Normalização Linkup ───────────────────────────────────────────────────
@@ -273,18 +284,15 @@ class SearchApiRouterPureTest < Minitest::Test
     assert_nil SearchApiRouter.specialty_for("")
   end
 
-  # F1 do plano v2 (30/08/2026): Exa sem teto por highlight pode devolver
-  # paragrafos inteiros, fugindo do CONTENT_MAX_CHARS=200 do WebSearchTool.
-  # Travado em 2 frases = bem abaixo do teto de 200 chars e mata o vetor de
-  # UGC comprido (D4). O body vai serializado no `req.body`; lemos via JSON.parse
-  # para validar a chave aninhada sem depender de HTTP real.
-  def test_build_request_exa_carrega_num_sentences_2_em_highlights
+  # F1 do plano v2 (30/08/2026): removido `num_sentences: 2` para devolver
+  # text integral do Exa. O body agora não carrega mais `contents.highlights`.
+  def test_build_request_exa_sem_num_sentences
     ENV["EXA_API_KEY"] = "ex_fake"
     _uri, req = SearchApiRouter.build_request(:exa, "papers sobre machine learning", 5, nil)
 
     body = JSON.parse(req.body)
-    assert_equal 2, body.dig("contents", "highlights", "num_sentences"),
-                 "Exa deve pedir num_sentences=2 no highlights (F1 plano v2)"
+    assert_nil body.dig("contents", "highlights", "num_sentences"),
+             "Exa não deve mais pedir num_sentences (v2)"
     assert_equal 5, body["numResults"], "numResults deve refletir o limit passado"
     assert_equal "auto", body["type"], "type padrao do body Exa continua sendo 'auto'"
   end

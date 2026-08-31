@@ -228,18 +228,7 @@ class WebSearchToolFallbackPureTest < Minitest::Test
     assert_equal "https://t2.com", res[:data][1][:url]
   end
 
-  def test_fallback_trunca_content_ao_content_max_chars
-    with_fetch(nil)
-    long_content = "a" * 600
-    set_fallback(fallback([{ title: "Long", url: "https://long.com", content: long_content, engine: "tavily" }]))
 
-    res = @tool.run(query: "truncar")
-
-    assert_equal :success, res[:status]
-    content = res[:data].first[:content]
-    assert_equal 201, content.length, "conteúdo deve ser truncado a 200 caracteres + reticências (201 chars) — F1 payload magro"
-    assert content.end_with?("…"), "conteúdo truncado deve terminar com reticências"
-  end
 
   def test_fallback_search_api_router_levantando_erro_preserva_erro_original
     with_fetch(nil)
