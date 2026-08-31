@@ -70,6 +70,14 @@ class ChatSessionManager
         # (que é hash de auditoria/ACL) para não conflitar com a checagem
         # existente em `profile_management_tools.rb:17`.
         Thread.current[:cleitin_origin] = :discord
+        # F5a (30/08/2026): o `WebSearchTool` precisa do scope.key da conversa
+        # ativa para fazer o gate de teto (`web_search_count >= 5`). Esse
+        # scope mora no `ChatSessionManager`, não chega à tool via parâmetros
+        # — gravamos aqui (dentro do lock de escopo) e limpamos no ensure.
+        # MCP NÃO usa essa chave (McpController tem o próprio contexto): o
+        # `WebSearchTool` checa `:cleitin_origin` antes de tocar no contador,
+        # e o caminho MCP tem origem `:mcp`, que pula o gate (D4).
+        Thread.current[:cleitin_conversation_scope_key] = scope.key
         inicio = Time.now
         Rails.logger.info "[ChatSessionManager] Iniciando ask — " \
                           "scope=#{scope.key} user=#{user_id} " \
@@ -124,6 +132,12 @@ class ChatSessionManager
           Thread.current[:cleitin_actor] = nil
           Thread.current[:cleitin_turn] = nil
           Thread.current[:cleitin_origin] = nil
+          # F5a: limpar a scope key do Thread.current no fim do turno. Sem isso,
+          # uma próxima thread Puma que pegue este mesmo slot (a `Thread.current`
+          # é por-thread, mas o ensure roda sempre) leria a chave residual. Aqui
+          # a chave é por-turno do bot, então no fim do `ask` ela some — mesmo
+          # padrão defensivo das outras chaves.
+          Thread.current[:cleitin_conversation_scope_key] = nil
         end
       end
     end
