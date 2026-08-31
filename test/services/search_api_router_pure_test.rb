@@ -284,15 +284,20 @@ class SearchApiRouterPureTest < Minitest::Test
     assert_nil SearchApiRouter.specialty_for("")
   end
 
-  # F1 do plano v2 (30/08/2026): removido `num_sentences: 2` para devolver
-  # text integral do Exa. O body agora não carrega mais `contents.highlights`.
-  def test_build_request_exa_sem_num_sentences
+  # E3 (31/08/2026): reintroduzido `contents: { text: true }` para pedir
+  # text integral da API Exa. Sem esse campo o normalize não consegue
+  # ler `r["text"]` — a busca Exa volta sem conteúdo.
+  def test_build_request_exa_com_text_integral
     ENV["EXA_API_KEY"] = "ex_fake"
     _uri, req = SearchApiRouter.build_request(:exa, "papers sobre machine learning", 5, nil)
 
     body = JSON.parse(req.body)
+    assert_equal true, body.dig("contents", "text"),
+                 "Exa deve pedir text integral via contents.text"
+    assert_nil body.dig("contents", "highlights"),
+               "Exa não deve pedir highlights"
     assert_nil body.dig("contents", "highlights", "num_sentences"),
-             "Exa não deve mais pedir num_sentences (v2)"
+               "Exa não deve pedir num_sentences"
     assert_equal 5, body["numResults"], "numResults deve refletir o limit passado"
     assert_equal "auto", body["type"], "type padrao do body Exa continua sendo 'auto'"
   end

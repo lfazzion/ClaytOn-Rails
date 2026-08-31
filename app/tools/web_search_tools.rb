@@ -163,21 +163,12 @@ class WebSearchTool < ToolBase
       return success([]).merge(unresponsive: nil)
     end
 
-    # F5a (30/08/2026): a partir daqui a busca é executada de fato (fetch
-    # real no SearXNG ou fallback no router). O incremento do contador é
-    # EXPLÍCITO em cada return de execução real — não há mais `ensure`
-    # global. Caminho MCP (`cleitin_origin != :discord`) pula o gate ACIMA
-    # E pula o incremento ABAIXO (o helper já checa a origem internamente;
-    # mas as chamadas estão guardadas também por clareza). O contador só
-    # NÃO é incrementado para os early-returns ACIMA do `begin` (cache
-    # hit, query vazia, gate F5a, empty debounce) — buscas não executadas.
-    #
     # F8 (plano-fase2 D7, 31/08/2026): cronômetro do run para a métrica
     # `latency_ms`. O helper `record_search_metric!` é chamado em CADA
     # return pós-fetch (busca executou). Cache hit / empty debounce hit /
-    # gate F5a / query vazia ficam de fora (busca NÃO executou). O
-    # `started_at` é definido uma vez aqui para que latency cubra
-    # SearXNG+fallback (a busca completa, não só um hop).
+    # query vazia ficam de fora (busca NÃO executou). O `started_at` é
+    # definido uma vez aqui para que latency cubra SearXNG+fallback (a
+    # busca completa, não só um hop).
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     begin
       payload = fetch(q, limit, tr)

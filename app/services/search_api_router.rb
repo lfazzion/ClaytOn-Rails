@@ -675,7 +675,8 @@ class SearchApiRouter
     when :exa
       uri = URI("https://api.exa.ai/search")
       body = {
-        query: query, type: "auto", numResults: limit
+        query: query, type: "auto", numResults: limit,
+        contents: { text: true }
       }
       body[:startPublishedDate] = time_filter if time_filter
       req = Net::HTTP::Post.new(uri)
