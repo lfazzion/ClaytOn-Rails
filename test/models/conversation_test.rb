@@ -76,4 +76,36 @@ class ConversationTest < ActiveSupport::TestCase
     assert_equal empatada_1.last_active_at, empatada_2.last_active_at
     assert_equal [empatada_2.id, empatada_1.id], Conversation.recent.pluck(:id)
   end
+
+  # ---------------------------------------------------------------------------
+  # D2-F5a-v3 (30/08/2026) — Caracterização do teto de conversa no model
+  # ---------------------------------------------------------------------------
+  #
+  # Estes testes travam o MODEL: a coluna `web_search_count` existe, começa
+  # em 0 (default da migration), o teto MAX_WEB_SEARCH_PER_CONVERSATION é
+  # 5, e `increment_counter` (UPDATE atômico por PK) persiste.
+
+  test "D2-F5a-v3: web_search_count começa em zero em conversa nova" do
+    conversation = Conversation.open_for(scope: "c:d2f5av3", channel_id: "1", shared: true)
+
+    assert_equal 0, conversation.web_search_count,
+                 "default da migration (default: 0, null: false) — toda conversa NOVA começa em 0"
+    assert_equal 5, Conversation::MAX_WEB_SEARCH_PER_CONVERSATION
+  end
+
+  test "D2-F5a-v3: increment_counter persiste web_search_count atomicamente" do
+    conversation = Conversation.open_for(scope: "c:d2f5av3:inc", channel_id: "1", shared: true)
+    initial = conversation.web_search_count
+
+    Conversation.increment_counter(:web_search_count, conversation.id)
+
+    refute_equal initial, conversation.reload.web_search_count,
+                 "increment_counter deve ter persistido a mudança"
+    assert_equal initial + 1, conversation.reload.web_search_count
+
+    # Mais 4 incrementos satura o teto (5/5): prova que a coluna está
+    # escrevendo (não só sendo lida como 0 por bug de migration).
+    4.times { Conversation.increment_counter(:web_search_count, conversation.id) }
+    assert_equal Conversation::MAX_WEB_SEARCH_PER_CONVERSATION, conversation.reload.web_search_count
+  end
 end

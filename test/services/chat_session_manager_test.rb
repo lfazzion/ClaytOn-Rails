@@ -22,6 +22,16 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     Llm::ModelChain.stubs(:primary).returns(@link)
   end
 
+  # D2-F5a-v3 (30/08/2026): teardown limpa `Thread.current[:cleitin_*]`
+  # para testes que setam manualmente (ou que rodam antes do `ask` cujo
+  # ensure já limpa) não vazarem entre testes. Mesmo padrão já usado em
+  # web_search_tools_test.rb e em outros testes do arquivo (cleitin_actor /
+  # cleitin_turn / cleitin_origin).
+  teardown do
+    Thread.current[:cleitin_origin] = nil
+    Thread.current[:cleitin_conversation_scope_key] = nil
+  end
+
   def stub_chat(response_text = "resposta da IA")
     chat = mock("chat")
     chat.stubs(:with_thinking).returns(chat)
@@ -56,7 +66,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_equal "olá humano", bot_msg.content
   end
 
-  test "ask loga Iniciando ask e ask concluido no caminho de sucesso" do
+  test "ask loga iniciando ask e ask concluido no caminho de sucesso" do
     linhas = []
     Rails.logger.stubs(:info).with { |m| linhas << m.to_s; true }
     stub_chat("resposta ok")
@@ -67,7 +77,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert linhas.any? { |l| l =~ /ask concluído/ }, "deveria logar 'ask concluído' — log foi: #{linhas.inspect}"
   end
 
-  test "ask loga Iniciando ask e ask concluido mesmo em resposta em branco" do
+  test "ask loga iniciando ask e ask concluido mesmo em resposta em branco" do
     linhas = []
     Rails.logger.stubs(:info).with { |m| linhas << m.to_s; true }
     stub_chat("")
@@ -187,7 +197,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_not_nil sessions["active_key"]
   end
 
-  test "build_chat constroi objeto RubyLLM::Chat com instrucoes e ferramentas" do
+  test "build_chat constroi objeto ruby_llm::chat com instrucoes e ferramentas" do
     ChatSessionManager.stubs(:all_tool_classes).returns([ProfileLookupTool])
     chat = mock("chat")
     chat.expects(:with_thinking).never
@@ -273,7 +283,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_equal :bloco_executado, resultado
   end
 
-  test "all_tool_classes registra as tools de busca (WebSearch, PlatformSearch e PageFetch com a flag)" do
+  test "all_tool_classes registra as tools de busca (websearch, platformsearch e pagefetch com a flag)" do
     ChatSessionManager.unstub(:all_tool_classes) # o setup stuba com [] — aqui provamos o metodo real
     original = ENV["ENABLE_PAGE_FETCH"]
     ENV["ENABLE_PAGE_FETCH"] = "true"
@@ -285,7 +295,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     ENV["ENABLE_PAGE_FETCH"] = original
   end
 
-  test "all_tool_classes registra as tools de watchlist (TopicAddTool, TopicListTool, TopicRemoveTool)" do
+  test "all_tool_classes registra as tools de watchlist (topic_add_tool, topic_list_tool, topic_remove_tool)" do
     ChatSessionManager.unstub(:all_tool_classes)
     tools = ChatSessionManager.send(:all_tool_classes)
     assert_includes tools, TopicAddTool
@@ -294,7 +304,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
   end
 
 
-  test "ask define Thread.current[:cleitin_actor] durante a chamada e limpa no ensure" do
+  test "ask define thread.current[:cleitin_actor] durante a chamada e limpa no ensure" do
     actor_durante_execucao = nil
 
     chat = mock("chat")
@@ -316,7 +326,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_nil Thread.current[:cleitin_actor], "cleitin_actor deve ser limpo apos a execucao"
   end
 
-  test "ask limpa Thread.current[:cleitin_actor] mesmo quando ocorre excecao ou resposta em branco" do
+  test "ask limpa thread.current[:cleitin_actor] mesmo quando ocorre excecao ou resposta em branco" do
     # Caso resposta em branco (usando next)
     stub_chat("")
     res = ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "999", username: "usuario_teste")
@@ -339,7 +349,7 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_nil Thread.current[:cleitin_actor], "cleitin_actor deve ser limpo apos excecao"
   end
 
-  test "ask define e limpa Thread.current[:cleitin_turn] durante o turno" do
+  test "ask define e limpa thread.current[:cleitin_turn] durante o turno" do
     turn_durante_execucao = nil
 
     chat = mock("chat")
@@ -445,6 +455,91 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     # A assinatura guardada vem de link_a (snapshot), NÃO de link_c (re-leitura).
     assert_equal [:openrouter, "openrouter/free", nil, nil], sess[:assinatura_primary],
                  "assinatura em cache deve vir do snapshot, não de re-leitura"
+  end
+
+  # ---------------------------------------------------------------------------
+  # D2-F5a-v3 (30/08/2026) — Caracterização do entrypoint do teto (manager)
+  # ---------------------------------------------------------------------------
+  #
+  # Estes testes travam o entrypoint: `ChatSessionManager#ask` é quem seta
+  # `:cleitin_origin = :discord` e `:cleitin_conversation_scope_key = scope.key`
+  # no Thread.current (DENTRO do lock de escopo) e quem os limpa no `ensure`.
+  # Esse par é o que a `WebSearchTool` lê para fazer o gate F5a. Se a
+  # manager não setar, o gate pula e o teto não se aplica.
+
+  test "D2-F5a-v3: ask seta :cleitin_origin e :cleitin_conversation_scope_key durante o turno" do
+    origin_durante = nil
+    scope_key_durante = nil
+
+    chat = mock("chat")
+    chat.stubs(:with_thinking).returns(chat)
+    chat.stubs(:with_params).returns(chat)
+    chat.stubs(:with_tool).returns(chat)
+    chat.stubs(:with_instructions).returns(chat)
+    chat.stubs(:add_message).returns(chat)
+    chat.stubs(:ask).with do |_msg|
+      origin_durante = Thread.current[:cleitin_origin]
+      scope_key_durante = Thread.current[:cleitin_conversation_scope_key]
+      true
+    end.returns(stub(content: "resposta ok"))
+    RubyLLM.stubs(:chat).returns(chat)
+
+    res = ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "101", username: "joao")
+
+    assert_equal "resposta ok", res
+    assert_equal :discord, origin_durante,
+                 ":cleitin_origin deve ser :discord durante o turno (caminho do bot)"
+    assert_equal @scope.key, scope_key_durante,
+                 ":cleitin_conversation_scope_key deve ser scope.key durante o turno"
+    # Após o ask, ensure limpou as chaves. Sem isso, o próximo turno
+    # (ou outro teste no mesmo processo) veria a chave residual.
+    assert_nil Thread.current[:cleitin_origin]
+    assert_nil Thread.current[:cleitin_conversation_scope_key]
+  end
+
+  test "D2-F5a-v3: ask limpa :cleitin_* mesmo em excecao (rede do ensure)" do
+    chat_err = mock("chat_err")
+    chat_err.stubs(:with_thinking).returns(chat_err)
+    chat_err.stubs(:with_params).returns(chat_err)
+    chat_err.stubs(:with_tool).returns(chat_err)
+    chat_err.stubs(:with_instructions).returns(chat_err)
+    chat_err.stubs(:add_message).returns(chat_err)
+    chat_err.stubs(:ask).raises(RubyLLM::Error, "boom")
+    RubyLLM.stubs(:chat).returns(chat_err)
+
+    assert_raises(RubyLLM::Error) do
+      ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "101", username: "joao")
+    end
+
+    assert_nil Thread.current[:cleitin_conversation_scope_key],
+               "ensure precisa limpar mesmo quando o turno explode"
+    assert_nil Thread.current[:cleitin_origin]
+  end
+
+  test "D2-F5a-v3: reset! fecha conversa ativa; proxima ask abre nova row com web_search_count zero" do
+    # F5a (30/08/2026): `/new` fecha a conversa ativa. A fronteira entre
+    # tetos é a própria row: a NOVA row começa com web_search_count=0
+    # (default da migration) — sem precisar zerar manualmente. Este teste
+    # amarra a invariante: depois do reset, a próxima `ask` abre row com
+    # count=0, mesmo que a antiga estivesse saturada.
+    antiga = Conversation.open_for(scope: @scope.key, channel_id: @scope.channel_id, user_id: @scope.user_id)
+    antiga.update!(web_search_count: Conversation::MAX_WEB_SEARCH_PER_CONVERSATION)
+
+    ChatSessionManager.reset!(@scope)
+    assert_not antiga.reload.active
+
+    # Nova ask → nova row (count=0). Sem isso, o teto continuaria travado
+    # mesmo após /new, e o usuário nunca mais conseguiria pesquisar.
+    stub_chat("resposta")
+    ChatSessionManager.ask(scope: @scope, content: "ola", user_id: "101", username: "joao")
+    nova = Conversation.active_for(@scope.key)
+
+    assert_not_nil nova
+    assert_not_equal antiga.id, nova.id, "deve ser uma row nova, não a antiga reaberta"
+    assert_equal 0, nova.web_search_count, "/new libera o teto (nova row, count=0)"
+    # E o histórico da antiga é preservado (não é resetada em memória, só
+    # fechada) — é o que o usuário vê no /history.
+    assert_equal Conversation::MAX_WEB_SEARCH_PER_CONVERSATION, antiga.reload.web_search_count
   end
 end
 
