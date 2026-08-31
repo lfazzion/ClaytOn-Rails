@@ -147,9 +147,6 @@ class SearchApiQuota < ApplicationRecord
           r.count = 0
         end
       rescue ActiveRecord::RecordNotUnique
-        # Concorrente acabou de criar a linha entre o nosso find e o create.
-        # `retry` re-executa o bloco begin..rescue; o find_or_create_by vai
-        # agora encontrar a row já criada.
         rec = find_by(api_name: api_name, month: month) || retry
       end
 
