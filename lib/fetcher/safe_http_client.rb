@@ -38,7 +38,7 @@ module Fetcher
     class BodyTooLarge < Error; end
     class RequestTimeout < Error; end
 
-    Response = Struct.new(:status, :final_url, :content_type, :body, keyword_init: true) do
+    Response = Struct.new(:status, :final_url, :content_type, :body, :headers, keyword_init: true) do
       def html?
         content_type.to_s.empty? ||
           content_type.to_s.include?("html") ||
@@ -60,6 +60,10 @@ module Fetcher
       def get(url, total_timeout: TOTAL_TIMEOUT, headers: {})
         new(total_timeout: total_timeout).get(url, headers: headers)
       end
+
+      def post(url, json:, total_timeout: TOTAL_TIMEOUT, headers: {})
+        new(total_timeout: total_timeout).post(url, json: json, headers: headers)
+      end
     end
 
     def initialize(total_timeout: TOTAL_TIMEOUT)
@@ -72,9 +76,18 @@ module Fetcher
       raise RequestTimeout, "timeout de #{@total_timeout}s"
     end
 
+    def post(url, json:, headers: {})
+      body = json.nil? ? "" : json.to_json
+      Timeout.timeout(@total_timeout) { follow(url, headers: headers, body: body) }
+    rescue Timeout::Error
+      raise RequestTimeout, "timeout de #{@total_timeout}s"
+    rescue JSON::GeneratorError => e
+      raise Error, "JSON inválido (#{e.message})"
+    end
+
     private
 
-    def follow(url, headers: {})
+    def follow(url, headers: {}, body: nil)
       current = url.to_s
       seen = []
       # Headers extras (ex.: Authorization Bearer de uma API) são segredo da
@@ -90,7 +103,7 @@ module Fetcher
         resolution = SsrfGuard.resolve!(current)
         seen << current
 
-        hop = perform(resolution, extra_headers: headers)
+        hop = perform(resolution, extra_headers: headers, body: body)
         location = hop.headers["location"]
 
         return build_response(hop, resolution.uri.to_s) unless redirect?(hop, location)
@@ -131,7 +144,7 @@ module Fetcher
       raise Error, "Location inválido (#{e.message})"
     end
 
-    def perform(resolution, extra_headers: {})
+    def perform(resolution, extra_headers: {}, body: nil)
       uri = resolution.uri
       http = Net::HTTP.new(uri.host, uri.port)
       # Conecta NO IP validado. `uri.host` continua valendo para Host header,
@@ -144,7 +157,8 @@ module Fetcher
 
       hop = nil
       http.start do |session|
-        session.request(build_request(uri, extra_headers: extra_headers)) do |response|
+        request = build_request(uri, extra_headers: extra_headers, body: body)
+        session.request(request) do |response|
           hop = Hop.new(
             status: response.code.to_i,
             headers: downcased_headers(response),
@@ -165,22 +179,33 @@ module Fetcher
       response.to_hash.transform_keys(&:downcase).transform_values { |v| Array(v).first.to_s }
     end
 
-    # Headers no construtor de propósito: declarar `accept-encoding` ali é o que
-    # desliga o `decode_content` do Net::HTTP. A descompressão é nossa — a dele
-    # não respeita teto de bytes inflados.
-    def build_request(uri, extra_headers: {})
-      req = Net::HTTP::Get.new(
-        uri.request_uri,
-        "host" => uri.host,
-        "user-agent" => USER_AGENT,
-        "accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language" => "pt-BR,pt;q=0.9,en;q=0.8",
-        "accept-encoding" => "gzip"
-      )
+    def build_request(uri, extra_headers: {}, body: nil)
+      if body.nil?
+        # GET: manter comportamento existente
+        req = Net::HTTP::Get.new(
+          uri.request_uri,
+          "host" => uri.host,
+          "user-agent" => USER_AGENT,
+          "accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language" => "pt-BR,pt;q=0.9,en;q=0.8",
+          "accept-encoding" => "gzip"
+        )
+      else
+        # POST: JSON body
+        req = Net::HTTP::Post.new(uri.request_uri, "host" => uri.host)
+        req["user-agent"] = USER_AGENT
+        req["accept"] = "*/*"
+        req["accept-language"] = "pt-BR,pt;q=0.9,en;q=0.8"
+        req["content-type"] = "application/json"
+        req.body = body
+      end
       extra_headers.each { |k, v| req[k.to_s] = v.to_s }
       req
     end
 
+    # Headers no construtor de propósito: declarar `accept-encoding` ali é o que
+    # desliga o `decode_content` do Net::HTTP. A descompressão é nossa — a dele
+    # não respeita teto de bytes inflados.
     def read_capped(response)
       declared = response["content-length"].to_i
       raise BodyTooLarge, "Content-Length #{declared} > #{MAX_COMPRESSED_BYTES}" if declared > MAX_COMPRESSED_BYTES
@@ -232,7 +257,8 @@ module Fetcher
         status: hop.status,
         final_url: final_url,
         content_type: content_type.split(";").first.to_s.strip.downcase,
-        body: force_utf8(hop.body.to_s, content_type)
+        body: force_utf8(hop.body.to_s, content_type),
+        headers: hop.headers
       )
     end
 

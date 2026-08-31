@@ -1,0 +1,272 @@
+# frozen_string_literal: true
+
+require "base64"
+require "digest"
+require "json"
+require "time"
+require_relative "registry"
+require_relative "../cookie_jar"
+require_relative "../host_rate_limiter"
+require_relative "../safe_http_client"
+
+module Fetcher
+  module Channels
+    # Busca no X (Twitter) via API GraphQL oficial — caminho nativo da plataforma.
+    #
+    # Enquanto o caminho de `X.search` (espelho SPA com Chrome) gastava sessao
+    # ativa do dono para cada termo, este canal usa a API GraphQL `SearchTimeline`
+    # que responde com JSON estruturado diretamente, sem renderizacao de cliente.
+    #
+    # Requisitos:
+    # - Sessao autenticada no CookieJar (`auth_token` + `ct0`); guest-only nao funciona.
+    # - Header `x-client-transaction-id` calculado via par dict + SHA-256 + XOR.
+    #
+    # End-point provado em 31/08/2026:
+    #   GET https://x.com/i/api/graphql/flaR-PUMshxFWZWPNpq4zA/SearchTimeline?variables=...&features=...
+    #
+    # Resposta: data.search_by_raw_query.search_timeline.timeline.instructions[].entries[]
+    module XGraphql
+      QUERY_ID = "flaR-PUMshxFWZWPNpq4zA"  # twikit — verificado 31/08/2026
+      COOKIE_DOMAIN = "x.com"
+      GRAPHQL_BUDGET = { scope: "graphql_search", max: 4, per_hour: 30 }.freeze
+
+      # Par dict fa0311: key -> { animationKey, verification }
+      # Usado para assinatura do header x-client-transaction-id.
+      PAIR_DICT = {
+        "WebKit" => {
+          animation_key: "WebKit",
+          verification: Base64.decode64(
+            "V0lwcklQY2dFQUFCQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+          )
+        }
+      }.freeze
+
+      class Error < ::Fetcher::Channels::Error; end
+
+      # ---------------------------------------------------------------------------
+      # Interfacie publica
+      # ---------------------------------------------------------------------------
+
+      # Busca por assunto no X via GraphQL, substituindo o caminho SPA antigo.
+      #
+      # Retorna Array de Hash com chaves STRING no formato do PlatformSearchTool:
+      #   { "title" => "...", "url" => "...", "screen_name" => "...",
+      #     "text" => "...", "created_at" => "..." }
+      def self.search(query:, limit: 10)
+        termo = query.to_s.strip
+        return [] if termo.empty?
+
+        CookieJar.require!(COOKIE_DOMAIN)
+        raise RateLimited.new(COOKIE_DOMAIN, GRAPHQL_BUDGET) if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **GRAPHQL_BUDGET)
+
+        fetch_search(query: termo, limit: limit)
+      end
+
+      # Envia requisicao GET para o endpoint GraphQL e parseia a resposta.
+      def self.fetch_search(query:, limit: 10)
+        variables = {
+          rawQuery: query,
+          count: limit,
+          querySource: "typed_query",
+          product: "Latest"
+        }
+
+        features = {
+          rweb_tipjar_consumption_enabled: true,
+          responsive_web_graphql_exclude_directive_enabled: true,
+          verified_phone_label_enabled: false,
+          creator_subscriptions_tweet_preview_api_enabled: true,
+          responsive_web_graphql_timeline_navigation_enabled: true,
+          responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+          communities_web_enable_tweet_community_results_fetch: true,
+          c9s_tweet_anatomy_moderator_badge_enabled: true,
+          articles_preview_enabled: true,
+          responsive_web_edit_tweet_api_enabled: true,
+          graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+          view_counts_everywhere_api_enabled: true,
+          longform_notetweets_consumption_enabled: true,
+          responsive_web_twitter_article_tweet_consumption_enabled: true,
+          tweet_awards_web_tipping_enabled: false,
+          creator_subscriptions_quote_tweet_preview_enabled: false,
+          freedom_of_speech_not_reach_fetch_enabled: true,
+          standardized_nudges_misinfo: true,
+          tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+          rweb_video_timestamps_enabled: true,
+          longform_notetweets_rich_text_read_enabled: true,
+          longform_notetweets_inline_media_enabled: true,
+          responsive_web_enhance_cards_enabled: false
+        }
+
+        url = build_url(query, variables, features)
+        headers = build_headers(variables, features)
+
+        response = SafeHttpClient.get(url, headers: headers)
+        raise GraphQLError, "HTTP #{response.status}" unless response.success?
+
+        data = JSON.parse(response.body)
+        parse_search_timeline(data)
+      rescue JSON::ParserError
+        raise GraphQLError, "resposta nao eh JSON valido"
+      end
+
+      # Limpa token(s) de transacao armazenados (para teste).
+      def self.expire_token!
+        @txid_cache&.clear
+      end
+
+      # ---------------------------------------------------------------------------
+      # Parser
+      # ---------------------------------------------------------------------------
+
+      # Parseia a resposta GraphQL e extrai tweets das entries.
+      #
+      # Schema esperado: data.search_by_raw_query.search_timeline.timeline.instructions
+      def self.parse_search_timeline(data)
+        return [] unless data.is_a?(Hash)
+
+        entries = data.dig("data", "search_by_raw_query", "search_timeline",
+                           "timeline", "instructions")
+        return [] unless entries.is_a?(Array)
+
+        entries.flat_map do |instruction|
+          next [] unless instruction["type"] == "TimelineAddEntries"
+          next [] unless instruction["entries"].is_a?(Array)
+
+          instruction["entries"].filter_map do |entry|
+            next nil unless entry.is_a?(Hash)
+
+            item_content = entry.dig("content", "itemContent")
+            next nil unless item_content.is_a?(Hash)
+
+            tweet_result = item_content.dig("tweet_results", "result")
+            next nil unless tweet_result.is_a?(Hash)
+
+            # Descarta Tweets indisponiveis (protegidos, removidos, etc.)
+            next nil if tweet_result["__typename"] == "TweetUnavailable"
+
+            legacy = tweet_result["legacy"]
+            core = tweet_result["core"]
+            next nil unless legacy.is_a?(Hash) && core.is_a?(Hash)
+
+            user_result = core.dig("user_results", "result")
+            next nil unless user_result.is_a?(Hash)
+
+            user_legacy = user_result.dig("legacy")
+            next nil unless user_legacy.is_a?(Hash)
+
+            screen_name = user_legacy["screen_name"]
+            next nil if screen_name.nil? || screen_name.empty?
+
+            full_text = legacy["full_text"] || ""
+            created_at = legacy["created_at"]
+
+            {
+              "title" => "#{screen_name}: #{full_text[0..100]}#{full_text.length > 100 ? '...' : ''}",
+              "url" => "https://x.com/#{screen_name}/status/#{legacy['id_str'] || entry['entryId'].match(/(\d+)$/)&.to_s}",
+              "screen_name" => screen_name,
+              "text" => full_text,
+              "created_at" => parse_created_at(created_at)
+            }
+          end
+        end.uniq { |item| item["url"] }
+      end
+
+      # ---------------------------------------------------------------------------
+      # BuildTxid — assinatura do header x-client-transaction-id
+      # ---------------------------------------------------------------------------
+
+      class BuildTxid
+        attr_reader :pair_key, :verification_bytes, :animation_key, :payload
+
+        def initialize(pair_key = PAIR_DICT.keys.first)
+          @pair_key = pair_key
+          @pair = PAIR_DICT[pair_key]
+          raise ArgumentError, "par dict desconhecido: #{pair_key}" unless @pair
+
+          @animation_key = @pair[:animation_key]
+          @verification_bytes = @pair[:verification]
+        end
+
+        def evidence_header(now_ms = Time.now.to_f.to_i * 1000)
+          seconds = (now_ms - 1_682_924_400_000) / 1000
+          path = "/i/api/graphql/#{QUERY_ID}/SearchTimeline"
+          @payload = "GET!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
+
+          digest = Digest::SHA256.hexdigest(@payload)
+          mask = rand(256)
+
+          signed_bytes = (@verification_bytes.bytes +
+                          [seconds].pack("N").bytes +
+                          digest.bytes[0...16] +
+                          [3]).map { |b| b ^ mask }
+
+          Base64.urlsafe_encode64(signed_bytes.pack("C*")).rstrip("=")
+        end
+
+        def self.evidence_header(payload, now_ms)
+          txid = new(payload[:animation_key] || payload.keys.first)
+          txid.instance_variable_set(:@payload, payload[:payload]) if payload[:payload]
+          txid.evidence_header(now_ms)
+        end
+      end
+
+      # ---------------------------------------------------------------------------
+      # Internals
+      # ---------------------------------------------------------------------------
+
+      def self.build_url(query, variables, features)
+        encoded_vars = URI.encode_www_form_component(variables.to_json)
+        encoded_feats = URI.encode_www_form_component(features.to_json)
+
+        "https://#{COOKIE_DOMAIN}/i/api/graphql/#{QUERY_ID}/SearchTimeline?" \
+          "variables=#{encoded_vars}&features=#{encoded_feats}"
+      end
+
+      def self.build_headers(variables, features)
+        txid = BuildTxid.new
+        now_ms = Time.now.to_f.to_i * 1000
+
+        {
+          "x-client-transaction-id" => txid.evidence_header(now_ms),
+          "x-twitter-auth-type" => "OAuth2Session",
+          "x-twitter-active-user" => "yes",
+          "x-twitter-client-language" => "en",
+          "Authorization" => "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+          "User-Agent" => "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept" => "*/*",
+          "Accept-Language" => "en-US,en;q=0.9",
+          "Origin" => "https://x.com",
+          "Referer" => "https://x.com/"
+        }
+      end
+
+      def self.parse_created_at(created_at_str)
+        return nil if created_at_str.nil? || created_at_str.empty?
+
+        begin
+          Time.parse(created_at_str).utc.iso8601
+        rescue ArgumentError, TypeError
+          nil
+        end
+      end
+
+      # ---------------------------------------------------------------------------
+      # Erros nomeados
+      # ---------------------------------------------------------------------------
+
+      class RateLimited < Error
+        def initialize(host, budget = GRAPHQL_BUDGET)
+          scope_suffix = budget[:scope] ? " [#{budget[:scope]}]" : ""
+          super("rate limit local: #{host} atingiu #{budget[:max]} leitura(s)/min " \
+                "ou #{budget[:per_hour]}/hora#{scope_suffix} — repita daqui a pouco")
+        end
+      end
+
+      class GraphQLError < Error
+        def initialize(message = "graphql retornou erro")
+          super("busca GraphQL do X falhou: #{message}")
+        end
+      end
+    end
+  end
+end

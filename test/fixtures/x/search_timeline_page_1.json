@@ -1,0 +1,93 @@
+{
+  "data": {
+    "search_by_raw_query": {
+      "search_timeline": {
+        "timeline": {
+          "instructions": [
+            {
+              "type": "TimelineAddEntries",
+              "entries": [
+                {
+                  "entryId": "tweet-1234567890",
+                  "sortIndex": "1234567890",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "itemContent": {
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "legacy": {
+                            "created_at": "Mon Aug 31 20:00:00 +0000 2026",
+                            "full_text": "Ruby on Rails 8.1 is amazing for building APIs quickly!",
+                            "lang": "en"
+                          },
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "__typename": "User",
+                                "legacy": {
+                                  "screen_name": "railsdev",
+                                  "name": "Rails Developer"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "tweet-1234567891",
+                  "sortIndex": "1234567891",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "itemContent": {
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "legacy": {
+                            "created_at": "Mon Aug 31 19:30:00 +0000 2026",
+                            "full_text": "GraphQL is the future of API design. Just learned about X GraphQL API!",
+                            "lang": "en"
+                          },
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "__typename": "User",
+                                "legacy": {
+                                  "screen_name": "graphql_fan",
+                                  "name": "GraphQL Enthusiast"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "cursor-bottom-1234567891",
+                  "sortIndex": "1234567891",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "value": "scroll:thGxwVR_7V2J9hJGhAABCgAAAAAAAAAAAA=="
+                  }
+                },
+                {
+                  "entryId": "cursor-top-1234567890",
+                  "sortIndex": "1234567890",
+                  "content": {
+                    "cursorType": "Top",
+                    "value": "scroll:thGxwVR_7V2J9hJGhAABCgAAAAAAAAAAAA=="
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
