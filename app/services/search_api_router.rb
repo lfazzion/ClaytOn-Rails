@@ -96,6 +96,7 @@ class SearchApiRouter
     "stackoverflow.com" => :ugc,
     # Primary (fonte original/autoral)
     "gov.br"        => :primary,
+    "gov.uk"        => :primary,
     "arxiv.org"     => :primary,
     "reuters.com"   => :primary,
     "nature.com"    => :primary,
@@ -107,15 +108,40 @@ class SearchApiRouter
     "github.com"    => :primary
   }.freeze
 
-  # Wildcards de sufixo: a chave é o sufixo COM ponto, e o match é
-  # `host == chave || host.start_with?(chave)`. Cobre `forum.alura.com.br`,
-  # `forum.example.org`, `gov.br`, `gov.uk`, etc. Mantidos separados da
-  # TRUST_TABLE para o lookup ser óbvio (hash de sufixos vs hash de hosts).
-  # Resultado da ordem de avaliação: match exato > wildcard > :unknown.
-  TRUST_WILDCARDS = {
-    "forum." => :ugc,
-    "gov."   => :primary
+  # Wildcards de sufixo: a chave é o sufixo COM ponto (inicial pra end_with,
+# sem ponto inicial pra start_with), e o match é `host.start_with?(chave)`
+# OU `host.end_with?(chave)` conforme a entrada. Cobre:
+  #   `forum.alura.com.br`, `forum.example.org` — `start_with?("forum.")`
+  #   `gov.br`, `www.gov.br`, `bcb.gov.br`, `gov.uk` — `end_with?(".gov*")`
+  #
+  # D4-F7-v2: o wildcard antigo era `"gov."` com `start_with?`, o que fazia
+  # QUALQUER host começando com "gov." virar `:primary` — incluindo o
+  # canônico `gov.example.evil` (host malicioso hipotético). A semântica
+  # correta para gov é match por SUFIXO de TLD real: o host precisa TERMINAR
+  # em `.gov`, `.gov.br`, `.gov.uk`. Isso é seguro porque `.gov` é restrito
+  # por IANA — nenhum domínio malicioso comum termina em `.gov`.
+  #
+  # O `forum.` continua como `start_with?` (sufixo com ponto à direita):
+  # `forum.X` é UGC por convenção — o sufixo é "forum." (não ".forum" nem
+  # `.com`); nenhum host legítimo é "forum" como TLD. O `start_with?` é
+  # seguro aqui porque exige o ponto à direita, então não casa "forum" solto
+  # nem "forumXYZ" (sem ponto).
+  #
+  # Mantidos separados da TRUST_TABLE para o lookup ser óbvio (hash de
+  # sufixos vs hash de hosts). Resultado da ordem de avaliação:
+  # match exato > sufixo de TRUST_TABLE > TRUST_WILDCARDS_START >
+  # TRUST_WILDCARDS_END > :unknown.
+  TRUST_WILDCARDS_START = {
+    "forum." => :ugc
   }.freeze
+  TRUST_WILDCARDS_END = {
+    ".gov"    => :primary,
+    ".gov.br" => :primary,
+    ".gov.uk" => :primary
+  }.freeze
+  # Alias preservado para compatibilidade de testes/inspect existentes;
+  # união lógica (apenas leitura conceitual).
+  TRUST_WILDCARDS = TRUST_WILDCARDS_START.merge(TRUST_WILDCARDS_END).freeze
 
   # Classifica o host por trust. Aceita URL completa ou só o hostname. Default
   # :unknown (agregador / blog pessoal / mídia não listada — o leitor humano
@@ -127,7 +153,12 @@ class SearchApiRouter
   #   2. TRUST_TABLE por sufixo `.suffix` — `www.reddit.com` casa `.reddit.com`.
   #      NÃO usado para hosts curtos demais (≤ suffix.length) para evitar
   #      `x.com.br` casar `.x.com` (defesa testada em `x.com.br`).
-  #   3. TRUST_WILDCARDS por start_with (sufixo com ponto) — `forum.`/`gov.`
+  #   3a. TRUST_WILDCARDS_START por start_with (sufixo `xxx.`) — `forum.`
+  #   3b. TRUST_WILDCARDS_END   por end_with   (sufixo `.xxx`) — `.gov` /
+  #        `.gov.br` / `.gov.uk`. D4-F7-v2: era `start_with?("gov.")` e
+  #        casava QUALQUER host começando com "gov." (inclusive
+  #        `gov.example.evil`). Agora exige TERMINAR no TLD `.gov*` — `.gov`
+  #        é restrito por IANA, então não há colisão com host malicioso.
   #   4. :unknown
   #
   # @param url_or_host [String, nil]
@@ -147,9 +178,16 @@ class SearchApiRouter
       return label if host.end_with?(".#{suffix}")
     end
 
-    # 3. Match por wildcard (sufixo com ponto, sem ambiguidade de substring).
-    TRUST_WILDCARDS.each do |suffix, label|
+    # 3a. Wildcard por PREFIXO (`xxx.`) — `forum.alura.com.br` casa.
+    #     Sufixo termina com ponto, então exige fronteira de label.
+    TRUST_WILDCARDS_START.each do |suffix, label|
       return label if host.start_with?(suffix)
+    end
+
+    # 3b. Wildcard por SUFIXO (`.xxx`) — `www.gov.br` casa `.gov.br`.
+    #     D4-F7-v2: exige TLD real (host.end_with? — sem ambiguidade de prefix).
+    TRUST_WILDCARDS_END.each do |suffix, label|
+      return label if host.end_with?(suffix)
     end
 
     # 4. Default

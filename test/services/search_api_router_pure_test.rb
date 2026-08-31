@@ -360,6 +360,26 @@ class SearchApiRouterPureTest < Minitest::Test
     refute_equal :primary, SearchApiRouter.trust_for("https://www.reddit.com/")
   end
 
+  # D4-F7-v2 (revisor r1 grok REPROVA): o wildcard antigo `"gov."` com
+  # `start_with?` casava QUALQUER host que COMEÇASSE com "gov." — incluindo
+  # `gov.example.evil`, que virava `:primary`. Semântica correta é match
+  # por SUFIXO de TLD real: `host.end_with?(".gov")`, `".gov.br"`, etc.
+  # Cobre os 4 casos canônicos do brief:
+  #   - gov.example.evil → :unknown  (não termina em .gov/.gov.br)
+  #   - www.gov.br       → :primary  (termina em .gov.br)
+  #   - evil.com/gov.fake→ :unknown  (path com "gov." não casa; match é por HOST)
+  #   - www.reddit.com   → :ugc      (sufixo `.reddit.com` continua valendo)
+  def test_trust_wildcard_gov_nao_casa_subdominio_falso
+    assert_equal :unknown, SearchApiRouter.trust_for("https://gov.example.evil/x"),
+                 "gov.example.evil NÃO é gov — start_with?('gov.') era o bug; agora é :unknown"
+    assert_equal :primary, SearchApiRouter.trust_for("https://www.gov.br/anexo"),
+                 "www.gov.br é gov.br real — sufixo .gov.br casa"
+    assert_equal :unknown, SearchApiRouter.trust_for("https://evil.com/gov.fake"),
+                 "gov.fake no PATH não casa — match é por HOST, não pela URL inteira"
+    assert_equal :ugc, SearchApiRouter.trust_for("https://www.reddit.com/r/x"),
+                 "reddit.com continua :ugc — sufixo .reddit.com não foi afetado pelo fix"
+  end
+
   # Tabela exposta como constante — single source of truth para o classificador.
   def test_trust_table_e_constante_exposta
     assert defined?(SearchApiRouter::TRUST_TABLE), "tabela deve ser constante pública do módulo"
