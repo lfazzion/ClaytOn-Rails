@@ -146,18 +146,23 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
   # Fase 4: Testes do BuildTxid (metodo puro testavel)
   # ---------------------------------------------------------------------------
 
-  test "BuildTxid.evidence_header com tempo fixo retorna string base64 com tamanho esperado" do
-    payload = {
-      animation_key: "WebKit",
-      verification: "V0lwcklQY2dFQUFCQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
-    }
-    now_ms = 1_725_145_200_000
+  test "build_headers usa query_id correto na assinatura txid (vetor canary)" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth-token" },
+      { "name" => "ct0", "value" => "test-ct0-token" }
+    ]
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
 
-    header = Fetcher::Channels::XGraphql::BuildTxid.evidence_header(payload, now_ms)
+    # Vetor canary calculado via /tmp/gen_txid_vector.py
+    # NOW_MS=1788194000000, MASK=123
+    # path=/i/api/graphql/flaR-PUMshxFWZWPNpq4zA/SearchTimeline
+    expected_txid = "e5BncvspyRzsZnZ2vL45buEHlPkSusBk6haOUzdet+Axbws8XQYmoXDwV4AHEMX5VhsyPX3pTXspi1zbIbCw+cNKxUMseA"
 
-    assert_kind_of String, header
-    # O header evidencia é base64 de ~100 chars (53 bytes verification + 4 seconds + 16 digest + 1 byte)
-    assert_equal 100, header.length
+    txid = Fetcher::Channels::XGraphql::BuildTxid.new("fast_path")
+    actual = txid.evidence_header(now_ms: 1_788_194_000_000, query_id: "flaR-PUMshxFWZWPNpq4zA", path_suffix: "SearchTimeline", mask: 123)
+
+    assert_equal expected_txid, actual
+    assert_equal 94, actual.length
   end
 
   test "BuildTxid gera header EXATO do algoritmo canary (vetor fixo)" do
@@ -170,7 +175,7 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     mask = 123
 
     txid = Fetcher::Channels::XGraphql::BuildTxid.new("fast_path")
-    header = txid.evidence_header("flaR-PUMshxFWZWPNpq4zA", "SearchTimeline", now_ms, mask: mask)
+    header = txid.evidence_header(now_ms: now_ms, query_id: "flaR-PUMshxFWZWPNpq4zA", path_suffix: "SearchTimeline", mask: mask)
 
     assert_kind_of String, header
     assert_equal 94, header.length

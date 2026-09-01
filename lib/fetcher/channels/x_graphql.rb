@@ -94,7 +94,7 @@ module Fetcher
           page_count += 1
           variables = build_variables(query, limit, cursor)
           url = build_url(query, variables, features, last_query_id)
-          headers = build_headers(variables, features)
+          headers = build_headers(variables, features, query_id: last_query_id)
 
           response = SafeHttpClient.get(url, headers: headers)
 
@@ -343,7 +343,7 @@ module Fetcher
           @verification_bytes = @pair[:verification]
         end
 
-        def evidence_header(query_id = QUERY_ID, path_suffix = "SearchTimeline", now_ms = Time.now.to_f.to_i * 1000, mask: nil)
+        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline")
           seconds = (now_ms - 1_682_924_400_000) / 1000
           path = "/i/api/graphql/#{query_id}/#{path_suffix}"
           @payload = "GET!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
@@ -361,7 +361,7 @@ module Fetcher
         def self.evidence_header(payload, now_ms)
           txid = new(payload[:animation_key] || payload.keys.first)
           txid.instance_variable_set(:@payload, payload[:payload]) if payload[:payload]
-          txid.evidence_header(now_ms)
+          txid.evidence_header(now_ms: now_ms)
         end
       end
 
@@ -379,7 +379,7 @@ module Fetcher
           "variables=#{encoded_vars}&features=#{encoded_feats}"
       end
 
-      def self.build_headers(variables, features)
+      def self.build_headers(variables, features, query_id: QUERY_ID)
         txid = BuildTxid.new
         now_ms = Time.now.to_f.to_i * 1000
 
@@ -390,7 +390,7 @@ module Fetcher
         cookie_header = cookies.map { |c| "#{c['name']}=#{c['value']}" }.join("; ")
 
         {
-          "x-client-transaction-id" => txid.evidence_header(now_ms),
+          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id),
           "x-twitter-auth-type" => "OAuth2Session",
           "x-twitter-active-user" => "yes",
           "x-twitter-client-language" => "en",
