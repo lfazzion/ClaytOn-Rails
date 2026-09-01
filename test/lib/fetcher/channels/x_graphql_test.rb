@@ -156,8 +156,25 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     header = Fetcher::Channels::XGraphql::BuildTxid.evidence_header(payload, now_ms)
 
     assert_kind_of String, header
-    # O header evidencia é base64 de ~99 chars (53 bytes verification + 4 seconds + 16 digest + 1 byte)
-    assert_equal 99, header.length
+    # O header evidencia é base64 de ~100 chars (53 bytes verification + 4 seconds + 16 digest + 1 byte)
+    assert_equal 100, header.length
+  end
+
+  test "BuildTxid gera header EXATO do algoritmo canary (vetor fixo)" do
+    # Vetor gerado pela canary real /tmp/x_canary_final.rb com:
+    # - pair[0] do /tmp/x_pair.json (fast_path)
+    # - NOW_MS=1788194000000, MASK=123
+    # - path=/i/api/graphql/flaR-PUMshxFWZWPNpq4zA/SearchTimeline
+    # Output esperado: 94 chars, header byte-exato
+    now_ms = 1_788_194_000_000
+    mask = 123
+
+    txid = Fetcher::Channels::XGraphql::BuildTxid.new("fast_path")
+    header = txid.evidence_header("flaR-PUMshxFWZWPNpq4zA", "SearchTimeline", now_ms, mask: mask)
+
+    assert_kind_of String, header
+    assert_equal 94, header.length
+    assert_equal "e5BncvspyRzsZnZ2vL45buEHlPkSusBk6haOUzdet+Axbws8XQYmoXDwV4AHEMX5VhsyPX3pTXspi1zbIbCw+cNKxUMseA", header
   end
 
   test "evidence_header nunca vaza segredo em string" do

@@ -343,20 +343,19 @@ module Fetcher
           @verification_bytes = @pair[:verification]
         end
 
-        def evidence_header(query_id = QUERY_ID, path_suffix = "SearchTimeline", now_ms = Time.now.to_f.to_i * 1000)
+        def evidence_header(query_id = QUERY_ID, path_suffix = "SearchTimeline", now_ms = Time.now.to_f.to_i * 1000, mask: nil)
           seconds = (now_ms - 1_682_924_400_000) / 1000
           path = "/i/api/graphql/#{query_id}/#{path_suffix}"
           @payload = "GET!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
 
-          digest = Digest::SHA256.hexdigest(@payload)
-          mask = rand(256)
+          digest = Digest::SHA256.digest(@payload)
+          current_mask = mask || rand(256)
 
-          signed_bytes = (@verification_bytes.bytes +
-                          [seconds].pack("N").bytes +
-                          digest.bytes[0...16] +
-                          [3]).map { |b| b ^ mask }
+          time_bytes = [seconds & 0xff, (seconds >> 8) & 0xff, (seconds >> 16) & 0xff, (seconds >> 24) & 0xff]
+          seq = @verification_bytes.bytes + time_bytes + digest.bytes[0...16] + [3]
+          out = [current_mask] + seq.map { |b| b ^ current_mask }
 
-          Base64.urlsafe_encode64(signed_bytes.pack("C*")).gsub(/=+$/, '')
+          Base64.strict_encode64(out.pack("C*")).delete("=")
         end
 
         def self.evidence_header(payload, now_ms)
