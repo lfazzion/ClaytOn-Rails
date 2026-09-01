@@ -56,6 +56,7 @@ module Fetcher
     def initialize(cache: nil)
       @cache = cache || Rails.cache
       @mutex = Mutex.new
+      @fetching = false
     end
 
     def resolve(operation_name, force: false)
@@ -131,13 +132,19 @@ module Fetcher
 
     def discover!(operation_name)
       lock_key = "fetcher:x_query_id_lock:#{operation_name}"
-      acquired_lock = false
 
-      # Lock de concorrência com TTL (um só processo descobre)
       @mutex.synchronize do
-        return if @cache.read(lock_key) # Já há alguém descobrindo
+        # Se já há fetch em andamento nesta instância, aguarda e retorna o valor em cache (se houver)
+        if @fetching
+          return @cache.read("fetcher:x_query_id:#{operation_name}")&.dig(:query_id)
+        end
+
+        # Se já há alguém descobrindo (lock no cache), retorna nil
+        return nil if @cache.read(lock_key)
+
+        # Sinaliza que inicia fetch e mantém lock no cache
+        @fetching = true
         @cache.write(lock_key, true, expires_in: 60)
-        acquired_lock = true
       end
 
       begin
@@ -157,20 +164,21 @@ module Fetcher
         end
 
         query_id = query_ids[operation_name]
-        return nil unless query_id
 
         cache_key = "fetcher:x_query_id:#{operation_name}"
         envelope = {
-          query_id: query_id,
+          query_id: query_id || PIN,
           fetched_at: Time.now.to_i,
           stale_at: Time.now.to_i + 24 * 3600
         }
         @cache.write(cache_key, envelope, expires_in: 25 * 3600)
-        query_id
+
+        query_id || PIN
       ensure
-        # Nao apagar o lock aqui: deixa o TTL (60s) cuidar da expiracao.
-        # Apagar no ensure cria janela de corrida — thread posterior pode
-        # ser escalonada apos o delete, ler nil, e adquirir o lock de novo.
+        @mutex.synchronize do
+          @fetching = false
+          # Mantém lock no cache por TTL para evitar refreshes simultâneos de outras instâncias
+        end
       end
     end
 
