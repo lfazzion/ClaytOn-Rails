@@ -1,0 +1,61 @@
+{
+  "data": {
+    "search_by_raw_query": {
+      "search_timeline": {
+        "timeline": {
+          "instructions": [
+            {
+              "type": "TimelineAddEntries",
+              "entries": [
+                {
+                  "entryId": "tweet-9999999999",
+                  "sortIndex": "9999999999",
+                  "content": {
+                    "itemContent": {
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "TweetUnavailable",
+                          "unavailable_reason": "Protected content"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "tweet-1234567890",
+                  "sortIndex": "1234567890",
+                  "content": {
+                    "cursorType": "Bottom",
+                    "itemContent": {
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "legacy": {
+                            "created_at": "Mon Aug 31 20:00:00 +0000 2026",
+                            "full_text": "This is a public tweet that should be visible",
+                            "lang": "en"
+                          },
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "__typename": "User",
+                                "legacy": {
+                                  "screen_name": "publicuser",
+                                  "name": "Public User"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -157,13 +157,13 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
   # Timeline de perfil (X.timeline) — os posts recentes lidos com a sessão do dono.
   #
   # Nenhum destes seletores foi exercitado ao vivo: a sessão ainda não existe. O
-  # que estes testes fixam é o CONTRATO (chaves string, contador ilegível nil,
+  # que estes testes fixa é o CONTRATO (chaves string, contador ilegível nil,
   # permalink de fora descartado, falha nomeada) — não a marcação do X.
   # ---------------------------------------------------------------------------
 
   # Página de mentira: devolve um lote por leitura e conta as rolagens. É por
   # `from_timeline_page`, público, que o teste entra sem Chrome — mesma forma do
-  # `Reddit.from_search_page`.
+  # `Reddit.FromSearchPage`.
   class FakePage
     attr_reader :scrolls, :leituras
 
@@ -265,8 +265,7 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
 
     assert_nil item["replies"]
     assert_nil from_timeline([[raw_post(id: 1, extras: { "likes" => nil })]]).first["likes"]
-    assert_nil from_timeline([[raw_post(id: 1, extras: { "likes" => { "label" => "Curtir", "text" => "" } })]])
-               .first["likes"]
+    assert_nil from_timeline([[raw_post(id: 1, extras: { "likes" => { "label" => "Curtir", "text" => "" } })]]).first["likes"]
   end
 
   test "data ilegivel vira nil, e o post continua valendo" do
@@ -618,7 +617,7 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     assert_equal [], itens
   end
 
-  test "from_search_page sem artigos e sem marcador de estado vazio vira SearchFailed" do
+  test "from_search_page sem artigos e sem marcador de estado vira SearchFailed" do
     Kernel.stubs(:sleep)
     erro = assert_raises(Fetcher::Channels::X::SearchFailed) { from_search([[]]) }
 
@@ -649,44 +648,96 @@ class Fetcher::Channels::XTest < ActiveSupport::TestCase
     assert_equal [], Fetcher::Channels::X.search(query: "   ")
   end
 
-  test "search navega na URL de busca com f=live e o termo codificado" do
+  # ---------------------------------------------------------------------------
+  # Transporte GraphQL vs Browser (T5)
+  # ---------------------------------------------------------------------------
+
+  test "busca por assunto usa XGraphql e nunca abre browser no default" do
+    Fetcher::BrowserSession.expects(:with_page).never
+    Fetcher::Channels::XGraphql.expects(:search).with(query: "ruby rails", limit: 10).returns([])
+
+    Fetcher::Channels::X.search(query: "ruby rails")
+  end
+
+  test "X_SEARCH_TRANSPORT=browser usa search_via_browser em vez de graphql" do
+    Fetcher::Channels::XGraphql.expects(:search).never
     Fetcher::CookieJar.stubs(:valid?).returns(true)
     Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
     Fetcher::BrowserSession.expects(:with_page)
                            .with("https://x.com/search?q=ruby+rails&f=live&src=typed_query")
                            .returns([])
 
-    Fetcher::Channels::X.search(query: "ruby rails")
+    ENV["X_SEARCH_TRANSPORT"] = "browser"
+    begin
+      Fetcher::Channels::X.search(query: "ruby rails")
+    ensure
+      ENV.delete("X_SEARCH_TRANSPORT")
+    end
   end
 
-  test "search sem sessao no jar levanta Expired nomeando x.com, antes do browser" do
-    Fetcher::CookieJar.stubs(:valid?).returns(false)
+  test "transporte invalido levanta InvalidTransport" do
+    Fetcher::Channels::XGraphql.expects(:search).never
     Fetcher::BrowserSession.expects(:with_page).never
 
-    erro = assert_raises(Fetcher::CookieJar::Expired) { Fetcher::Channels::X.search(query: "ruby") }
+    erro = assert_raises(Fetcher::Channels::X::InvalidTransport) do
+      ENV["X_SEARCH_TRANSPORT"] = "invalido"
+      begin
+        Fetcher::Channels::X.search(query: "ruby rails")
+      ensure
+        ENV.delete("X_SEARCH_TRANSPORT")
+      end
+    end
 
-    assert_equal "x.com", erro.domain
+    assert_includes erro.message, "transporte inválido"
+    assert_includes erro.message, "graphql"
+    assert_includes erro.message, "browser"
   end
 
-  test "chamada de busca sem sessao nao queima cota do limitador" do
-    Fetcher::CookieJar.stubs(:valid?).returns(false)
-    Fetcher::HostRateLimiter.expects(:exceeded?).never
+  test "XGraphql falhando nao aciona browser automaticamente" do
+    Fetcher::Channels::XGraphql.stubs(:search).raises(Fetcher::Channels::XGraphql::GraphQLError, "falha")
     Fetcher::BrowserSession.expects(:with_page).never
 
-    assert_raises(Fetcher::CookieJar::Expired) { Fetcher::Channels::X.search(query: "ruby") }
+    assert_raises(Fetcher::Channels::XGraphql::GraphQLError) { Fetcher::Channels::X.search(query: "ruby rails") }
   end
 
-  test "search com rate limit estoura RateLimited nomeando x.com e o orcamento de busca" do
+  # ---------------------------------------------------------------------------
+  # Testes atualizados para refletir novo contrato (default graphql; browser so com env)
+  # ---------------------------------------------------------------------------
+
+  test "search com X_SEARCH_TRANSPORT=browser navega na URL de busca com f=live e o termo codificado" do
+    Fetcher::Channels::XGraphql.expects(:search).never
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+    Fetcher::BrowserSession.expects(:with_page)
+                           .with("https://x.com/search?q=ruby+rails&f=live&src=typed_query")
+                           .returns([])
+
+    ENV["X_SEARCH_TRANSPORT"] = "browser"
+    begin
+      Fetcher::Channels::X.search(query: "ruby rails")
+    ensure
+      ENV.delete("X_SEARCH_TRANSPORT")
+    end
+  end
+
+  test "search com X_SEARCH_TRANSPORT=browser e rate limit estoura RateLimited nomeando x.com e o orcamento de busca" do
+    Fetcher::Channels::XGraphql.expects(:search).never
     Fetcher::CookieJar.stubs(:valid?).returns(true)
     Fetcher::HostRateLimiter.expects(:exceeded?)
                             .with("x.com", **Fetcher::Channels::X::SEARCH_BUDGET)
                             .returns(true)
     Fetcher::BrowserSession.expects(:with_page).never
 
-    erro = assert_raises(Fetcher::Channels::X::RateLimited) { Fetcher::Channels::X.search(query: "ruby") }
+    ENV["X_SEARCH_TRANSPORT"] = "browser"
+    begin
+      erro = assert_raises(Fetcher::Channels::X::RateLimited) { Fetcher::Channels::X.search(query: "ruby") }
 
-    assert_includes erro.message, "x.com"
-    assert_includes erro.message, "search"
-    assert Fetcher::Channels::X::RateLimited < Fetcher::Channels::Error
+      assert_includes erro.message, "x.com"
+      assert_includes erro.message, "search"
+      assert Fetcher::Channels::X::RateLimited < Fetcher::Channels::Error
+    ensure
+      ENV.delete("X_SEARCH_TRANSPORT")
+    end
   end
+
 end

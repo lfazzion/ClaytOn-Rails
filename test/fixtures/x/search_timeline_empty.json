@@ -1,0 +1,19 @@
+{
+  "data": {
+    "search_by_raw_query": {
+      "search_timeline": {
+        "timeline": {
+          "instructions": [
+            {
+              "type": "TimelineAddEntries",
+              "entries": []
+            },
+            {
+              "type": "TimelineClearCache"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

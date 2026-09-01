@@ -15,6 +15,16 @@
   - Estado persistido em Solid Cache (`scraping_incident:#{scraper_name}:#{profile_id}`, TTL 30d) sem migrations no banco. Lock atômico com TTL 5min e double-checked locking para concorrência.
   - Rollback honesto de cota horária e liberação de lock em falha de envio ao Discord, canal admin não configurado ou quota horária esgotada.
   - Resolução de incidente (`AlertThrottler.resolve_incident`) no `ScrapeYoutubeJob` ao obter `collection_status: "success"`.
+- **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
+  - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
+  - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
+  - Limite local via HostRateLimiter (scope `graphql_search` 4/min 30/h) e parse de rate limit remoto (headers `x-rate-limit-*`).
+  - 429/403/401 tratados como erros nomeados sem dormir na tool.
+  - Query ID do SearchTimeline rotaciona a cada deploy do X; resolvido via cache (SolidCache) + refresh recorrente a cada 6h (`RefreshXQueryIdsJob`) + PIN inicial `flaR-PUMshxFWZWPNpq4zA` (verificado 31/08).
+  - ID do XActions (`hyPfJYJ_...`) está stale (404).
+  - Timeline por perfil (`X.timeline`) permanece no Chrome/CDP com CookieJar — inalterada.
+  - Rollback temporário: `X_SEARCH_TRANSPORT=browser` usa o caminho legado (browser); sem env (ou `=graphql`) usa GraphQL. Sem fallback automático.
+  - Prazo de revisão da flag: 14 dias ou 2 rotações de bundle (o que for maior) — depois decidir remover ou manter com dono operacional.
 - **[2026-08-10]** Feature — Busca por assunto no X (`X.search`, `SearchFailed`, `SEARCH_BUDGET` 30/h, fronteira `@perfil`/assunto da tool `PlatformSearchTool`).
   - `Fetcher::Channels::X.search(query:, limit: 10)`: busca nativa no X com `f=live&src=typed_query`. Detecção do estado vazio legítimo via marcador `[data-testid="empty_state_header_text"]` (retorna `[]`); sem marcador, levanta `SearchFailed`. `SEARCH_BUDGET` e `TIMELINE_BUDGET` reduzidos para 30/h (4/min) mantendo teto da conta do dono em ~60/h. Mensagem de `RateLimited` inclui o escopo (`[timeline]` / `[search]`).
   - `PlatformSearchTool`: exige `@` explícito para perfis (ex: `@jack` -> `X.timeline`); termos sem `@` (frases ou palavras soltas ex: `bitcoin` ou `ruby rails`) acionam `X.search`.
@@ -249,6 +259,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | 2026-08-09 | Decisão arquitetural registrada: execução Python via sidecar HTTP autenticado (8080, `PYTHON_SCRAPER_TOKEN`) em vez de `Open3` in-process. | Padrões Ratificados |
 | 2026-08-10 | Fase 3 implementada e revisada: fusão RRF + clustering (`lib/research/fusion.rb`, `lib/research/cluster.rb`). Decisão de escala registrada (local_relevance como score de trabalho, rrf para ordenação). Entity-cluster da Fase 4 adiado (depende de entity_extract). | Contexto Ativo, Padrões Ratificados, Lições Aprendidas |
 | 2026-08-10 | Atualização da busca por assunto no X: X.search com marcador de estado vazio `empty_state_header_text`, SEARCH_BUDGET/TIMELINE_BUDGET (30/h), scope em RateLimited e fronteira @perfil/assunto em PlatformSearchTool. | Contexto Ativo, Padrões Ratificados |
+| 2026-08-31 | Implementação da busca X via GraphQL (`XGraphql`, `RefreshXQueryIdsJob`, HostRateLimiter scope graphql_search). | Contexto Ativo, Padrões Ratificados |
 
 ---
 

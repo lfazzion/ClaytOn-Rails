@@ -212,4 +212,177 @@ class Fetcher::SafeHttpClientTest < ActiveSupport::TestCase
 
     assert_requested(:get, "http://api.test/same") { |req| req.headers["Authorization"] == "Bearer token-x" }
   end
+
+  # ── Response#headers ─────────────────────────────────────────────────────────
+
+  test "Response expõe headers normalizados (minúsculos)" do
+    stub_request(:get, "http://api.test/data")
+      .to_return(
+        status: 200,
+        body: '{"data": "ok"}',
+        headers: {
+          "Content-Type" => "application/json",
+          "X-RateLimit-Limit" => "100",
+          "X-RateLimit-Remaining" => "99",
+          "Cache-Control" => "max-age=3600"
+        }
+      )
+
+    response = Fetcher::SafeHttpClient.get("http://api.test/data")
+
+    assert_equal "100", response.headers["x-ratelimit-limit"]
+    assert_equal "99", response.headers["x-ratelimit-remaining"]
+    assert_equal "max-age=3600", response.headers["cache-control"]
+    assert_equal "application/json", response.headers["content-type"]
+  end
+
+  test "Response#headers preserva primeiro valor em múltiplos cabeçalhos" do
+    stub_request(:get, "http://api.test/multi")
+      .to_return(
+        status: 200,
+        body: "ok",
+        headers: { "Set-Cookie" => ["cookie1=val1", "cookie2=val2"] }
+      )
+
+    response = Fetcher::SafeHttpClient.get("http://api.test/multi")
+
+    assert_equal "cookie1=val1", response.headers["set-cookie"]
+  end
+
+  test "Response#headers é Hash" do
+    stub_request(:get, "http://simple.test/").to_return(status: 200, body: "ok")
+
+    response = Fetcher::SafeHttpClient.get("http://simple.test/")
+
+    assert_instance_of Hash, response.headers
+  end
+
+  # ── SafeHttpClient.post ───────────────────────────────────────────────────────
+
+  test "POST JSON envia body e content-type" do
+    stub_request(:post, "http://api.test/query")
+      .to_return(
+        status: 200,
+        body: '{"data": "resultado"}',
+        headers: { "Content-Type" => "application/json" }
+      )
+
+    Fetcher::SafeHttpClient.post(
+      "http://api.test/query",
+      json: { query: "search term" },
+      headers: { "Authorization" => "Bearer my-token" }
+    )
+
+    assert_requested(:post, "http://api.test/query") do |req|
+      assert_equal "application/json", req.headers["Content-Type"]
+      assert_equal "Bearer my-token", req.headers["Authorization"]
+      assert_equal '{"query":"search term"}', req.body
+    end
+  end
+
+  test "POST JSON com headers extras" do
+    stub_request(:post, "http://api.test/graphql")
+      .to_return(
+        status: 200,
+        body: '{ "data": { "user": { "name": "João" } } }',
+        headers: {
+          "Content-Type" => "application/json",
+          "X-Request-ID" => "abc-123"
+        }
+      )
+
+    response = Fetcher::SafeHttpClient.post(
+      "http://api.test/graphql",
+      json: { operationName: "GetUser", query: "{ user { name } }" },
+      headers: { "Authorization" => "Bearer jwt-token" }
+    )
+
+    assert_equal 200, response.status
+    assert_equal "abc-123", response.headers["x-request-id"]
+    assert_includes response.body, "João"
+  end
+
+  test "POST com bearer em redirect cross-origin remove auth" do
+    stub_request(:post, "http://api.test/redirect")
+      .to_return(status: 302, headers: { "Location" => "http://outro.test/final" })
+    stub_request(:post, "http://outro.test/final")
+      .to_return(status: 200, body: "ok")
+
+    Fetcher::SafeHttpClient.post(
+      "http://api.test/redirect",
+      json: { sensitive: "data" },
+      headers: { "Authorization" => "Bearer secret" }
+    )
+
+    assert_requested(:post, "http://api.test/redirect") do |req|
+      req.headers["Authorization"] == "Bearer secret"
+    end
+
+    assert_requested(:post, "http://outro.test/final") do |req|
+      req.headers["Authorization"].nil?
+    end
+  end
+
+  test "POST responde com headers da resposta" do
+    stub_request(:post, "http://api.test/mutate")
+      .to_return(
+        status: 201,
+        body: '{"id": "123"}',
+        headers: {
+          "Content-Type" => "application/json",
+          "X-RateLimit-Reset" => "1609459200",
+          "Location" => "https://api.test/resource/123"
+        }
+      )
+
+    response = Fetcher::SafeHttpClient.post(
+      "http://api.test/mutate",
+      json: { input: "test" }
+    )
+
+    assert_equal 201, response.status
+    assert_equal "application/json", response.content_type
+    assert_equal "1609459200", response.headers["x-ratelimit-reset"]
+    assert_equal "https://api.test/resource/123", response.headers["location"]
+  end
+
+  test "POST preserva tetos de bytes" do
+    stub_request(:post, "http://large.test/big")
+      .to_return(
+        status: 200,
+        body: "x" * (Fetcher::SafeHttpClient::MAX_COMPRESSED_BYTES + 1),
+        headers: { "Content-Type" => "application/json" }
+      )
+
+    assert_raises(Fetcher::SafeHttpClient::BodyTooLarge) do
+      Fetcher::SafeHttpClient.post(
+        "http://large.test/big",
+        json: { data: "x" * 1000 }
+      )
+    end
+  end
+
+  test "POST preserva timeout personalizado" do
+    stub_request(:post, "http://api.test/slow").to_return(status: 200, body: "ok")
+
+    response = Fetcher::SafeHttpClient.post(
+      "http://api.test/slow",
+      json: { test: true },
+      total_timeout: 5
+    )
+
+    assert_equal 200, response.status
+  end
+
+  test "POST com body vazio" do
+    stub_request(:post, "http://api.test/empty")
+      .to_return(status: 200, body: "", headers: { "Content-Type" => "application/json" })
+
+    response = Fetcher::SafeHttpClient.post(
+      "http://api.test/empty",
+      json: nil
+    )
+
+    assert_equal 200, response.status
+  end
 end

@@ -68,3 +68,7 @@ production:
     class: Last30DaysDigestJob
     queue: default
     schedule: at 8am every tuesday and friday
+  refresh_x_query_ids_job:
+    class: RefreshXQueryIdsJob
+    queue: default
+    schedule: every 6 hours
