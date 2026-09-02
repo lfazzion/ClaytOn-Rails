@@ -148,7 +148,11 @@ class WebSearchTool < ToolBase
   end
 
   def self.pending_backoff_ms(origin)
-    level = Rails.cache.read(backoff_key(origin))
+    level = begin
+      Rails.cache.read(backoff_key(origin))
+    rescue StandardError
+      nil
+    end
     return nil if level.nil?
 
     levels = backoff_levels
