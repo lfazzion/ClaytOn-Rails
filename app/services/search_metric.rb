@@ -8,13 +8,13 @@ require "logger"
 # cada busca EXECUTADA (não cache hit). Saída = arquivo dedicado para o rake
 # `search:report` parsear sem grep manual no log da app.
 #
-# Contrato do brief (D5-F8):
+# Contrato do brief (D5-F8 / L1 02/09/2026):
 #   - Cada busca real escreve 1 linha:
 #       "[WebSearchMetric] {<json canônico>}"
 #   - JSON tem os campos: ts (ISO8601), origin, provider, type, query_len,
 #     results_count, latency_ms, from_cache=false, source (searxng/router),
 #     engine, trust_primary, trust_ugc, trust_unknown, unresponsive_count,
-#     cost_usd, error.
+#     cost_usd, jitter_ms, backoff_ms, error.
 #   - Cache hit NÃO escreve linha (brief literal: "em cada busca executada
 #     (nao cache hit)").
 #
@@ -29,9 +29,8 @@ require "logger"
 # (o brief diz: cache hit não emite) — o helper rejeita `from_cache: true`
 # como salvaguarda.
 class SearchMetric
-  # Versão do contrato JSON. Se algum dia o formato precisar mudar,
-  # bump para 2 e atualizar o parser do rake com co-existência.
-  SCHEMA_VERSION = 1
+  # Versão do contrato JSON (bump para 2 na Missão L1 — campos jitter_ms e backoff_ms).
+  SCHEMA_VERSION = 2
 
   class << self
     # Atacha um logger que escreve no IO (StringIO em teste, File em prod).
@@ -62,6 +61,8 @@ class SearchMetric
     # @param trust_ugc [Integer] qtd de itens com trust :ugc.
     # @param trust_unknown [Integer] qtd de itens com trust :unknown.
     # @param unresponsive_count [Integer] qtd de engines caídas.
+    # @param jitter_ms [Integer] tempo real de espera de jitter aplicado.
+    # @param backoff_ms [Integer] tempo de cooldown aplicado ou pulado.
     # @param error [String, nil] código de erro (nil = sucesso).
     # @param from_cache [Boolean] SEMPRE false. `true` é rejeitado (defesa).
     def record(
@@ -78,6 +79,8 @@ class SearchMetric
       trust_ugc: 0,
       trust_unknown: 0,
       unresponsive_count: 0,
+      jitter_ms: 0,
+      backoff_ms: 0,
       error: nil,
       from_cache: false
     )
@@ -98,6 +101,8 @@ class SearchMetric
         trust_ugc: trust_ugc,
         trust_unknown: trust_unknown,
         unresponsive_count: unresponsive_count,
+        jitter_ms: jitter_ms,
+        backoff_ms: backoff_ms,
         error: error
       )
 
@@ -128,7 +133,7 @@ class SearchMetric
       origin:, provider:, type:, query_len:, results_count:,
       latency_ms:, source:, engine:, cost_usd:,
       trust_primary:, trust_ugc:, trust_unknown:,
-      unresponsive_count:, error:
+      unresponsive_count:, jitter_ms:, backoff_ms:, error:
     )
       {
         v: SCHEMA_VERSION,
@@ -146,6 +151,8 @@ class SearchMetric
         trust_ugc: trust_ugc.to_i,
         trust_unknown: trust_unknown.to_i,
         unresponsive_count: unresponsive_count.to_i,
+        jitter_ms: jitter_ms.to_i,
+        backoff_ms: backoff_ms.to_i,
         from_cache: false,
         error: error
       }.compact

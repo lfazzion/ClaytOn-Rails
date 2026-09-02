@@ -66,6 +66,131 @@ class WebSearchTool < ToolBase
   # fluxo legado (cascata padrão sem specialty).
   PROVIDERS_PAGOS = %i[tavily exa linkup].freeze
 
+  # ── Jitter e Backoff (L1 02/09/2026) ──────────────────────────────────────
+  DEFAULT_JITTER_MS_MIN       = 250
+  DEFAULT_JITTER_MS_MAX       = 800
+  DEFAULT_JITTER_TURN_CAP_MS  = 4000
+  DEFAULT_BACKOFF_MAX_MS      = 30000
+  DEFAULT_BACKOFF_CLAMP_MS    = 8000
+  DEFAULT_BACKOFF_LEVELS      = [5000, 15000, 30000].freeze
+  BLOCK_SIGNAL_PATTERN        = /captcha|too many requests|403|429/i
+  # L1-R1C: HTTP do próprio SearXNG (não das engines internas) que também
+  # indica bloqueio — chega com payload nil (ver `fetch`), então precisa de
+  # canal próprio em vez do regex acima (que roda sobre texto de mensagem).
+  BLOCKED_HTTP_STATUSES       = [403, 429].freeze
+
+  def self.jitter_ms_min
+    ENV.fetch("SEARXNG_JITTER_MS_MIN", DEFAULT_JITTER_MS_MIN).to_i
+  end
+
+  def self.jitter_ms_max
+    ENV.fetch("SEARXNG_JITTER_MS_MAX", DEFAULT_JITTER_MS_MAX).to_i
+  end
+
+  def self.jitter_turn_cap_ms
+    ENV.fetch("SEARXNG_JITTER_TURN_CAP_MS", DEFAULT_JITTER_TURN_CAP_MS).to_i
+  end
+
+  def self.backoff_max_ms
+    ENV.fetch("SEARXNG_BACKOFF_MAX_MS", DEFAULT_BACKOFF_MAX_MS).to_i
+  end
+
+  def self.backoff_clamp_ms
+    ENV.fetch("SEARXNG_BACKOFF_CLAMP_MS", DEFAULT_BACKOFF_CLAMP_MS).to_i
+  end
+
+  def self.backoff_levels
+    max_ms = backoff_max_ms
+    DEFAULT_BACKOFF_LEVELS.map { |level| [level, max_ms].min }
+  end
+
+  def self.jitter_draw
+    min = jitter_ms_min
+    max = jitter_ms_max
+    return 0 if max <= 0
+    return min if min >= max
+
+    rand(min..max)
+  end
+
+  def self.active_scope_key(scope_key = nil)
+    scope_key || Thread.current[:cleitin_conversation_scope_key] || :_default
+  end
+
+  def self.searxng_turn_counts
+    Thread.current[:cleitin_searxng_turn_counts] ||= Hash.new(0)
+  end
+
+  def self.searxng_jitter_totals
+    Thread.current[:cleitin_searxng_jitter_totals] ||= Hash.new(0)
+  end
+
+  def self.reset_searxng_turn_state!(scope_key = nil)
+    if scope_key
+      searxng_turn_counts[scope_key] = 0
+      searxng_jitter_totals[scope_key] = 0
+    else
+      key = Thread.current[:cleitin_conversation_scope_key]
+      if key
+        searxng_turn_counts[key] = 0
+        searxng_jitter_totals[key] = 0
+      else
+        Thread.current[:cleitin_searxng_turn_counts] = Hash.new(0)
+        Thread.current[:cleitin_searxng_jitter_totals] = Hash.new(0)
+      end
+      searxng_turn_counts[:_default] = 0
+      searxng_jitter_totals[:_default] = 0
+    end
+  end
+
+  def self.backoff_key(origin)
+    "searxng_backoff:#{origin || :default}"
+  end
+
+  def self.pending_backoff_ms(origin)
+    level = begin
+      Rails.cache.read(backoff_key(origin))
+    rescue StandardError
+      nil
+    end
+    return nil if level.nil?
+
+    levels = backoff_levels
+    idx = [level.to_i, levels.size - 1].min
+    levels[idx]
+  end
+
+  def self.searxng_block_signal?(payload, http_status: nil)
+    return true if BLOCKED_HTTP_STATUSES.include?(http_status)
+    return false if payload.nil?
+    return true if payload[:searxng_blocked] == true
+
+    results = payload[:results] || []
+    unresponsive = payload[:unresponsive] || []
+
+    return true if results.empty? && unresponsive.any?
+
+    # L1-R1C: o regex tem que rodar sobre a MENSAGEM real do erro (ex.:
+    # "Suspended: too many requests"), não sobre o nome da engine
+    # ("brave") — `unresponsive_reasons` carrega o texto, `unresponsive`
+    # só o nome.
+    (payload[:unresponsive_reasons] || []).any? { |reason| reason.to_s.match?(BLOCK_SIGNAL_PATTERN) }
+  end
+
+  def self.register_backoff_outcome!(origin, payload, http_status: nil)
+    key = backoff_key(origin)
+    if searxng_block_signal?(payload, http_status: http_status)
+      current_level = Rails.cache.read(key)
+      levels = backoff_levels
+      next_level = current_level.nil? ? 0 : [current_level.to_i + 1, levels.size - 1].min
+      Rails.cache.write(key, next_level, expires_in: 1.hour)
+    else
+      Rails.cache.delete(key)
+    end
+  rescue StandardError => e
+    Rails.logger.warn("[WebSearchTool] register_backoff_outcome! falhou: #{e.message}")
+  end
+
   # Mapeia `type` da chamada para o provider preferencial.
   # `nil` para ausente/"auto"/valor fora do enum (defensivo: modelo pode
   # inventar valor). O WebSearchTool trata nil como fluxo atual.
@@ -74,9 +199,9 @@ class WebSearchTool < ToolBase
   end
 
   # Sem este parametro o SearXNG busca so em `general`, e metade dos engines
-  # registrados mora em `it` (stackoverflow, github, askubuntu, superuser,
+  # registrados mora em `it` (stackoverflow, github,askubuntu, superuser,
   # hackernews, mdn, npm, crates.io, docker hub) ou `science` (arxiv, pubmed).
-  # Eles estavam no catalogo e nunca disparavam — o mesmo tipo de buraco calado
+  # Eles estavam no catalogo e nunca disparavam— o mesmo tipo de buraco calado
   # que deixou `google` na lista por meses sem existir de fato.
   # Medido em 05/08/2026, query "ActiveRecord ConnectionNotEstablished":
   # `general` -> 13 resultados de 2 engines; `general,it` -> 24 de 5 engines.
@@ -97,6 +222,33 @@ class WebSearchTool < ToolBase
   # pagas (Linkup/Exa/Tavily). Queries com esses operadores NÃO devem gastar cota
   # no fallback externo quando o SearXNG falhar.
   PLATFORM_FALLBACK_BLOCK_PATTERN = /(?:\A|\s)(?:site:)?(?:www\.)?(?:reddit\.com|x\.com|twitter\.com)(?:\/[^\s]*)?(?:\s|$)/i
+
+  def perform_wait(ms)
+    return if ms.nil? || ms <= 0
+
+    sleep(ms / 1000.0)
+  end
+
+  def apply_searxng_jitter!(scope_key = nil)
+    key = self.class.active_scope_key(scope_key)
+    count = self.class.searxng_turn_counts[key] || 0
+    self.class.searxng_turn_counts[key] = count + 1
+
+    return 0 if count == 0
+
+    accumulated = self.class.searxng_jitter_totals[key] || 0
+    cap = self.class.jitter_turn_cap_ms
+    remaining = [cap - accumulated, 0].max
+    return 0 if remaining <= 0
+
+    draw = self.class.jitter_draw
+    wait_ms = [draw, remaining].min
+    if wait_ms > 0
+      perform_wait(wait_ms)
+      self.class.searxng_jitter_totals[key] = accumulated + wait_ms
+    end
+    wait_ms
+  end
 
   def run(query:, limit: 5, time_range: nil, type: nil)
     q = query.to_s.strip
@@ -170,8 +322,34 @@ class WebSearchTool < ToolBase
     # definido uma vez aqui para que latency cubra SearXNG+fallback (a
     # busca completa, não só um hop).
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    begin
+
+    jitter_ms = 0
+    backoff_ms = 0
+    skipped_searxng = false
+
+    # L1 (02/09/2026): Verifica backoff pendente antes de tentar SearXNG
+    pending_backoff = self.class.pending_backoff_ms(origin)
+    clamp_limit_ms = self.class.backoff_clamp_ms
+
+    if pending_backoff && pending_backoff > 0
+      if pending_backoff > clamp_limit_ms
+        # CLAMP: cooldown pendente > 8s -> pula SearXNG direto para o fallback pago
+        skipped_searxng = true
+        backoff_ms = pending_backoff
+        jitter_ms = 0
+        payload = nil
+      else
+        perform_wait(pending_backoff)
+        backoff_ms = pending_backoff
+      end
+    end
+
+    # L1: Se não pulou SearXNG, aplica jitter e faz fetch local
+    unless skipped_searxng
+      jitter_ms = apply_searxng_jitter!
       payload = fetch(q, limit, tr)
+      self.class.register_backoff_outcome!(origin, payload, http_status: @last_http_status)
+    end
 
     # F2: type=code (provider=searxng) ou qualquer provedor que não esteja na
     # cascata paga → NUNCA gasta API paga no fallback. SearXNG falhou =
@@ -190,7 +368,8 @@ class WebSearchTool < ToolBase
           latency_ms: elapsed_ms(nil, started_at),
           unresponsive_count: (payload && payload[:unresponsive] || []).size,
           error: "teto_por_turno",
-          type: resolved_type, provider: provider, origin: origin
+          type: resolved_type, provider: provider, origin: origin,
+          jitter_ms: jitter_ms, backoff_ms: backoff_ms
         )
         return error("teto de buscas pagas atingido neste turno (#{SearchApiRouter.paid_search_limit})")
       end
@@ -227,7 +406,8 @@ class WebSearchTool < ToolBase
           q: q, results: fallback_results, source: "router",
           cost_usd: fallback[:cost], latency_ms: elapsed_ms(fallback, started_at),
           unresponsive_count: (payload && payload[:unresponsive] || []).size,
-          error: nil, type: resolved_type, provider: provider, origin: origin
+          error: nil, type: resolved_type, provider: provider, origin: origin,
+          jitter_ms: jitter_ms, backoff_ms: backoff_ms
         )
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end
@@ -244,7 +424,8 @@ class WebSearchTool < ToolBase
           latency_ms: elapsed_ms(nil, started_at),
           unresponsive_count: (payload && payload[:unresponsive] || []).size,
           error: "teto_por_turno",
-          type: resolved_type, provider: provider, origin: origin
+          type: resolved_type, provider: provider, origin: origin,
+          jitter_ms: jitter_ms, backoff_ms: backoff_ms
         )
         return error("teto de buscas pagas atingido neste turno (#{SearchApiRouter.paid_search_limit})")
       end
@@ -278,7 +459,8 @@ class WebSearchTool < ToolBase
           cost_usd: fallback[:cost], latency_ms: elapsed_ms(fallback, started_at),
           unresponsive_count: (payload && payload[:unresponsive] || []).size,
           error: nil, type: resolved_type,
-          provider: fallback[:engine], origin: origin
+          provider: fallback[:engine], origin: origin,
+          jitter_ms: jitter_ms, backoff_ms: backoff_ms
         )
         return success(fallback_results).merge(unresponsive: payload && payload[:unresponsive])
       end
@@ -286,24 +468,13 @@ class WebSearchTool < ToolBase
 
     # fetch nil → "busca indisponível" (e erro original preservado se o router
     # também falhou — não dereferenciamos o nil do fallback acima).
-    # F5a: HTTP disparado contra SearXNG (gastou) e router também não
-    # respondeu (ou não foi tentado por regra). Decisão D4 do brief:
-    # "HTTP disparado = gastou, incrementa".
-    # D2-F5a-v8: este é o ÚNICO caminho em que o incremento vive aqui — payload
-    # nil é o único caso em que o fluxo morre antes de chegar aos returns
-    # específicos abaixo. Todos os outros caminhos pós-fetch já têm o próprio
-    # incremento no return de saída (linhas 285/312/323/341), e o
-    # `if payload.nil?` que vinha logo abaixo era a salvaguarda para não
-    # dereferenciar nil. O incremento anterior era INCONDICIONAL e batia
-    # também nos outros caminhos, dobrando a contagem.
     if payload.nil?
-      # F8: busca executou (HTTP saiu, SearXNG falhou, router tentou ou
-      # não) → erro terminal "busca indisponível".
       record_search_metric!(
         q: q, results: nil, source: "searxng", cost_usd: nil,
         latency_ms: elapsed_ms(nil, started_at),
         unresponsive_count: 0, error: "indisponivel",
-        type: resolved_type, provider: provider, origin: origin
+        type: resolved_type, provider: provider, origin: origin,
+        jitter_ms: jitter_ms, backoff_ms: backoff_ms
       )
       return error("busca indisponível")
     end
@@ -318,50 +489,29 @@ class WebSearchTool < ToolBase
       if unreachable.any?
         Rails.logger.warn "[WebSearchTool] busca sem resultados com engines fora do ar: #{unreachable.join(', ')}"
 
-        # Aqui chegamos só quando o fallback externo também falhou (ou não há
-        # chave). Mantém o erro original do SearXNG; o router já foi tentado.
-        # F5a: HTTP disparado e fallback tentado (gastou) → incrementa.
-        # Decisão D4: "HTTP disparado = gastou, incrementa".
-        # F8: métrica da busca que voltou vazia com engines caídas.
-        # `results=nil` no helper para a contagem ficar 0 (sem itens para
-        # trust). O provider efetivo da cascata não foi achado — usamos
-        # o `provider` local (nil em type=auto, ou :tavily/:exa/:linkup
-        # em type=news/entity/etc.) e marcamos como "router" para a
-        # tabela do report separar SearXNG vs pago.
         record_search_metric!(
           q: q, results: nil, source: "router", cost_usd: nil,
           latency_ms: elapsed_ms(nil, started_at),
           unresponsive_count: unreachable.size, error: "nao_aconteceu",
-          type: resolved_type, provider: provider, origin: origin
+          type: resolved_type, provider: provider, origin: origin,
+          jitter_ms: jitter_ms, backoff_ms: backoff_ms
         )
         return error("busca não aconteceu: engines fora do ar (#{unreachable.join(', ')}) e nenhum " \
                      "resultado devolvido — tente de novo em alguns minutos")
       end
 
-      # F3c: vazio do SearXNG sem engine caída → debounce vazio de 60s
-      # (TTL curto, fixo). NÃO passa pelo SearchApiCache.write — este
-      # rejeita `[]` por contrato (item 5 do brief: "não cachear vazio
-      # (buscar de novo custa cota mas evita servir 'não existe'
-      # congelado)"). A gravação direta aqui serve só para absorver rajada
-      # do mesmo turno, não para servir cacheamento durável. A key inclui
-      # type+provider para não colidir com o cache de conteúdo principal.
-      # F3c fail-open (D1-F3c-v5): mesmo padrão do read acima. Se o store
-      # explodir aqui, NÃO derruba — o debounce vazio é absorvedor de rajada
-      # do mesmo turno; falhar em gravar só significa que a próxima rajada
-      # re-busca (aceitável). Lado oposto do SearchApiCache que tem envelope.
       begin
         Rails.cache.write(empty_cache_key(q, limit, tr, resolved_type, provider),
                           [], expires_in: EMPTY_CACHE_TTL)
       rescue StandardError => e
         Rails.logger.warn("[WebSearchTool] debounce write falhou: #{e.class}: #{e.message}")
       end
-      # F8: métrica da busca vazia SEM engine caída (SearXNG respondeu
-      # limpo com `[]`). source=searxng, cost=nil.
       record_search_metric!(
         q: q, results: nil, source: "searxng", cost_usd: nil,
         latency_ms: elapsed_ms(nil, started_at),
         unresponsive_count: 0, error: nil,
-        type: resolved_type, provider: provider, origin: origin
+        type: resolved_type, provider: provider, origin: origin,
+        jitter_ms: jitter_ms, backoff_ms: backoff_ms
       )
       return success([]).merge(unresponsive: unreachable)
     end
@@ -370,72 +520,43 @@ class WebSearchTool < ToolBase
     if verdict.poisoned?
       Rails.logger.warn "[WebSearchTool] busca envenenada para #{q.inspect}: " \
                         "#{verdict.approved.size}/#{verdict.judged_count} aprovados"
-      # F8: métrica da busca envenenada — SearXNG respondeu, mas a guarda
-      # de relevância reprovou. results_count reflete os APROVADOS pela
-      # guarda (zero quando poisoned), e error carrega o motivo.
       record_search_metric!(
         q: q, results: verdict.approved, source: "searxng", cost_usd: nil,
         latency_ms: elapsed_ms(nil, started_at),
         unresponsive_count: 0, error: "irrelevantes",
-        type: resolved_type, provider: provider, origin: origin
+        type: resolved_type, provider: provider, origin: origin,
+        jitter_ms: jitter_ms, backoff_ms: backoff_ms
       )
       return error("resultados irrelevantes: só #{verdict.approved.size} de #{verdict.judged_count} " \
                    "resultados cobriram os termos de #{q.inspect} — o buscador respondeu outra pergunta, " \
                    "reformule a query")
     end
 
-    # Resultados do SearXNG aprovados pela guarda. (Os resultados do fallback
-    # externo NÃO passam pelo RelevanceGuard — ver comentário no SearchApiRouter
-    # e no retorno de fallback acima: as APIs ranqueiam por relevância própria.)
     data = verdict.approved.first(limit)
-    # F7 (plano-fase2 31/08/2026): classificador `trust` no resultado do
-    # SearXNG local também. O router já adiciona via `normalize_results`, mas
-    # o SearXNG é o caminho comum — sem esta linha, metade dos resultados
-    # chegaria ao modelo sem o selo. `ensure_trust!` é no-op em item já
-    # rotulado (defesa em profundidade).
     data = data.map { |r| ensure_trust!(r) }
-    # F3c: TTL via SearchApiCache — news=600s, factual=10800s, entity/academic
-    # =86400s, code/auto=900s; time_range aperta nunca alarga (plano-fase2 D2).
     SearchApiCache.write(query: q, limit: limit, time_range: tr,
                          type: resolved_type, provider: provider,
                          payload: data)
-    # F8: métrica do caminho principal OK (SearXNG direto, sem fallback).
-    # O `engine` é o do 1º resultado — representativo do que efetivamente
-    # serviu (SearXNG devolve múltiplos engines mas só 1º entra na métrica).
     record_search_metric!(
       q: q, results: data, source: "searxng", cost_usd: nil,
       latency_ms: elapsed_ms(nil, started_at),
       unresponsive_count: unreachable.size, error: nil,
       type: resolved_type, provider: provider, origin: origin,
-      engine: data.first && data.first[:engine]
+      engine: data.first && data.first[:engine],
+      jitter_ms: jitter_ms, backoff_ms: backoff_ms
     )
     success(data).merge(unresponsive: unreachable)
-    end
   end
 
   private
 
-  # F8 (plano-fase2 D7, 31/08/2026): helper que consolida a emissão da
+  # F8 (plano-fase2 D7, 31/08/2026 / L1 02/09/2026): helper que consolida a emissão da
   # métrica. Chamado em cada return pós-fetch. É o ÚNICO ponto do tool que
   # fala com `SearchMetric` (defesa em profundidade — mudanças no schema
   # da métrica ficam isoladas aqui).
-  #
-  # @param q [String] query (para query_len).
-  # @param results [Array<Hash>, nil] lista de itens para trust counts;
-  #   nil → contagens 0 (busca vazia/erro).
-  # @param source [String] "searxng" ou "router".
-  # @param cost_usd [Numeric, nil] custo da API paga (nil SearXNG).
-  # @param latency_ms [Integer] latência total da busca.
-  # @param unresponsive_count [Integer] nº de engines caídas.
-  # @param error [String, nil] código do erro (nil=sucesso).
-  # @param type [String] tipo resolvido (news/factual/...).
-  # @param provider [Symbol, String, nil] provider efetivo (:tavily/:exa/
-  #   :linkup/:searxng/nil para type=auto sem fallback).
-  # @param origin [Symbol, nil] :discord/:mcp/nil.
-  # @param engine [String, nil] engine do 1º resultado (opcional, default "").
   def record_search_metric!(q:, results:, source:, cost_usd:, latency_ms:,
                             unresponsive_count:, error:, type:, provider:,
-                            origin:, engine: "")
+                            origin:, engine: "", jitter_ms: 0, backoff_ms: 0)
     primary, ugc, unknown = trust_counts(results)
     SearchMetric.record(
       origin: origin,
@@ -451,13 +572,12 @@ class WebSearchTool < ToolBase
       trust_ugc: ugc,
       trust_unknown: unknown,
       unresponsive_count: unresponsive_count,
+      jitter_ms: jitter_ms,
+      backoff_ms: backoff_ms,
       error: error
     )
   end
 
-  # F8: contagem de trust por nível. `nil` (sem resultados) → tudo zero.
-  # Usa o classificador canônico `SearchApiRouter.trust_for` (única fonte
-  # do classificador por host, plano-fase2 D6).
   def trust_counts(results)
     return [0, 0, 0] if results.nil?
 
@@ -469,8 +589,6 @@ class WebSearchTool < ToolBase
     [counts[:primary], counts[:ugc], counts[:unknown]]
   end
 
-  # F8: latência do run em ms. `fetch_started_at` é capturado antes do
-  # `begin` (linha ~210) e cobre SearXNG+fallback (busca completa).
   def elapsed_ms(_fallback_unused, started_at)
     ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000).round
   end
@@ -479,8 +597,6 @@ class WebSearchTool < ToolBase
     query.to_s.match?(PLATFORM_FALLBACK_BLOCK_PATTERN)
   end
 
-  # Chave do debounce vazio (60s). Separada da chave do SearchApiCache
-  # porque este cache é só debounce, não cacheamento de conteúdo.
   def empty_cache_key(query, limit, time_range, resolved_type, provider)
     payload = "#{query}|#{limit}|#{time_range}|#{resolved_type}|#{provider}"
     "web_search_empty:#{Digest::SHA256.hexdigest(payload)}"
@@ -490,14 +606,12 @@ class WebSearchTool < ToolBase
     query.to_s.match?(OPERATOR_PATTERN) ? NARROW_CATEGORIES : CATEGORIES
   end
 
-  # A guarda julga uma janela maior que o `limit` porque o lixo costuma vir empilhado no
-  # topo (era o caso do bing): olhar só os 5 primeiros faria a fração de aprovados medir
-  # o próprio envenenamento em vez de detectá-lo. O piso de 10 vale para limit pequeno.
   def guard_window(limit)
     [limit * 2, 10].max
   end
 
   def fetch(query, limit, time_range)
+    @last_http_status = nil
     uri = URI(BASE_URL)
     params = { q: query, format: "json", safesearch: 1, language: "pt-BR", categories: categories_for(query) }
     params[:time_range] = time_range if time_range
@@ -513,6 +627,7 @@ class WebSearchTool < ToolBase
 
     response = http.request(req)
     unless response.is_a?(Net::HTTPSuccess)
+      @last_http_status = response.code.to_i
       Rails.logger.warn "[WebSearchTool] HTTP #{response.code}"
       return nil
     end
@@ -527,14 +642,12 @@ class WebSearchTool < ToolBase
       }
     end
 
-    { results: results, unresponsive: unresponsive_names(body) }
+    { results: results, unresponsive: unresponsive_names(body), unresponsive_reasons: unresponsive_reasons(body) }
   rescue StandardError => e
     Rails.logger.error "[WebSearchTool] #{e.class}: #{e.message}"
     nil
   end
 
-  # O SearXNG serializa cada engine caída como par ["nome", "motivo"]; versões antigas
-  # mandam só a string. Aceita as duas formas para não perder o sinal num upgrade.
   def unresponsive_names(body)
     Array(body["unresponsive_engines"]).filter_map do |entry|
       name = entry.is_a?(Array) ? entry.first : entry
@@ -542,63 +655,28 @@ class WebSearchTool < ToolBase
     end.reject(&:empty?).uniq
   end
 
-  # F7 (plano-fase2 31/08/2026): aplica `trust` no item se ainda não tiver.
-  # Idempotente — quando o router já normalizou o item, o `:trust` está lá
-  # e o helper é no-op. Quando o item vem cru (SearXNG direto, stub de
-  # teste, ou bypass futuro), calcula pelo host da URL. Cobre os 3 caminhos
-  # (SearXNG, specialty fallback, cascata padrão) sem custo extra no comum.
+  # L1-R1C: mensagem real do erro por engine (ex.: "Suspended: too many
+  # requests"), separada do nome — `searxng_block_signal?` roda o regex
+  # aqui, nunca em cima do nome da engine.
+  def unresponsive_reasons(body)
+    Array(body["unresponsive_engines"]).filter_map do |entry|
+      entry.is_a?(Array) ? entry[1].to_s.strip : nil
+    end.reject(&:empty?)
+  end
+
   def ensure_trust!(item)
     return item if item.is_a?(Hash) && item.key?(:trust)
 
     item.merge(trust: SearchApiRouter.trust_for(item[:url]))
   end
 
-  # Guarda lexical de relevância — Ruby puro, sem rede e sem modelo.
-  #
-  # Motivo: em 05/08/2026 a query "reddit ruby performance" voltou com páginas de login do
-  # Roblox e cartas Pokémon (bug conhecido do bing, issue #4964 do SearXNG) e a tool as
-  # devolveu com status de sucesso — o bot respondeu com confiança sobre a coisa errada.
-  # O bing já saiu do conjunto de engines, mas nada no código sabia separar bom de lixo.
   class RelevanceGuard
-    # Fração dos termos significativos da query que precisa aparecer em título+snippet.
-    # 0.3 aceita 1 de 3 termos (0.33): numa query de 3 palavras, um resultado que cita
-    # apenas "ruby" ainda pode ser a resposta certa. Derrubar resultado bom é pior que
-    # deixar passar um mediano — o teto de qualidade quem dá é a fração agregada abaixo.
     RELEVANCE_FLOOR = 0.3
-
-    # Abaixo desta fração de aprovados a busca INTEIRA é considerada envenenada. No caso
-    # medido do Roblox a fração era 0 (nenhum dos 5 primeiros citava qualquer termo);
-    # 0.25 fica bem acima disso e ainda deixa passar a busca em que só 1 de 4 casou.
     MIN_APPROVED_RATIO = 0.25
-
-    # Com menos de 3 resultados não há amostra para julgar envenenamento — a fração vira
-    # 0 ou 1 pelo acaso de um único item. Nesse caso a guarda se cala e devolve tudo:
-    # derrubar o único resultado da busca custa mais do que o lixo que ela evitaria.
     MIN_RESULTS_TO_JUDGE = 3
-
-    # Query de um termo só é tudo-ou-nada: 1 termo ausente = score 0 = busca reprovada.
-    # "bitcoin" respondida por "Cotação do BTC hoje" seria descartada. Com menos de 2
-    # termos significativos a guarda desliga.
     MIN_QUERY_TERMS = 2
-
-    # Termo curto casa só por igualdade; de 4 caracteres em diante vale prefixo COMPARTILHADO.
-    # Prefixo estrito (uma palavra começar com a outra) não cobre flexão portuguesa: "eleicao"
-    # não é prefixo de "eleicoes" — o plural de -ção diverge no meio da palavra — e "ganhou"
-    # não casa com "ganha". Medido ao vivo em 05/08/2026 contra o SearXNG desta máquina: na
-    # query "quem ganhou a eleicao na Argentina" a manchete correta em 1º lugar (G1, "Partido
-    # de Milei ... vence eleições legislativas na Argentina") ficava com 1 de 4 termos (0.25),
-    # abaixo do piso, e era descartada; numa das coletas só 2 de 10 passaram e a busca INTEIRA
-    # virou erro. O prefixo compartilhado casa "eleicao"/"eleicoes", "ganhou"/"ganha" e
-    # "cache"/"caching", e continua não casando "reddit"/"roblox" nem "performance"/"platform"
-    # (o caso Roblox segue reprovado).
     PREFIX_MATCH_MIN_CHARS = 4
-
-    # O prefixo comum também precisa cobrir a maior parte da palavra mais curta, senão
-    # "eleicao" casaria com "eleitoral" (4 de 7 é pouco: 4 < 0.6 * 7).
     SHARED_PREFIX_MIN_RATIO = 0.6
-
-    # Termo de 1-2 letras não discrimina nada ("no", "os", "ia") e infla o denominador.
-    # Exceção para quem tem dígito: "5g", "4k", "gpt5" são termos de busca de verdade.
     TERM_MIN_CHARS = 3
 
     STOPWORDS = %w[
@@ -620,8 +698,6 @@ class WebSearchTool < ToolBase
 
     def judge(items)
       unless judgeable?(items.size)
-        # Métrica não medida é nil, nunca 0: um 0.0 aqui seria lido pelo modelo como
-        # "resultado irrelevante", quando o que houve foi guarda desligada.
         return Verdict.new(approved: items.map { |i| i.merge(relevance: nil) },
                            judged_count: items.size, poisoned: false)
       end
@@ -633,10 +709,6 @@ class WebSearchTool < ToolBase
                   poisoned: approved.size.to_f / scored.size < MIN_APPROVED_RATIO)
     end
 
-    # Acento é obrigatório aqui: as queries são em português e o título do resultado pode
-    # vir sem acento (ou o contrário). NFD separa a marca diacrítica da letra base, e o
-    # gsub de \p{Mn} a remove. O split por [^a-z0-9] também zera título em alfabeto não
-    # latino — que foi exatamente um dos lixos medidos (resultado em chinês).
     def self.tokenize(text)
       text.to_s
           .unicode_normalize(:nfd)
@@ -646,10 +718,6 @@ class WebSearchTool < ToolBase
           .reject(&:empty?)
     end
 
-    # Operador de domínio só conta como operador COM os dois-pontos — o mesmo
-    # critério de `categories_for` (linhas 42-45 prometem uso simétrico da
-    # lista). Palavra solta "site"/"inurl" numa query é termo de busca; derrubá-la
-    # aqui sem estreitar a categoria faria a guarda julgar com um termo a menos.
     def self.significant_terms(query)
       operadores = query.to_s.match?(OPERATOR_PATTERN) ? DOMAIN_OPERATORS : []
       tokenize(query).uniq.reject do |term|
@@ -665,8 +733,6 @@ class WebSearchTool < ToolBase
       @terms.size >= MIN_QUERY_TERMS && sample_size >= MIN_RESULTS_TO_JUDGE
     end
 
-    # Pontua o snippet JÁ truncado em 400 chars, que é exatamente o texto que o modelo vai
-    # ler. Julgar um texto maior que o entregue aprovaria resultado por evidência invisível.
     def score(item)
       doc = self.class.tokenize("#{item[:title]} #{item[:content]}")
       hits = @terms.count { |term| doc.any? { |word| match?(term, word) } }

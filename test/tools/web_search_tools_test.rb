@@ -8,6 +8,7 @@ class WebSearchToolsTest < ActiveSupport::TestCase
   setup do
     Rails.cache.clear
     SearchApiRouter.reset_paid_search_count!
+    WebSearchTool.reset_searxng_turn_state!
   end
 
   teardown do
@@ -565,6 +566,135 @@ class WebSearchToolsTest < ActiveSupport::TestCase
     ensure
       Thread.current[:cleitin_origin] = nil
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # L1 (02/09/2026) — Jitter/backoff do SearXNG (protege de rajada/CAPTCHA)
+  # ---------------------------------------------------------------------------
+
+  test "primeira busca do turno não aplica jitter nem espera" do
+    stub_search([{ "title" => "T", "url" => "https://x", "content" => "c", "engine" => "e" }])
+    WebSearchTool.any_instance.expects(:perform_wait).never
+    SearchMetric.expects(:record).with(has_entries(jitter_ms: 0, backoff_ms: 0)).once
+
+    result = WebSearchTool.new.execute(query: "primeira busca jitter")
+    assert_equal :success, result[:status]
+  end
+
+  test "jitter entre a 1a e a 2a busca do mesmo turno fica entre 250 e 800ms" do
+    stub_search([{ "title" => "T", "url" => "https://x", "content" => "c", "engine" => "e" }])
+    waits = []
+    WebSearchTool.any_instance.stubs(:perform_wait).with do |ms|
+      waits << ms
+      true
+    end
+
+    WebSearchTool.new.execute(query: "jitter busca um")
+    WebSearchTool.new.execute(query: "jitter busca dois")
+
+    assert_equal 1, waits.size, "só a 2a busca do turno deve esperar jitter"
+    assert_operator waits.first, :>=, WebSearchTool.jitter_ms_min
+    assert_operator waits.first, :<=, WebSearchTool.jitter_ms_max
+  end
+
+  test "cap acumulado de 4s por turno para de esperar jitter após o teto" do
+    WebSearchTool.stubs(:jitter_draw).returns(800)
+    WebSearchTool.any_instance.stubs(:perform_wait)
+    tool = WebSearchTool.new
+
+    waits = 7.times.map { tool.send(:apply_searxng_jitter!) }
+
+    # 1a busca: 0 (grátis). 2a-6a: 800 cada (soma chega a 4000 = teto). 7a: teto
+    # estourado, não espera mais.
+    assert_equal [0, 800, 800, 800, 800, 800, 0], waits
+  end
+
+  test "backoff cresce 5s -> 15s -> 30s a cada sinal de bloqueio consecutivo, depois trava no teto" do
+    origin = nil
+    blocked_payload = { results: [], unresponsive: ["brave"], searxng_blocked: false }
+
+    levels = 4.times.map do
+      WebSearchTool.send(:register_backoff_outcome!, origin, blocked_payload)
+      WebSearchTool.send(:pending_backoff_ms, origin)
+    end
+
+    assert_equal [5000, 15000, 30000, 30000], levels
+  end
+
+  test "backoff reseta ao nível zero quando a busca volta limpa (sem sinal de bloqueio)" do
+    origin = nil
+    blocked_payload = { results: [], unresponsive: ["brave"], searxng_blocked: false }
+    clean_payload = { results: [{ title: "T" }], unresponsive: [], searxng_blocked: false }
+
+    WebSearchTool.send(:register_backoff_outcome!, origin, blocked_payload)
+    assert_equal 5000, WebSearchTool.send(:pending_backoff_ms, origin)
+
+    WebSearchTool.send(:register_backoff_outcome!, origin, clean_payload)
+    assert_nil WebSearchTool.send(:pending_backoff_ms, origin)
+  end
+
+  test "clamp: cooldown pendente > 8s pula o searxng e vai direto ao fallback pago" do
+    stub_paid_fetch_success
+    key = WebSearchTool.send(:backoff_key, nil)
+    Rails.cache.write(key, 1) # nível 1 = 15000ms > clamp 8000ms
+
+    searxng_stub = stub_request(:get, /searxng:8080\/search/)
+    SearchMetric.expects(:record).with(has_entries(backoff_ms: 15_000, jitter_ms: 0)).once
+
+    result = WebSearchTool.new.execute(query: "clamp de backoff")
+
+    assert_equal :success, result[:status]
+    assert_not_requested searxng_stub
+  end
+
+  test "captcha em mensagem de engine com resultados dispara backoff" do
+    stub_search(REDDIT_RUBY_BONS, unresponsive: [["brave", "Blocked: captcha challenge"]])
+
+    result = WebSearchTool.new.execute(query: "reddit ruby performance")
+
+    assert_equal :success, result[:status], "resultados ainda vêm — o sinal de bloqueio não deve virar erro"
+    assert_equal 5000, WebSearchTool.send(:pending_backoff_ms, nil),
+                 "mensagem de captcha na engine deve armar o backoff mesmo com resultados"
+  end
+
+  test "HTTP 429 do SearXNG registra backoff" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 429)
+
+    WebSearchTool.new.execute(query: "http 429 backoff")
+
+    assert_equal 5000, WebSearchTool.send(:pending_backoff_ms, nil),
+                 "HTTP 429 do proprio SearXNG (payload nil) deve armar o backoff"
+  end
+
+  test "ENV min>max degrada sem excecao" do
+    ENV["SEARXNG_JITTER_MS_MIN"] = "900"
+    ENV["SEARXNG_JITTER_MS_MAX"] = "800"
+    begin
+      assert_equal 900, WebSearchTool.jitter_draw
+    ensure
+      ENV.delete("SEARXNG_JITTER_MS_MIN")
+      ENV.delete("SEARXNG_JITTER_MS_MAX")
+    end
+  end
+
+  test "backoff_max baixo clampa todos os niveis" do
+    ENV["SEARXNG_BACKOFF_MAX_MS"] = "3000"
+    begin
+      assert_equal [3000, 3000, 3000], WebSearchTool.backoff_levels
+    ensure
+      ENV.delete("SEARXNG_BACKOFF_MAX_MS")
+    end
+  end
+
+  test "fallback pago não recebe jitter/backoff extra além do já aplicado no lado searxng" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    WebSearchTool.any_instance.expects(:perform_wait).once.with do |ms|
+      ms.between?(WebSearchTool.jitter_ms_min, WebSearchTool.jitter_ms_max)
+    end
+
+    2.times { |i| WebSearchTool.new.execute(query: "paga sem jitter extra #{i}") }
   end
 
 end
