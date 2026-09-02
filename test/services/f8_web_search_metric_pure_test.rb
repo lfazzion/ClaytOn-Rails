@@ -69,6 +69,10 @@ unless Rails.respond_to?(:cache) && Rails.cache
         @data[key] = value
       end
 
+      def delete(key)
+        @data.delete(key)
+      end
+
       def clear
         @data.clear
       end
@@ -125,6 +129,7 @@ class F8WebSearchMetricPureTest < Minitest::Test
 
   def setup
     Rails.cache.clear if Rails.respond_to?(:cache) && Rails.cache.respond_to?(:clear)
+    WebSearchTool.reset_searxng_turn_state!
     @original_call = SearchApiRouter.singleton_class.instance_method(:call)
     @saved_env = SEARCH_API_ENVS.to_h { |k| [k, ENV[k]] }
     SEARCH_API_ENVS.each { |k| ENV.delete(k) }
@@ -250,5 +255,36 @@ class F8WebSearchMetricPureTest < Minitest::Test
     assert_equal "router", metric["source"],   "fallback → source=router"
     assert_equal 2,        metric["cost_usd"], "Tavily expôs usage.credits=2"
     assert_equal 1,        metric["results_count"]
+  end
+
+  # ── L1 (02/09/2026): jitter_ms/backoff_ms no F8 (SCHEMA_VERSION 1->2) ──────
+  def test_metrica_schema_v2_carrega_jitter_ms_e_backoff_ms
+    with_fetch({
+      results: [{ title: "S", url: "https://s.com", content: "c", engine: "ddg" }],
+      unresponsive: []
+    })
+
+    res = @tool.run(query: "rails")
+    assert_equal :success, res[:status]
+
+    metric = parse_metric(metric_lines.first)
+    assert_equal 2, metric["v"], "SCHEMA_VERSION deve subir de 1 para 2"
+    assert_equal 0, metric["jitter_ms"], "1a busca do turno: jitter_ms=0"
+    assert_equal 0, metric["backoff_ms"], "sem sinal de bloqueio prévio: backoff_ms=0"
+  end
+
+  def test_search_metric_record_aceita_jitter_ms_backoff_ms_explicitos_sem_quebrar_leitores_antigos
+    SearchMetric.record(
+      origin: nil, provider: nil, type: "auto", query_len: 5, results_count: 1,
+      latency_ms: 10, source: "searxng", jitter_ms: 321, backoff_ms: 5000
+    )
+
+    metric = parse_metric(metric_lines.first)
+    assert_equal 321,  metric["jitter_ms"]
+    assert_equal 5000, metric["backoff_ms"]
+    # Campos do contrato v1 continuam presentes e no formato de sempre —
+    # bump de schema é aditivo, não quebra leitor antigo.
+    assert_equal "auto", metric["type"]
+    assert_equal false,  metric["from_cache"]
   end
 end

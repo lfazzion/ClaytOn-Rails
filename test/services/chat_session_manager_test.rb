@@ -529,10 +529,22 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_not SearchApiRouter.paid_search_limit_reached?(@scope.key)
   end
 
+  test "ask reseta estado de jitter no inicio do turno novo" do
+    stub_chat("resposta")
+    WebSearchTool.reset_searxng_turn_state!(@scope.key)
+    WebSearchTool.searxng_turn_counts[@scope.key] = 3
+    WebSearchTool.searxng_jitter_totals[@scope.key] = 999
+
+    ChatSessionManager.ask(scope: @scope, content: "oi bot", user_id: "101", username: "joao")
+
+    assert_equal 0, WebSearchTool.searxng_turn_counts[@scope.key]
+    assert_equal 0, WebSearchTool.searxng_jitter_totals[@scope.key]
+  end
+
   test "reset! fecha conversa ativa e preserva histórico da antiga" do
     # F5a foi removida (teto morreu), mas a invariante de reset! continua:
     # conversa antiga fica com active=false e count preservado; nova ask
-    # abre row nova。
+    # abre row nova.
     antiga = Conversation.open_for(scope: @scope.key, channel_id: @scope.channel_id, user_id: @scope.user_id)
     antiga.update!(web_search_count: 5)
 

@@ -77,6 +77,9 @@ class ChatSessionManager
         # O teto de buscas pagas vale para Discord e MCP (MCP não pula mais).
         Thread.current[:cleitin_conversation_scope_key] = scope.key
         SearchApiRouter.reset_paid_search_count!(scope.key)
+        # L1-R1C: zera jitter/backoff acumulados do SearXNG no início do turno —
+        # sem isto o cooldown de um turno anterior vazava para o próximo.
+        WebSearchTool.reset_searxng_turn_state!(scope.key)
         inicio = Time.now
         Rails.logger.info "[ChatSessionManager] Iniciando ask — " \
                           "scope=#{scope.key} user=#{user_id} " \
@@ -138,6 +141,7 @@ class ChatSessionManager
           # padrão defensivo das outras chaves.
           Thread.current[:cleitin_conversation_scope_key] = nil
           SearchApiRouter.reset_paid_search_count!(scope.key)
+          WebSearchTool.reset_searxng_turn_state!(scope.key)
         end
       end
     end

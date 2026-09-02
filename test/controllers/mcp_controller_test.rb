@@ -150,6 +150,18 @@ class McpControllerTest < ActionDispatch::IntegrationTest
     assert_includes JSON.parse(response.body).dig("result", "tools").map { |t| t["name"] }, "web_search"
   end
 
+  test "handle MCP reseta jitter" do
+    WebSearchTool.reset_searxng_turn_state!
+    WebSearchTool.searxng_turn_counts[:_default] = 3
+    WebSearchTool.searxng_jitter_totals[:_default] = 999
+
+    post "/mcp", params: { jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }.to_json, headers: headers
+    assert_response :success
+
+    assert_equal 0, WebSearchTool.searxng_turn_counts[:_default]
+    assert_equal 0, WebSearchTool.searxng_jitter_totals[:_default]
+  end
+
   test "dois handles MCP seguidos na mesma thread: o segundo comeca com contador zerado" do
     SearchApiRouter.reset_paid_search_count!
     SearchApiRouter.increment_paid_search_count!

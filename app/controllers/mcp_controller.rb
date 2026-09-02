@@ -24,6 +24,10 @@ class McpController < ActionController::API
     # MESMA thread do servidor (Puma com thread-pool reutiliza).
     Thread.current[:cleitin_origin] = :mcp
     SearchApiRouter.reset_paid_search_count!
+    # L1-R1C: mesmo reset de jitter/backoff do ChatSessionManager#ask — o MCP
+    # é o outro entrypoint que executa WebSearchTool e não pode herdar o
+    # cooldown de uma chamada anterior na mesma thread do Puma.
+    WebSearchTool.reset_searxng_turn_state!
     status, headers, corpo = McpServer.app.call(request.env)
     texto = +""
     corpo.each { |pedaco| texto << pedaco }
