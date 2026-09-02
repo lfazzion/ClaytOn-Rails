@@ -24,6 +24,10 @@ class SearchApiRouterTest < ActiveSupport::TestCase
     @saved_env = SEARCH_API_ENVS.to_h { |k| [k, ENV[k]] }
     # Sem chaves por padrão → router desligado; cada teste liga a que precisa.
     SEARCH_API_ENVS.each { |key| ENV.delete(key) }
+    # Teto por turno é Thread.current — sem reset aqui, o contador vaza entre
+    # testes desta classe (ex.: um teste que consome 10 deixaria os seguintes
+    # já barrados).
+    SearchApiRouter.reset_paid_search_count!
   end
 
   teardown do
@@ -323,6 +327,92 @@ class SearchApiRouterTest < ActiveSupport::TestCase
     assert_equal :mcp, captured.last, "thread=:mcp: WebSearchTool deve passar :mcp"
   ensure
     Thread.current[:cleitin_origin] = nil
+  end
+
+  # ---------------------------------------------------------------------------
+  # Teto de buscas pagas por turno
+  # ---------------------------------------------------------------------------
+
+  test "SearchApiRouter.paid_search_limit default e 10 e configuravel via ENV" do
+    assert_equal 10, SearchApiRouter.paid_search_limit
+    ENV["PAID_SEARCH_PER_TURN_LIMIT"] = "5"
+    assert_equal 5, SearchApiRouter.paid_search_limit
+  ensure
+    ENV.delete("PAID_SEARCH_PER_TURN_LIMIT")
+  end
+
+  test "SearchApiRouter gerencia contador por turno no Thread.current" do
+    SearchApiRouter.reset_paid_search_count!
+    assert_equal 0, SearchApiRouter.paid_search_count
+    assert_not SearchApiRouter.paid_search_limit_reached?
+
+    SearchApiRouter.increment_paid_search_count!
+    assert_equal 1, SearchApiRouter.paid_search_count
+
+    SearchApiRouter.reset_paid_search_count!
+    assert_equal 0, SearchApiRouter.paid_search_count
+  end
+
+  test "SearchApiRouter isola contador de buscas pagas por escopo/conversa" do
+    SearchApiRouter.reset_paid_search_count!("scope_a")
+    SearchApiRouter.reset_paid_search_count!("scope_b")
+
+    5.times { SearchApiRouter.increment_paid_search_count!("scope_a") }
+    assert_equal 5, SearchApiRouter.paid_search_count("scope_a")
+    assert_equal 0, SearchApiRouter.paid_search_count("scope_b")
+
+    3.times { SearchApiRouter.increment_paid_search_count!("scope_b") }
+    assert_equal 3, SearchApiRouter.paid_search_count("scope_b")
+
+    # Testando teto por escopo
+    5.times { SearchApiRouter.increment_paid_search_count!("scope_a") }
+    assert SearchApiRouter.paid_search_limit_reached?("scope_a")
+    assert_not SearchApiRouter.paid_search_limit_reached?("scope_b")
+
+    # Reset de um escopo não afeta o outro
+    SearchApiRouter.reset_paid_search_count!("scope_a")
+    assert_equal 0, SearchApiRouter.paid_search_count("scope_a")
+    assert_equal 3, SearchApiRouter.paid_search_count("scope_b")
+  end
+
+  test "SearchApiRouter.call bloqueia e retorna nil quando teto doturno foi atingido" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    SearchApiRouter.reset_paid_search_count!
+    10.times { SearchApiRouter.increment_paid_search_count! }
+    assert SearchApiRouter.paid_search_limit_reached?
+
+    # Não deve nem tentar http_post
+    SearchApiRouter.expects(:http_post).never
+    out = SearchApiRouter.call(query: "rails")
+    assert_nil out
+  ensure
+    SearchApiRouter.reset_paid_search_count!
+  end
+
+  test "SearchApiRouter.call com limite N: a N-esima chamada executa fetch e a N+1-esima e barrada" do
+    ENV["LINKUP_API_KEY"] = "lk"
+    SearchApiRouter.reset_paid_search_count!
+    ENV["PAID_SEARCH_PER_TURN_LIMIT"] = "3"
+    begin
+      SearchApiRouter.expects(:http_post).times(3).returns(
+        { ok: true, body: { "results" => [{ "name" => "R", "url" => "https://r.com", "content" => "c" }] },
+          reason: nil, retryable: false }
+      )
+
+      3.times do |i|
+        res = SearchApiRouter.call(query: "query #{i}")
+        assert_not_nil res, "Chamada #{i + 1} deveria ter executado e retornado resultado"
+      end
+
+      assert_equal 3, SearchApiRouter.paid_search_count
+      assert SearchApiRouter.paid_search_limit_reached?
+
+      res4 = SearchApiRouter.call(query: "query 4")
+      assert_nil res4
+    ensure
+      ENV.delete("PAID_SEARCH_PER_TURN_LIMIT")
+      SearchApiRouter.reset_paid_search_count!
+    end
   end
 
   private

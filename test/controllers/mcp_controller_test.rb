@@ -149,4 +149,15 @@ class McpControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_includes JSON.parse(response.body).dig("result", "tools").map { |t| t["name"] }, "web_search"
   end
+
+  test "dois handles MCP seguidos na mesma thread: o segundo comeca com contador zerado" do
+    SearchApiRouter.reset_paid_search_count!
+    SearchApiRouter.increment_paid_search_count!
+    assert_equal 1, SearchApiRouter.paid_search_count
+
+    post "/mcp", params: { jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }.to_json, headers: headers
+    assert_response :success
+
+    assert_equal 0, SearchApiRouter.paid_search_count
+  end
 end

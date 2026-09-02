@@ -49,6 +49,9 @@ class SearchApiRouter
   SCORE_THRESHOLD_ENV = "SEARCH_API_SCORE_THRESHOLD"
   DEFAULT_SCORE_THRESHOLD = 0.7
 
+  DEFAULT_PAID_SEARCH_LIMIT = 10
+  PAID_SEARCH_LIMIT_ENV = "PAID_SEARCH_PER_TURN_LIMIT"
+
   # Regexes de especialidade para continuação de cascata após 200 vazio (miss).
   EXA_SPECIALTY_PATTERN = /paper|arxiv|pubmed|semelhante|o que [eé]|conceitual|machine learning|pesquisa/i
   # F4 do plano-fase2 (30/08/2026): `notícia`/`noticias`/`news`/`headline`/
@@ -109,8 +112,8 @@ class SearchApiRouter
   }.freeze
 
   # Wildcards de sufixo: a chave é o sufixo COM ponto (inicial pra end_with,
-# sem ponto inicial pra start_with), e o match é `host.start_with?(chave)`
-# OU `host.end_with?(chave)` conforme a entrada. Cobre:
+  # sem ponto inicial pra start_with), e o match é `host.start_with?(chave)`
+  # OU `host.end_with?(chave)` conforme a entrada. Cobre:
   #   `forum.alura.com.br`, `forum.example.org` — `start_with?("forum.")`
   #   `gov.br`, `www.gov.br`, `bcb.gov.br`, `gov.uk` — `end_with?(".gov*")`
   #
@@ -267,8 +270,12 @@ class SearchApiRouter
   #
   # @return [Hash, nil] { results:, engine:, cost: } em sucesso, ou nil se todas falharem.
   def self.call(query:, limit: 5, time_range: nil, today: current_date, specialty: nil, origin: nil)
+    return nil if paid_search_limit_reached?
+
     providers = ordered_providers
     return nil if providers.empty? # sem nenhuma chave → router desligado (Spec 1.d)
+
+    increment_paid_search_count!
 
     limit = clamp_limit(limit)
     tr = time_range if TIME_RANGE_DAYS.key?(time_range.to_s)
@@ -600,10 +607,10 @@ class SearchApiRouter
   end
 
   # Envelope fail-open do `rollback_quota!`. Falha ao reverter não derruba
-    # a busca; só logamos.
-    #
-    # F3b: `origin:` propaga para reverter o contador de origem certo
-    # (count_discord / count_mcp) junto com o count principal.
+  # a busca; só logamos.
+  #
+  # F3b: `origin:` propaga para reverter o contador de origem certo
+  # (count_discord / count_mcp) junto com o count principal.
   def self.rollback_quota_silently(provider, origin: nil)
     return unless defined?(SearchApiQuota) && defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
 
@@ -775,5 +782,47 @@ class SearchApiRouter
     SearchApiQuota.increment(provider.to_s, month: current_month)
   rescue StandardError => e
     Rails.logger.warn("[SearchApiRouter] erro ao incrementar cota de #{provider}: #{e.message}")
+  end
+
+  # ── Controle de teto de buscas pagas por turno ────────────────────────────
+  def self.paid_search_limit
+    val = ENV[PAID_SEARCH_LIMIT_ENV]
+    val.present? ? val.to_i : DEFAULT_PAID_SEARCH_LIMIT
+  end
+
+  def self.active_scope_key(scope_key = nil)
+    scope_key || Thread.current[:cleitin_conversation_scope_key] || :_default
+  end
+
+  def self.paid_search_counts
+    Thread.current[:cleitin_paid_search_counts] ||= Hash.new(0)
+  end
+
+  def self.paid_search_count(scope_key = nil)
+    key = active_scope_key(scope_key)
+    paid_search_counts[key] || 0
+  end
+
+  def self.paid_search_limit_reached?(scope_key = nil)
+    paid_search_count(scope_key) >= paid_search_limit
+  end
+
+  def self.increment_paid_search_count!(scope_key = nil)
+    key = active_scope_key(scope_key)
+    paid_search_counts[key] = paid_search_count(key) + 1
+  end
+
+  def self.reset_paid_search_count!(scope_key = nil)
+    if scope_key
+      paid_search_counts[scope_key] = 0
+    else
+      key = Thread.current[:cleitin_conversation_scope_key]
+      if key
+        paid_search_counts[key] = 0
+      else
+        Thread.current[:cleitin_paid_search_counts] = Hash.new(0)
+      end
+      paid_search_counts[:_default] = 0
+    end
   end
 end
