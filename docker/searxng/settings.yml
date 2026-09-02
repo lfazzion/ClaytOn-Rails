@@ -25,6 +25,11 @@ use_default_settings:
       # IP. Ampliar por aqui e estrutural: a API existe para ser usada, entao nao
       # ha corrida armamentista para perder. Medido em 05/08/2026 que todos existem
       # no catalogo da 2026.8.4 antes de serem pedidos aqui.
+      #
+      # `braveapi` entrou em 02/09/2026 por decisao do dono: a Brave passa a falar
+      # SO pela API oficial (com api_key), nunca mais scraping — `brave` (scraping)
+      # fica com `disabled: true` no bloco `engines:` abaixo.
+      - braveapi
       - hackernews
       - arxiv
       - pubmed
@@ -46,7 +51,9 @@ use_default_settings:
 #   google cse ponte adicionada pelo upstream em 04/07/2026 no lugar do `google`
 #              quebrado. Usa um CSE ID PUBLICO compartilhado por todas as
 #              instancias SearXNG do mundo — o proprio autor do patch avisa que
-#              o Google o quebra em 2027. Entra como reforco, nunca como base.
+#              o Google o quebra em 2027. Decisao do dono em 02/09/2026: entra
+#              como BASE (weight: 1.0) ao lado de ddg e brave/braveapi, apesar
+#              do risco de 2027 — reavaliar se/quando o CSE publico quebrar.
 #   ddg / ddgw na versao ANTIGA (2026.4.22) o duckduckgo dava CAPTCHA nos dois
 #              idiomas e o HTTP cru de lite/html.duckduckgo.com devolvia o
 #              formulario de anomaly.js. Na 2026.8.4 ele voltou a funcionar: o
@@ -103,14 +110,45 @@ engines:
     disabled: false
   - name: npm
     disabled: false
+  # BASE (peso alto) vs REFORCO (peso baixo) — decisao do dono em 02/09/2026:
+  # ddg, google cse e brave/braveapi seguem como base; seznam e wikipedia caem
+  # para reforco. `weight` só reordena relevancia entre engines que respondem
+  # ambos — nao substitui nem desliga nenhum.
+  - name: duckduckgo
+    weight: 1.4
+  - name: duckduckgo web
+    disabled: false
+    weight: 1.4
+  - name: google cse
+    weight: 1.0
+  # SCRAPING desligado por decisao do dono (02/09/2026): so a API oficial
+  # (braveapi, abaixo) fala com a Brave daqui em diante.
+  - name: brave
+    disabled: true
+  # Engine oficial da Brave Search API — fala API JSON, nao raspa HTML. A key
+  # real do dono NUNCA vai pro git: `!env` nao interpola nesta factory (vira
+  # literal "__BRAVE_API_KEY__" -> 401, medido), entao o placeholder abaixo e
+  # substituido em runtime por docker/searxng-runtime/gerar-settings.sh, a
+  # partir de BRAVE_API_KEY em docker/.env.searxng (arquivo real, gitignored,
+  # nunca commitado).
+  - name: braveapi
+    weight: 1.6
+    disabled: false
+    api_key: "__BRAVE_API_KEY__"
   # `!szn` isolado devolve 10 resultados relevantes; o que o derrubava era o teto
   # global de 6s sob as quatro buscas concorrentes. Timeout proprio em vez de
   # afrouxar o teto de todo mundo — os outros nao precisam de mais que 6s.
+  # weight: 0.5 — reforco (decisao do dono, 02/09/2026), nao base.
   - name: seznam
     disabled: false
+    weight: 0.5
     timeout: 10.0
-  - name: duckduckgo web
-    disabled: false
+  # weight: 0.4 — reforco (decisao do dono, 02/09/2026). `display_type` lista
+  # resultados normais alem do infobox: sem isto a factory so mostra infobox
+  # e a busca "vira" zero resultados de lista para a maioria das queries.
+  - name: wikipedia
+    weight: 0.4
+    display_type: ["infobox", "list"]
 
 server:
   secret_key: "!env SEARXNG_SECRET_KEY"

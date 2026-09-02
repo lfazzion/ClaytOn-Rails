@@ -299,7 +299,7 @@ services:
     # cole o digest aqui, suba e rode `scripts/proofs/web_search_proof.sh` —
     # upgrade de SearXNG mexe no catálogo de engines, e o `keep_only` do
     # settings.yml descarta nome inválido em SILÊNCIO.
-    image: searxng/searxng@sha256:f4c8e59de166ed71f6380c0847c312ca51f0d41996e31d0559163b6b09ecde52
+    image: searxng/searxng@sha256:8486daaebc65adacfe434be38b991cf90da92d3fd80ae9f0ab1409ba65664e28
     # env_file DEDICADO — nunca ../.env. O searxng busca e parseia HTML de sites
     # arbitrários da internet: mesma categoria de exposição do python-scraper.
     # Precisa de UMA variável (SEARXNG_SECRET_KEY, lida por `!env` no
@@ -317,6 +317,7 @@ services:
       SEARXNG_BASE_URL: "http://searxng:8080/"
     volumes:
       - ./searxng:/etc/searxng:ro
+      - ./searxng-runtime/settings.yml:/etc/searxng/settings.yml:ro
     # Publicada só no loopback: o Hermes (perfil reader) usa esta instância como
     # backend de web_search via SEARXNG_URL. Não é acessível de fora da VM.
     ports:
