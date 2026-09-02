@@ -7,6 +7,13 @@ require_relative "../../app/tools/web_search_tools"
 class WebSearchToolsTest < ActiveSupport::TestCase
   setup do
     Rails.cache.clear
+    SearchApiRouter.reset_paid_search_count!
+  end
+
+  teardown do
+    ENV.delete("LINKUP_API_KEY")
+    ENV.delete("TAVILY_API_KEY")
+    ENV.delete("EXA_API_KEY")
   end
 
   test "retorna resultados mapeados em success" do
@@ -227,6 +234,35 @@ class WebSearchToolsTest < ActiveSupport::TestCase
     )
   end
 
+  # Teto por turno agora incrementa DENTRO de SearchApiRouter.call — stubar
+  # `.call` inteiro (como antes) pula esse incremento e o gate nunca dispara.
+  # Estes helpers ligam o router de verdade (chave ENV) e stubam só o HTTP
+  # (`http_post`), deixando `call`/`attempt`/o incremento rodarem de fato.
+  def stub_paid_fetch_success(url: "https://r.com")
+    ENV["LINKUP_API_KEY"] = "lk"
+    ENV["TAVILY_API_KEY"] = "tv"
+    ENV["EXA_API_KEY"] = "ex"
+    SearchApiRouter.stubs(:http_post).returns(
+      ok: true,
+      body: { "results" => [{ "name" => "R", "title" => "R", "url" => url, "content" => "c", "text" => "c" }] },
+      reason: nil, retryable: false
+    )
+  end
+
+  def stub_paid_fetch_empty
+    ENV["LINKUP_API_KEY"] = "lk"
+    ENV["TAVILY_API_KEY"] = "tv"
+    ENV["EXA_API_KEY"] = "ex"
+    SearchApiRouter.stubs(:http_post).returns(ok: true, body: { "results" => [] }, reason: nil, retryable: false)
+  end
+
+  def stub_paid_fetch_error
+    ENV["LINKUP_API_KEY"] = "lk"
+    ENV["TAVILY_API_KEY"] = "tv"
+    ENV["EXA_API_KEY"] = "ex"
+    SearchApiRouter.stubs(:http_post).raises(StandardError.new("API timeout"))
+  end
+
   test "guarda lexical reprova a busca inteira quando os resultados são lixo (caso roblox medido)" do
     stub_search(ROBLOX_LIXO)
     result = WebSearchTool.new.execute(query: "reddit ruby performance")
@@ -384,6 +420,151 @@ class WebSearchToolsTest < ActiveSupport::TestCase
     stub_search([], unresponsive: [["brave", "Suspended: too many requests"]])
     2.times { WebSearchTool.new.execute(query: "placar do jogo de ontem") }
     assert_requested(:get, /searxng:8080\/search/, times: 2)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Teto de buscas pagas por turno (PAID_SEARCH_PER_TURN_LIMIT)
+  # ---------------------------------------------------------------------------
+
+  test "respeita teto de buscas pagas por turno (default 10) e bloqueia a 11a com erro claro" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    SearchApiRouter.reset_paid_search_count!
+
+    10.times do |i|
+      res = WebSearchTool.new.execute(query: "query paga #{i}")
+      assert_equal :success, res[:status], "Busca #{i + 1} deveria ter sucedido"
+    end
+
+    SearchApiRouter.expects(:call).never
+    res11 = WebSearchTool.new.execute(query: "query paga 11")
+    assert_equal :error, res11[:status]
+    assert_match(/teto de buscas pagas atingido neste turno \(10\)/, res11[:reason])
+  end
+
+  test "busca no SearXNG (custozero) continua permitida mesmo apos estourar teto pago" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    SearchApiRouter.stubs(:call).returns({ results: [{ title: "R", url: "https://r.com", content: "c", trust: :primary }], engine: "linkup", cost: 0.005 })
+
+    SearchApiRouter.reset_paid_search_count!
+    10.times { |i| WebSearchTool.new.execute(query: "query paga #{i}") }
+
+    stub_request(:get, /searxng:8080\/search/)
+      .with(query: hash_including(q: "searxng funciona"))
+      .to_return(
+        status: 200,
+        body: { results: [{ "title" => "T","url" => "https://ok.com", "content" => "ok" }] }.to_json,
+        headers: { "Content-Type" => "application/json" }
+      )
+
+    res = WebSearchTool.new.execute(query: "searxng funciona")
+    assert_equal :success, res[:status]
+    assert_equal "https://ok.com", res[:data].first[:url]
+  end
+
+  test "reset do turno zera o contador de buscas pagas" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    SearchApiRouter.reset_paid_search_count!
+    10.times { |i| WebSearchTool.new.execute(query: "query paga #{i}") }
+
+    res_blocked = WebSearchTool.new.execute(query: "query paga 11")
+    assert_equal :error, res_blocked[:status]
+
+    SearchApiRouter.reset_paid_search_count!
+    res_novo_turno = WebSearchTool.new.execute(query: "query novo turno")
+    assert_equal :success, res_novo_turno[:status]
+  end
+
+  test "PAID_SEARCH_PER_TURN_LIMIT customizado por ENV e respeitado" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    SearchApiRouter.reset_paid_search_count!
+    ENV["PAID_SEARCH_PER_TURN_LIMIT"] = "2"
+    begin
+      2.times { |i| assert_equal :success, WebSearchTool.new.execute(query: "query #{i}")[:status] }
+
+      res3 = WebSearchTool.new.execute(query: "query 3")
+      assert_equal :error, res3[:status]
+      assert_match(/teto de buscas pagas atingido neste turno \(2\)/, res3[:reason])
+    ensure
+      ENV.delete("PAID_SEARCH_PER_TURN_LIMIT")
+    end
+  end
+
+  test "chamada barrada por teto grava SearchMetric com error teto_por_turno" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    SearchApiRouter.reset_paid_search_count!
+    10.times { |i| WebSearchTool.new.execute(query: "query #{i}") }
+
+    SearchMetric.expects(:record).with(has_entry(error: "teto_por_turno")).once
+    res = WebSearchTool.new.execute(query: "query barrada")
+    assert_equal :error, res[:status]
+    assert_match(/teto de buscas pagas atingido neste turno \(10\)/, res[:reason])
+  end
+
+  test "chamadas pagas que retornam vazio ou erro esgotam o teto do mesmo jeito" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_empty
+
+    SearchApiRouter.reset_paid_search_count!
+    5.times do |i|
+      res = WebSearchTool.new.execute(query: "query vazia #{i}")
+      assert_equal :error, res[:status]
+    end
+
+    stub_paid_fetch_error
+    5.times do |i|
+      res = WebSearchTool.new.execute(query: "query erro #{i}")
+      assert_equal :error, res[:status]
+    end
+
+    SearchApiRouter.expects(:call).never
+    res11 = WebSearchTool.new.execute(query: "query 11 barrada")
+    assert_equal :error, res11[:status]
+    assert_match(/teto de buscas pagas atingido neste turno \(10\)/, res11[:reason])
+  end
+
+  test "teto de buscas pagas vale para specialty com provider pago explicito" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    SearchApiRouter.reset_paid_search_count!
+    10.times do |i|
+      res = WebSearchTool.new.execute(query: "noticia #{i}", type: "news")
+      assert_equal :success, res[:status]
+    end
+
+    SearchApiRouter.expects(:call).never
+    res11 = WebSearchTool.new.execute(query: "noticia 11", type: "news")
+    assert_equal :error, res11[:status]
+    assert_match(/teto de buscas pagas atingido neste turno \(10\)/, res11[:reason])
+  end
+
+  test "teto de buscas pagas vale para origem MCP" do
+    stub_request(:get, /searxng:8080\/search/).to_return(status: 500)
+    stub_paid_fetch_success
+
+    SearchApiRouter.reset_paid_search_count!
+    Thread.current[:cleitin_origin] = :mcp
+    begin
+      10.times do |i|
+        res = WebSearchTool.new.execute(query: "mcp query #{i}")
+        assert_equal :success, res[:status]
+      end
+
+      SearchApiRouter.expects(:call).never
+      res11 = WebSearchTool.new.execute(query: "mcp query 11")
+      assert_equal :error, res11[:status]
+      assert_match(/teto de buscas pagas atingido neste turno \(10\)/, res11[:reason])
+    ensure
+      Thread.current[:cleitin_origin] = nil
+    end
   end
 
 end

@@ -516,6 +516,19 @@ class ChatSessionManagerTest < ActiveSupport::TestCase
     assert_nil Thread.current[:cleitin_origin]
   end
 
+  test "ask reseta contador de buscas pagas a cada novo turno" do
+    stub_chat("resposta do primeiro turno")
+    # Simula turno anterior que atingiu o teto
+    SearchApiRouter.increment_paid_search_count!(@scope.key)
+    10.times { SearchApiRouter.increment_paid_search_count!(@scope.key) }
+    assert SearchApiRouter.paid_search_limit_reached?(@scope.key)
+
+    # Novo ask deve resetar o contador e permitir novas buscas no turno
+    ChatSessionManager.ask(scope: @scope, content: "pergunta 1", user_id: "101", username: "joao")
+    assert_equal 0, SearchApiRouter.paid_search_count(@scope.key)
+    assert_not SearchApiRouter.paid_search_limit_reached?(@scope.key)
+  end
+
   test "reset! fecha conversa ativa e preserva histórico da antiga" do
     # F5a foi removida (teto morreu), mas a invariante de reset! continua:
     # conversa antiga fica com active=false e count preservado; nova ask

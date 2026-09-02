@@ -23,6 +23,7 @@ class McpController < ActionController::API
     # ensure limpa para não vazar `:mcp` num próximo request servido pela
     # MESMA thread do servidor (Puma com thread-pool reutiliza).
     Thread.current[:cleitin_origin] = :mcp
+    SearchApiRouter.reset_paid_search_count!
     status, headers, corpo = McpServer.app.call(request.env)
     texto = +""
     corpo.each { |pedaco| texto << pedaco }

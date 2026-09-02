@@ -184,6 +184,17 @@ class WebSearchTool < ToolBase
     if !bloquear_router && pagar_api_paga &&
        !platform_query?(q) &&
        (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
+      if SearchApiRouter.paid_search_limit_reached?
+        record_search_metric!(
+          q: q, results: nil, source: "router", cost_usd: nil,
+          latency_ms: elapsed_ms(nil, started_at),
+          unresponsive_count: (payload && payload[:unresponsive] || []).size,
+          error: "teto_por_turno",
+          type: resolved_type, provider: provider, origin: origin
+        )
+        return error("teto de buscas pagas atingido neste turno (#{SearchApiRouter.paid_search_limit})")
+      end
+
       fallback = begin
         SearchApiRouter.call(query: q, limit: limit, time_range: tr, specialty: provider, origin: origin)
       rescue StandardError => e
@@ -227,6 +238,17 @@ class WebSearchTool < ToolBase
       # tipo=auto (provider nil) → fluxo legado entra abaixo.
     elsif !provider && !platform_query?(q) &&
           (payload.nil? || (payload[:results].empty? && payload[:unresponsive].any?))
+      if SearchApiRouter.paid_search_limit_reached?
+        record_search_metric!(
+          q: q, results: nil, source: "router", cost_usd: nil,
+          latency_ms: elapsed_ms(nil, started_at),
+          unresponsive_count: (payload && payload[:unresponsive] || []).size,
+          error: "teto_por_turno",
+          type: resolved_type, provider: provider, origin: origin
+        )
+        return error("teto de buscas pagas atingido neste turno (#{SearchApiRouter.paid_search_limit})")
+      end
+
       # Fluxo legado preservado: sem `type`, cascata padrão do router.
       fallback = begin
         SearchApiRouter.call(query: q, limit: limit, time_range: tr, origin: origin)

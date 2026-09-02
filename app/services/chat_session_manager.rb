@@ -71,13 +71,12 @@ class ChatSessionManager
         # existente em `profile_management_tools.rb:17`.
         Thread.current[:cleitin_origin] = :discord
         # F5a (30/08/2026): o `WebSearchTool` precisa do scope.key da conversa
-        # ativa para fazer o gate de teto (`web_search_count >= 5`). Esse
+        # ativa para isolar o contador de buscas pagas por turno/escopo. Esse
         # scope mora no `ChatSessionManager`, não chega à tool via parâmetros
         # — gravamos aqui (dentro do lock de escopo) e limpamos no ensure.
-        # MCP NÃO usa essa chave (McpController tem o próprio contexto): o
-        # `WebSearchTool` checa `:cleitin_origin` antes de tocar no contador,
-        # e o caminho MCP tem origem `:mcp`, que pula o gate (D4).
+        # O teto de buscas pagas vale para Discord e MCP (MCP não pula mais).
         Thread.current[:cleitin_conversation_scope_key] = scope.key
+        SearchApiRouter.reset_paid_search_count!(scope.key)
         inicio = Time.now
         Rails.logger.info "[ChatSessionManager] Iniciando ask — " \
                           "scope=#{scope.key} user=#{user_id} " \
@@ -138,9 +137,11 @@ class ChatSessionManager
           # a chave é por-turno do bot, então no fim do `ask` ela some — mesmo
           # padrão defensivo das outras chaves.
           Thread.current[:cleitin_conversation_scope_key] = nil
+          SearchApiRouter.reset_paid_search_count!(scope.key)
         end
       end
     end
+
     def reset!(scope)
       with_scope_lock(scope.key) do
         Conversation.active_for(scope.key)&.close!
