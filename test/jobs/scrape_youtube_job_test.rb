@@ -36,6 +36,31 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     ]
   end
 
+  # ITEM 1/3 — stuba a sessão de cookies inteira para o caminho perform.
+  # `perform` agora chama o jar de cookies DUAS vezes (extract_metadata_with_
+  # cookies e extract_videos_with_cookies), então todo teste de perform precisa
+  # de SessionCookies.for + with_netscape_file + refresh + extract_channel_
+  # metadata stubados, senão o SessionCookies real abre CDP no Chrome
+  # (chrome:9222) e o WebMock bloqueia a conexão. O `with_netscape_file`
+  # devolve, via `.returns`, a 3-tupla [videos, fallback, causa] — que é o que
+  # o helper de vídeos retorna em produção; a chamada interna de extract_
+  # videos_detailed é stubada para satisfazer o bloco (o resultado do bloco é
+  # descartado pelo `.returns`).
+  def stub_youtube_session(metadata: @metadata, videos: @videos, fallback: false, cause: nil)
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com')
+                          .returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file)
+                     .yields('/tmp/fake_cookies.txt')
+                     .returns([videos, fallback, cause])
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
+      .with('https://www.youtube.com/@test_channel', proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      .returns(metadata)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed)
+      .with('https://www.youtube.com/@test_channel', limit: 30, proxy: nil, cookies_path: '/tmp/fake_cookies.txt')
+      .returns([videos, fallback, cause])
+  end
+
   test 'should enqueue in scraping queue' do
     assert_equal 'scraping', ScrapeYoutubeJob.new.queue_name
   end
@@ -63,21 +88,18 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
   end
 
   test 'should update profile, create posts and snapshot on success with cookies' do
-    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
-    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
-    Fetcher::CookieJar.stubs(:with_netscape_file).with('youtube.com', cookies: [{ 'name' => 'SID', 'value' => '123' }]).yields('/tmp/fake_cookies.txt').returns([@videos, false])
-    Fetcher::CookieJar.expects(:refresh_from_netscape!).with { |args|
-      args[:domain] == 'youtube.com' &&
-        args[:path] == '/tmp/fake_cookies.txt' &&
-        args[:auth_cookies] == Fetcher::Channels::Youtube::AUTH_COOKIES &&
-        args[:expires_at].present?
-    }.returns(true)
+    # expects(:refresh_from_netscape!) foi removido: o stub com a mesma
+    # expectativa já existe no helper stub_youtube_session (stubs) — misturar
+    # expects após stubs no mesmo método criava o conflito apontado no r7.
+    # O contrato "jar atualizado após a coleta" segue medido nos testes de
+    # unidade dos helpers (L121, L141, L155), cada um com expects de refresh.
+    stub_youtube_session(fallback: false, cause: nil)
     ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
       'https://www.youtube.com/@test_channel',
       limit: 30,
       proxy: nil,
       cookies_path: '/tmp/fake_cookies.txt'
-    ).returns([@videos, false])
+    ).returns([@videos, false, nil])
 
     assert_difference 'SocialPost.count', 2 do
       ScrapeYoutubeJob.perform_now(@profile.id)
@@ -91,46 +113,222 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
     assert_equal 1, ProfileSnapshot.where(social_profile: @profile).count
   end
 
+  # ITEM 1 — cookie chega aos metadados: o job passou a coletar metadata pela
+  # mesma sessão de cookies do vídeo (Fetcher::SessionCookies + CookieJar), com
+  # fallback para coleta sem cookie em Fetcher::CookieJar::Expired (o alerta
+  # diz que foi por sessão expirada).
+  test 'extract_metadata_with_cookies usa a sessão de cookies e atualiza o jar após a coleta' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).with(
+      "https://www.youtube.com/@test_channel", proxy: nil, cookies_path: "/tmp/fake_meta_cookies.txt"
+    ).returns(@metadata)
+
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with("youtube.com", cookies: [{ "name" => "SID", "value" => "123" }])
+                                                   .yields("/tmp/fake_meta_cookies.txt")
+    Fetcher::CookieJar.expects(:refresh_from_netscape!).with { |args|
+      args[:domain] == "youtube.com" &&
+        args[:path] == "/tmp/fake_meta_cookies.txt" &&
+        args[:auth_cookies] == Fetcher::Channels::Youtube::AUTH_COOKIES &&
+        args[:expires_at].present?
+    }.returns(true)
+
+    result = ScrapeYoutubeJob.new.send(:extract_metadata_with_cookies, "https://www.youtube.com/@test_channel", proxy: nil)
+
+    assert_equal [@metadata, nil], result
+  end
+
+  test 'extract_metadata_with_cookies sem sessão válida cai na coleta sem cookie (Expired)' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).with(
+      "https://www.youtube.com/@test_channel", proxy: nil, cookies_path: nil
+    ).returns(@metadata)
+
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with("youtube.com", cookies: [{ "name" => "SID", "value" => "123" }])
+                                                   .raises(Fetcher::CookieJar::Expired.new("youtube.com"))
+
+    result = ScrapeYoutubeJob.new.send(:extract_metadata_with_cookies, "https://www.youtube.com/@test_channel", proxy: nil)
+
+    assert_equal [@metadata, "sessão expirada"], result
+  end
+
+  test 'extract_metadata_with_cookies propaga RateLimitError (não é fallback)' do
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields("/tmp/fake_meta_cookies.txt")
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).with(
+      "https://www.youtube.com/@test_channel", proxy: nil, cookies_path: "/tmp/fake_meta_cookies.txt"
+    ).raises(ScrapingServices::RateLimitError.new("429"))
+
+    assert_raises(ScrapingServices::RateLimitError) do
+      ScrapeYoutubeJob.new.send(:extract_metadata_with_cookies, "https://www.youtube.com/@test_channel", proxy: nil)
+    end
+  end
+
+  test 'metadata nil após sessão expirada: perfil degraded e alerta cita a sessão expirada' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).with(
+      "https://www.youtube.com/@test_channel", proxy: nil, cookies_path: "/tmp/fake_meta_cookies.txt"
+    ).raises(Fetcher::CookieJar::Expired.new("youtube.com"))
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).with(
+      "https://www.youtube.com/@test_channel", proxy: nil, cookies_path: nil
+    ).returns(nil)
+
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).with("youtube.com", cookies: [{ "name" => "SID", "value" => "123" }])
+                                                   .yields("/tmp/fake_meta_cookies.txt")
+
+    # Asserção atualizada do r7: a asserção antiga esperava a mensagem
+    # "extract_channel_metadata returned nil" porque o contrato era metadata
+    # anônima; agora o contrato item 1 é metadata via sessão de cookies e a
+    # nota da coleta sem-cookie acompanha o alerta ("sem cookies: sessão expirada").
+    # .with(string literal): a asserção antiga usava o regex /sessão expirada/
+    # porque era o único trecho conhecido da mensagem; agora a mensagem inteira
+    # é canônica e Mocha não faz matching de Regexp em argumentos.
+    ScrapingFailureAlertJob.expects(:perform_later).with(
+      "youtube",
+      @profile.id,
+      "extract_channel_metadata returned nil (sem cookies: sessão expirada)",
+      "metadata_failure"
+    )
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert @profile.collection_status.start_with?("degraded"),
+           "status deve ser degraded (obtido: #{@profile.collection_status.inspect})"
+    assert_nil @profile.last_collected_at
+  end
+
   test 'should set partial status and enqueue alert when fallback is used' do
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
     Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
-    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt').returns([@videos, true])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt').returns([@videos, true, nil])
     Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
-    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, true])
+    # Contrato r7: extract_videos_detailed devolve a 3-tupla [itens, fallback, causa];
+    # fallback=true com causa=nil (o motivo genérico "sem causa identificada").
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, true, nil])
+    # Asserção atualizada do r7: a asserção antiga esperava a mensagem
+    # 'fallback: sem dados detalhados (likes/comments nil)' porque o contrato
+    # era status opaco "partial"; agora o contrato item 3 inclui a causa no
+    # alerta e no status — com causa nil, o motivo é "sem causa identificada".
     ScrapingFailureAlertJob.expects(:perform_later).with(
       'youtube',
       @profile.id,
-      'fallback: sem dados detalhados (likes/comments nil)',
+      'fallback: sem causa identificada — sem dados detalhados (likes/comments nil)',
       'partial_collection'
     )
 
     ScrapeYoutubeJob.perform_now(@profile.id)
 
     @profile.reload
-    assert_equal 'partial', @profile.collection_status
+    # Asserção atualizada do r7: a asserção antiga esperava "partial" porque
+    # o contrato era status opaco; agora o contrato é "partial (#{motivo})".
+    assert_equal 'partial (sem causa identificada)', @profile.collection_status
     assert_not_nil @profile.last_collected_at
   end
 
+  # ITEM 3 — cada causa nomeada produz status e alerta próprios; a causa
+  # `session_rejected` vem com o fallback flat (o único que o serviço permite
+  # sem cookie), `bot_check` VEM SEM fallback (fallback=false) mas ainda marca
+  # o run parcial com o motivo; causa nil + fallback mantém a mensagem legível.
+  test 'cada causa nomeada gera status parcial com o motivo e alerta com a causa (item 3)' do
+    causes = ["bot_check", "members_only", "timeout", "network", "session_rejected", "unknown"]
+    causes.each do |cause|
+      # Limpa o estado de incidente entre execuções (AlertThrottler).
+      AlertThrottler.resolve_incident("youtube", @profile.id)
+      @profile.update!(collection_status: "success", last_collected_at: nil)
+
+      ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+      Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+      fallback = cause == "session_rejected"
+      # with_netscape_file devolve, via .returns, a 3-tupla do contrato r7
+      # (sem .returns o stub devolve nil → cause vira nil → 'success' falso).
+      Fetcher::CookieJar.stubs(:with_netscape_file).yields("/tmp/fake_cookies.txt").returns([@videos, fallback, cause])
+      Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+      ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, fallback, cause])
+      ScrapingFailureAlertJob.expects(:perform_later).with(
+        "youtube",
+        @profile.id,
+        "fallback: #{cause} — sem dados detalhados (likes/comments nil)",
+        "partial_collection"
+      ).once
+
+      ScrapeYoutubeJob.perform_now(@profile.id)
+
+      @profile.reload
+      assert_equal "partial (#{cause})", @profile.collection_status,
+                   "causa #{cause} deve marcar status partial com o motivo"
+      assert_not_nil @profile.last_collected_at
+    end
+  end
+
+  test 'fallback sem causa nomeada mantém status e alerta legíveis (motivo genérico)' do
+    AlertThrottler.resolve_incident("youtube", @profile.id)
+    @profile.update!(collection_status: "success", last_collected_at: nil)
+
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields("/tmp/fake_cookies.txt").returns([@videos, true])
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, true, nil])
+    ScrapingFailureAlertJob.expects(:perform_later).with(
+      "youtube",
+      @profile.id,
+      "fallback: sem causa identificada — sem dados detalhados (likes/comments nil)",
+      "partial_collection"
+    ).once
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal "partial (sem causa identificada)", @profile.collection_status
+    assert_not_nil @profile.last_collected_at
+  end
+
+  # Caminho feliz segue 'success' (item 3): fallback=false, causa=nil.
+  test 'caminho feliz segue success com causa nil' do
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
+    Fetcher::SessionCookies.stubs(:for).with("youtube.com").returns([[{ "name" => "SID", "value" => "123" }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields("/tmp/fake_cookies.txt").returns([@videos, false])
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_videos_detailed).returns([@videos, false, nil])
+    ScrapingFailureAlertJob.expects(:perform_later).never
+
+    ScrapeYoutubeJob.perform_now(@profile.id)
+
+    @profile.reload
+    assert_equal "success", @profile.collection_status
+  end
+
   test 'should fallback to no cookies when session expired' do
+    # Item 1: os metadados agora passam pela MESMA sessão de cookies dos vídeos
+    # (extract_metadata_with_cookies). SessionCookies.for raising Expired faz o
+    # helper de metadata cair na coleta sem-cookie (assim como o de vídeos).
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(@metadata)
     Fetcher::SessionCookies.stubs(:for).with('youtube.com').raises(Fetcher::CookieJar::Expired.new('youtube.com'))
+    # O fallback sem-cookie devolve a 3-tupla (contrato r7); causa nil →
+    # motivo genérico "sem causa identificada".
     ScrapingServices::YoutubeScraperService.expects(:extract_videos_detailed).with(
       'https://www.youtube.com/@test_channel',
       limit: 30,
       proxy: nil,
       cookies_path: nil
-    ).returns([@videos, true])
+    ).returns([@videos, true, nil])
+    # Asserção atualizada do r7: a mensagem antiga 'fallback: sem dados
+    # detalhados' era do contrato opaco; agora item 3 inclui a causa (aqui
+    # genérica, pois causa=nil) no alerta.
     ScrapingFailureAlertJob.expects(:perform_later).with(
       'youtube',
       @profile.id,
-      'fallback: sem dados detalhados (likes/comments nil)',
+      'fallback: sem causa identificada — sem dados detalhados (likes/comments nil)',
       'partial_collection'
     )
 
     ScrapeYoutubeJob.perform_now(@profile.id)
 
     @profile.reload
-    assert_equal 'partial', @profile.collection_status
+    # Asserção atualizada do r7: 'partial' (opaco) → 'partial (sem causa
+    # identificada)' — o motivo agora acompanha o status.
+    assert_equal 'partial (sem causa identificada)', @profile.collection_status
   end
 
   test 'should fallback to no cookies when extract_videos_detailed raises non-CookieJar error' do
@@ -166,7 +364,15 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
   # preservando last_collected_at nil (não houve coleta). Atualizado da expectativa
   # antiga (return silencioso) para o comportamento canônico da fusão.
   test 'should mark profile degraded, enqueue metadata_failure alert and preserve last_collected_at when metadata is nil' do
+    # Item 1: perform passa pela sessão de cookies (extract_metadata_with_cookies).
+    # Sem stub de SessionCookies.for o real abre CDP no chrome:9222 (WebMock
+    # bloqueia) antes de chegar no extract_channel_metadata stubado.
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(nil)
+    # metadata nil SEM nota de fallback (o bloco com-cookie devolveu nil, não
+    # Expired) → detail vira '' e a mensagem permanece 'returned nil'.
     ScrapingFailureAlertJob.expects(:perform_later).with(
       'youtube',
       @profile.id,
@@ -274,6 +480,16 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
   end
 
   test 'should set degraded status and enqueue ScrapingFailureAlertJob on StandardError' do
+    # Item 1: perform abre a sessão de cookies ANTES do extract_channel_metadata.
+    # Sem o stub de SessionCookies.for o real tenta CDP no chrome:9222 (o
+    # WebMock bloqueia) e o StandardError real nunca chega no teste.
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    # O StandardError (yt-dlp não encontrado) é BUG/ambiente, NÃO é
+    # recoverable-scraper: o helper extract_metadata_with_cookies NÃO rescató
+    # StandardError (só Expired + RateLimitError), então sobe até o
+    # rescue StandardError de perform, que marca 'degraded' + alerta scrape_error.
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).raises(StandardError.new('yt-dlp not found'))
     ScrapingFailureAlertJob.expects(:perform_later).with('youtube', @profile.id, 'yt-dlp not found', 'scrape_error')
 
@@ -286,6 +502,12 @@ class ScrapeYoutubeJobTest < ActiveJob::TestCase
   end
 
   test 'should set rate_limited status and blocked_until on RateLimitError' do
+    # Item 1: mesmo pré-requisito — abrir a sessão antes do metadata.
+    Fetcher::SessionCookies.stubs(:for).with('youtube.com').returns([[{ 'name' => 'SID', 'value' => '123' }], :jar])
+    Fetcher::CookieJar.stubs(:with_netscape_file).yields('/tmp/fake_cookies.txt')
+    Fetcher::CookieJar.stubs(:refresh_from_netscape!).returns(true)
+    # O helper de metadata PROPAGA o RateLimitError (rescue...raise), e o
+    # perform rescatá-lo em rate_limited + blocked_until (retry com backoff).
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).raises(ScrapingServices::RateLimitError.new('429'))
 
     ScrapeYoutubeJob.perform_now(@profile.id)

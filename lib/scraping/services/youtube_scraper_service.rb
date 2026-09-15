@@ -7,8 +7,15 @@ require 'timeout'
 module ScrapingServices
   class YoutubeScraperService
     class << self
-      def extract_channel_metadata(channel_url, proxy: nil, timeout: 240)
-        command = build_metadata_command(channel_url, proxy)
+      # Cliente do player do YouTube para o extrator.
+      #
+      # Escolha: `mweb`. Motivo: em datacenter, `web`/`web_embedded` caem com
+      # bloqueio de bot/PO Token; `mweb` é o mais tolerante para sessão com
+      # cookies em headless/VM. O canário mede se esta escolha altera o
+      # resultado na VM do maestro.
+      PLAYER_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=mweb"].freeze
+      def extract_channel_metadata(channel_url, proxy: nil, timeout: 240, cookies_path: nil)
+        command = build_metadata_command(channel_url, proxy, cookies_path: cookies_path)
         output, _, status = execute_yt_dlp(command, timeout: timeout)
 
         return nil unless status.success? && output.strip.present?
@@ -32,10 +39,29 @@ module ScrapingServices
         videos_limit, shorts_limit = split_limits(limit)
 
         videos_cmd = build_videos_command(channel_url, videos_limit, proxy, cookies_path: cookies_path)
-        videos_output, _, videos_status = execute_yt_dlp(videos_cmd)
+        videos_output, videos_stderr, videos_status = execute_yt_dlp(videos_cmd)
+        videos_cause = classify_failure_cause(videos_stderr, '') unless videos_status.success? && videos_output.strip.present?
 
         unless videos_status.success? && videos_output.strip.present?
-          return [extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path), true]
+          fallback_allowed = videos_cause&.first == "session_rejected"
+          unless fallback_allowed
+            # Item 4: bot_check/members_only/timeout/network/unknown NÃO caem
+            # em coleta sem-cookie (sem cookie o bloqueio só piora; devolvemos
+            # o run parcial nomeado). Só session_rejected tem permissão.
+            cause, = videos_cause || ["unknown"]
+            return [[], false, cause]
+          end
+
+          # session_rejected: fallback flat-playlist SEM cookie (o cookie que
+          # falhou não serve). Chamada ÚNICA com o limit integral: o
+          # extract_videos_flat aplica o split 2/3-1/3 internamente nas duas
+          # abas. Chamar por "metade" (videos_limit/shorts_limit) duplicava o
+          # /videos e cortava o /shorts (medido: limit 2 devolvia [fv1, fv1],
+          # sem nenhum short).
+          flat_videos = extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: nil)
+
+          cause, = videos_cause
+          return [flat_videos, true, cause]
         end
 
         shorts_output = ''
@@ -51,14 +77,14 @@ module ScrapingServices
         # não entram no run. Só a falha do /videos (tratada acima) derruba
         # para o caminho flat.
         unless shorts_ok
-          Rails.logger.warn "[YoutubeScraperService] Aba /shorts sem dados detalhados; seguindo apenas com /videos"
-          return [parse_video_list(videos_output), false]
+          Rails.logger.warn '[YoutubeScraperService] Aba /shorts sem dados detalhados; seguindo apenas com /videos'
+          return [parse_video_list(videos_output), false, nil]
         end
 
-        [parse_video_list(videos_output) + parse_video_list(shorts_output), false]
+        [parse_video_list(videos_output) + parse_video_list(shorts_output), false, nil]
       rescue StandardError => e
         Rails.logger.error "[YoutubeScraperService] Erro ao extrair videos detalhados: #{e.message}"
-        [extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path), true]
+        [extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path), true, 'unknown']
       end
 
       # Soma o total de vídeos do canal pelas abas /videos, /shorts e /streams.
@@ -120,11 +146,7 @@ module ScrapingServices
         "#{url}#{separator}#{params}"
       end
 
-      def build_metadata_command(channel_url, proxy)
-        # --playlist-items 0: não itera nenhum vídeo, mas o yt-dlp ainda parseia
-        # a página do canal e retorna o objeto-pai com channel_follower_count,
-        # channel_id, description, etc. Mais confiável que --flat-playlist --playlist-items 1
-        # que retornava campos do primeiro vídeo (com os campos do canal como null).
+      def build_metadata_command(channel_url, proxy, cookies_path: nil)
         cmd = [
           "yt-dlp",
           "--skip-download",
@@ -132,7 +154,9 @@ module ScrapingServices
           "--playlist-items", "0",
           localize(channel_url)
         ]
+        cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
+        cmd += PLAYER_CLIENT_ARGS
         cmd
       end
 
@@ -149,6 +173,7 @@ module ScrapingServices
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
+        cmd += PLAYER_CLIENT_ARGS
         cmd << videos_url
         cmd
       end
@@ -166,6 +191,7 @@ module ScrapingServices
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
+        cmd += PLAYER_CLIENT_ARGS
         cmd << videos_url
         cmd
       end
@@ -186,6 +212,7 @@ module ScrapingServices
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
+        cmd += PLAYER_CLIENT_ARGS
         cmd << shorts_url
         cmd
       end
@@ -203,6 +230,7 @@ module ScrapingServices
         ]
         cmd += ["--cookies", cookies_path] if cookies_path.present?
         cmd += ["--proxy", proxy] if proxy.present?
+        cmd += PLAYER_CLIENT_ARGS
         cmd << shorts_url
         cmd
       end
@@ -257,6 +285,29 @@ module ScrapingServices
         return message if message.length <= STDERR_LOG_LIMIT
 
         "#{message[0, STDERR_LOG_LIMIT]}... [truncado, #{message.length} chars]"
+      end
+
+      def classify_failure_cause(stderr, stdout)
+        message = [stderr, stdout].compact.join("\n").downcase
+
+        cause = if message =~ /sign in to confirm/i || message.include?("bot")
+                  "bot_check"
+                elsif message.include?("member-only") || message.include?("members only")
+                  "members_only"
+                elsif message.include?("timed out") || message.include?("timeout")
+                  "timeout"
+                elsif message.include?("connection reset") || message.include?("network") ||
+                      message.include?("unreachable") || message.include?("resolve host")
+                  "network"
+                elsif message.include?("cookies are no longer valid") || message.include?("session rejected") ||
+                      message.include?("auth_token")
+                  "session_rejected"
+                else
+                  "unknown"
+                end
+
+        no_cookie_fallback = cause == "session_rejected"
+        [cause, { no_cookie_fallback_allowed?: no_cookie_fallback }]
       end
 
       def parse_metadata(data)

@@ -53,13 +53,21 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     ScrapingServices::YoutubeScraperService.stubs(:build_videos_command).returns(['yt-dlp', 'detailed'])
     ScrapingServices::YoutubeScraperService.stubs(:build_videos_flat_command).returns(['yt-dlp', 'flat'])
 
-    ScrapingServices::YoutubeScraperService.stubs(:execute_yt_dlp).with(['yt-dlp', 'detailed']).returns(['', 'Sign in to confirm', fake_fail_status])
+    # Asserção atualizada do r7: a asserção antiga injetava "Sign in to
+    # confirm" (bot_check) e esperava o flat executado, porque o contrato era
+    # "qualquer falha → flat". No item 4 o bot_check NUNCA cai no flat; a
+    # única causa que libera o fallback sem-cookie é session_rejected, então
+    # a mensagem injetada passa a "cookies are no longer valid" para o teste
+    # continuar medindo a MESMA invariante (detalhado falhou → cai no flat,
+    # fallback=true) — a mudança é na mensagem de gatilho, não na asserção.
+    ScrapingServices::YoutubeScraperService.stubs(:execute_yt_dlp).with(['yt-dlp', 'detailed']).returns(['', 'cookies are no longer valid', fake_fail_status])
     ScrapingServices::YoutubeScraperService.stubs(:execute_yt_dlp).with(['yt-dlp', 'flat']).returns([flat_output, '', fake_success_status])
 
-    videos, fallback = ScrapingServices::YoutubeScraperService.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 1)
+    videos, fallback, cause = ScrapingServices::YoutubeScraperService.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 1)
 
     assert_equal 1, videos.size
     assert fallback, 'fallback deve ser true quando caminho detalhado falha'
+    assert_equal 'session_rejected', cause, 'a causa nomeada acompanha o fallback'
   end
 
   test 'parse_metadata extrai subscriber_count de channel_follower_count' do
@@ -264,15 +272,21 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     svc.stubs(:build_shorts_command).returns(['yt-dlp', 'sdetail'])
     svc.stubs(:build_videos_flat_command).returns(['yt-dlp', 'vflat'])
     svc.stubs(:build_shorts_flat_command).returns(['yt-dlp', 'sflat'])
-    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'vdetail']).returns(['', 'err', fake_fail])
-    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'sdetail']).returns(['', 'err', fake_fail])
+    # Asserção atualizada do r7: a asserção antiga injetava stderr "err"
+    # (unknown) e esperava o flat, porque o contrato era "qualquer falha →
+    # flat". No item 4 só session_rejected PERMITE o fallback sem-cookie,
+    # então a mensagem vira a de sessão rejeitada para continuar medindo o
+    # caminho flat em ambas as abas.
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'vdetail']).returns(['', 'cookies are no longer valid', fake_fail])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'sdetail']).returns(['', 'cookies are no longer valid', fake_fail])
     svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'vflat']).returns([flat_videos_json, '', fake_ok])
     svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'sflat']).returns([flat_shorts_json, '', fake_ok])
 
-    videos, fallback = svc.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 2)
+    videos, fallback, cause = svc.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 2)
 
     assert_equal 2, videos.size
     assert fallback
+    assert_equal 'session_rejected', cause
     assert_equal 'video', videos[0][:post_type]
     assert_equal 'short', videos[1][:post_type]
   end
