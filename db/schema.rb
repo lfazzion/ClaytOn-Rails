@@ -64,10 +64,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_14_000001) do
 
   create_table "digest_item_deliveries", force: :cascade do |t|
     t.string "channel_id", null: false
+    t.datetime "created_at", null: false
     t.string "digest_type", null: false
     t.string "item_key", null: false
     t.string "item_type", null: false
     t.datetime "sent_at", null: false
+    t.datetime "updated_at", null: false
     t.index ["digest_type", "channel_id", "item_type", "item_key"], name: "index_digest_item_deliveries_unique_key", unique: true
     t.index ["digest_type", "channel_id", "sent_at"], name: "index_digest_item_deliveries_on_sent_at"
   end

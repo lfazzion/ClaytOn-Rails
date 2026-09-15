@@ -183,4 +183,39 @@ class FridayIdeationJobC2aTest < ActiveSupport::TestCase
     assert_match(/Sem novidade/i, mensagem3)
     %w[AnimeA AnimeB AnimeC AnimeM60 AnimeM90].each { |t| refute_includes mensagem3, "**#{t}**" }
   end
+
+  test 'C2a-6: item_key registrado com outro item_type não entra em sent_item_keys — item_type faz parte do contrato da chave' do
+    run_job('canal_a')
+
+    alvo = within_30d_items.first
+    # Marca o item_key do alvo com um item_type DIFERENTE do catálogo.
+    DigestItemDelivery.create!(digest_type: DIGEST_TYPE, channel_id: 'canal_a',
+                               item_type: 'news_article', item_key: alvo.key,
+                               sent_at: Time.current)
+
+    # `sent_item_keys` (default item_type = CATALOG) NÃO deve devolver a
+    # chave registrada como news_article: esse registro pertence a outro
+    # contrato de item_type e não suprime o catálogo.
+    keys = DigestItemDelivery.sent_item_keys(digest_type: DIGEST_TYPE, channel_id: 'canal_a')
+    refute_includes keys, alvo.key
+
+    # O registro news_article existe de fato (isentando o teste de "chave
+    # simplesmente ausente por falha de criação").
+    assert_equal 1, DigestItemDelivery.where(item_type: 'news_article').count
+  end
+
+  test 'C2a-7: item_type DIFERENTE jamais suprime — a mesma item_key não entregue como catálogo continua elegível' do
+    alvo = create(:external_catalog, source: 'anilist', title: 'AnimeSolo', popularity: 99.0,
+                 created_at: 2.days.ago, updated_at: 2.days.ago)
+
+    # Registra o item_key do alvo com item_type distinto ANTES de o digest
+    # entregá-lo como catálogo. Isso NÃO pode suprimi-lo.
+    DigestItemDelivery.create!(digest_type: DIGEST_TYPE, channel_id: 'canal_a',
+                               item_type: 'news_article', item_key: alvo.key,
+                               sent_at: Time.current)
+
+    mensagem = run_job('canal_a')
+    assert_includes mensagem, 'AnimeSolo'
+    assert_includes delivery_keys('canal_a'), alvo.key
+  end
 end
