@@ -167,6 +167,13 @@ class Last30DaysTopicJobTest < ActiveSupport::TestCase
     # 8 clusters × 3 itens = 24, NÃO 10×4=40
     assert_equal 24, count,
                  "Esperado exatamente 24 entregas (MAX_CLUSTERS 8 × MAX_ITEMS 3), mas gravou #{count}"
+
+    # C2c: a marca na tabela própria (DigestItemDelivery) respeita o MESMO
+    # truncamento — só os itens realmente exibidos entram, não os 40.
+    assert_equal 24, DigestItemDelivery.where(
+      digest_type: "last30days_topic", channel_id: "123456",
+      item_type: "last30days_topic_item"
+    ).size, "DigestItemDelivery deve gravar exatamente as 24 keys exibidas"
   end
 
   # Achado 5 (PR #36): o job DELEGA o chunking ao DiscordMessageChunker (helper
@@ -199,5 +206,244 @@ class Last30DaysTopicJobTest < ActiveSupport::TestCase
     res = job.perform(@topic.id, "123456")
 
     assert res[:sent]
+  end
+
+  # ============================================================ C2c ==========
+  # O job passa a usar o mecanismo C2a (DigestItemDelivery) para supressão de
+  # repetição: (1) exclui da seleção as keys já entregues para este
+  # digest_type + canal, via sent_item_keys; (2) registra a entrega DEPOIS de
+  # todos os chunks saírem bem, como o FridayIdeationJob.
+  #
+  # DECISÕES DE ESCOPO (C2c):
+  #  - digest_type PRÓPRIO "last30days_topic" (não reusa o "friday_ideation"
+  #    do friday — dois silêncios independentes: o mesmo item pode ser
+  #    entregue pelos dois digests sem que um suprima o outro);
+  #  - item_type PRÓPRIO "last30days_topic_item";
+  #  - item_key ESCOPADA POR TÓPICO: "topic_<id>:<url_key>". O mesmo link
+  #    pode aparecer em tópicos distintos e é relevante para cada um; o
+  #    escopo por tópico impede que a entrega de um tópico silencie o outro.
+  #  - JANELA: as fontes só retornam itens dos últimos 30 dias (HN filter
+  #    created_at_i>now-30d; GitHub created:>=now-30d — Polymarket SEM
+  #    filtro temporal). Um item já enviado que sai da janela (ex.: lançado
+  #    há 40 dias) NUNCA volta pela própria fonte; a supressão permanente da
+  #    DigestItemDelivery (sem filtro por sent_at) é inofensiva nesse caso —
+  #    provada no teste "item de 40d..." abaixo.
+
+  DIGEST_TYPE = "last30days_topic".freeze
+  ITEM_TYPE = "last30days_topic_item".freeze
+
+  # Item de HN como o canal devolve (url fixa, title livre).
+  def hn_item(title, url)
+    { "title" => title, "url" => url, "source" => "hackernews" }
+  end
+
+  def digest_keys(channel_id = "123456")
+    DigestItemDelivery.where(digest_type: DIGEST_TYPE, channel_id: channel_id,
+                             item_type: ITEM_TYPE).pluck(:item_key)
+  end
+
+  # Chave estável de entrega de um item HN, como o job a monta (tópico +
+  # url_key normalizada pela mesma regra do job: Fusion.normalize_url).
+  def delivery_key(url, topic)
+    "topic_#{topic.id}:#{Research::Fusion.normalize_url(url)}"
+  end
+
+  # Executa o job com fetchers determinísticos (sem stub) e captura as
+  # mensagens enviadas via send_message (chunker pass-through) — padrão do
+  # repo (friday_ideation_job_c2a_test.rb, run_job).
+  def perform_capturing(channel_id, hn_results, gh_results: [], pm_results: [])
+    sent = []
+    original_chunk = DiscordMessageChunker.method(:chunk)
+    original_send = DiscordApiClient.method(:send_message)
+
+    DiscordMessageChunker.define_singleton_method(:chunk) { |message, **_kwargs| [message] }
+    DiscordApiClient.define_singleton_method(:send_message) { |_channel, msg| sent << msg }
+    Fetcher::Channels::Hackernews.stubs(:search).with(query: @topic.name, limit: 10).returns(hn_results)
+    Fetcher::Channels::Github.stubs(:search).with(query: @topic.name, limit: 10).returns(gh_results)
+    Fetcher::Channels::Polymarket.stubs(:search).with(query: @topic.name, limit: 10).returns(pm_results)
+
+    res = Last30DaysTopicJob.new.perform(@topic.id, channel_id)
+    [res, sent]
+  ensure
+    if original_chunk
+      DiscordMessageChunker.singleton_class.send(:remove_method, :chunk)
+      DiscordMessageChunker.define_singleton_method(:chunk, original_chunk)
+    end
+    if original_send
+      DiscordApiClient.singleton_class.send(:remove_method, :send_message)
+      DiscordApiClient.define_singleton_method(:send_message, original_send)
+    end
+  end
+
+  # 1. RED: a mesma URL nas duas rodadas NÃO repete na 2a; a nova entra.
+  test "C2c-1: o mesmo item nao repete em duas rodadas para o mesmo canal" do
+    url_a = "https://news.ycombinator.com/item?id=101"
+    url_b = "https://news.ycombinator.com/item?id=102"
+    url_c = "https://news.ycombinator.com/item?id=103"
+
+    # Rodada 1: fontes trazem A e B. Rodada 2: A e B voltam (a API do HN
+    # continua dentro de 30 dias) e a nova C entra. Sem C2c a rodada 2
+    # repetiria A e B no Discord.
+    res1, sent1 = perform_capturing("123456",
+                                    [hn_item("Lançamento A", url_a), hn_item("Lançamento B", url_b)])
+    res2, sent2 = perform_capturing("123456",
+                                    [hn_item("Lançamento A", url_a),
+                                     hn_item("Lançamento B", url_b),
+                                     hn_item("Novo C", url_c)])
+    mensagem2 = sent2.last.to_s
+
+    assert res1[:sent]
+    assert res2[:sent]
+    assert sent1.last.to_s.include?("Lançamento A"), "1a rodada envia A e B"
+    refute mensagem2.include?("Lançamento A"),
+           "item já enviado na 1a rodada repetiu na 2a (repetição da C2c)"
+    assert mensagem2.include?("Novo C")
+
+    # Ambas as marcas ficam na tabela própria C2a — nunca na tabela de
+    # catálogo. Rodada 1: A e B; rodada 2: só C entra.
+    assert_equal [delivery_key(url_a, @topic), delivery_key(url_b, @topic)].sort,
+                 digest_keys("123456").first(2).sort
+    assert_equal 3, digest_keys("123456").size
+    assert_equal [delivery_key(url_c, @topic)], digest_keys("123456")[2..].sort
+  end
+
+  # 2. Registro DEPOIS do envio bem-sucedido, com sent_at atual (mesmo
+  # contrato do friday record_catalog_delivery).
+  test "C2c-2: entrega registrada em DigestItemDelivery apos o envio" do
+    url = "https://news.ycombinator.com/item?id=201"
+    res, _ = perform_capturing("123456", [hn_item("Item 201", url)])
+
+    assert res[:sent]
+    assert_equal [delivery_key(url, @topic)], digest_keys("123456")
+    entrega = DigestItemDelivery.find_by!(item_key: delivery_key(url, @topic))
+    assert_in_delta Time.current.to_i, entrega.sent_at.to_i, 120,
+                    "sent_at deve registrar o momento da entrega"
+    assert_equal 1, TopicDelivery.where(topic_id: @topic.id).count,
+                   "TopicDelivery continua gravado (compatibilidade da janela de 7 dias)"
+  end
+
+  # 3. Supressão NÃO vaza entre canais: a marca permanente de canal_a
+  # não silencia canal_b (o isolamento entre canais é papel do
+  # DigestItemDelivery, não da janela de 7 dias do TopicDelivery — a
+  # antiga expira; a permanente, não).
+  test "C2c-3: item entregue em outro canal nao e suprimido indevidamente" do
+    url = "https://news.ycombinator.com/item?id=301"
+    url_key = Research::Fusion.normalize_url(url)
+    # 8 dias atrás: já saiu da janela de 7 dias do TopicDelivery, mas a
+    # marca permanente por canal vive na DigestItemDelivery (C2a).
+    TopicDelivery.create!(topic_id: @topic.id, url_key: url_key, sent_at: 8.days.ago)
+    DigestItemDelivery.create!(digest_type: DIGEST_TYPE, channel_id: "canal_a",
+                               item_type: ITEM_TYPE,
+                               item_key: delivery_key(url, @topic), sent_at: 8.days.ago)
+
+    # canal_b: sem marca ali → item entra (isolamento entre canais).
+    res_b, sent_b = perform_capturing("canal_b", [hn_item("Item 301", url)])
+    assert res_b[:sent], "entrega em canal_a não pode silenciar canal_b"
+    assert sent_b.last.to_s.include?("Item 301")
+    assert_equal [delivery_key(url, @topic)], digest_keys("canal_b")
+
+    # canal_a: item NÃO repete ali (supressão efetiva — pela marca
+    # permanente da DigestItemDelivery ou pela janela de 7 dias do
+    # TopicDelivery; em ambos os casos a política "não repete" segura).
+    res_a, _ = perform_capturing("canal_a", [hn_item("Item 301", url)])
+    refute res_a[:sent], "canal_a já recebeu este item: repetição não é permitida"
+  end
+
+  # 4. Supressão NÃO vaza entre digest_types: a marca do friday_ideation
+  # (C2a) não silencia o last30days_topic, e vice-versa.
+  test "C2c-4: digest_type proprio nao e silenciado pelo friday_ideation" do
+    url = "https://news.ycombinator.com/item?id=401"
+    key = delivery_key(url, @topic)
+    DigestItemDelivery.create!(digest_type: "friday_ideation", channel_id: "123456",
+                               item_type: DigestItemDelivery::ITEM_TYPE_CATALOG,
+                               item_key: key, sent_at: Time.current)
+
+    res, sent_msgs = perform_capturing("123456", [hn_item("Item 401", url)])
+
+    assert res[:sent]
+    assert sent_msgs.last.to_s.include?("Item 401"),
+           "marca do friday_ideation não pode suprimir o last30days_topic"
+    assert_equal [key], digest_keys("123456")
+  end
+
+  # 5. Janela temporal: item lançado há 40 dias que JÁ foi enviado não volta.
+  # A janela das fontes (30d) controla a reaparição — item fora da janela
+  # simplesmente não é mais retornado; a supressão permanente fica
+  # inofensiva. Prova: um item de 40d que RESURGE nos resultados (ex.:
+  # fonte sem filtro temporal) continua sendo suprimido, e um item novo
+  # entra normalmente.
+  test "C2c-5: item de 40d ja enviado nao repete; itens novos entram" do
+    url_antigo = "https://news.ycombinator.com/item?id=501"
+    url_novo = "https://news.ycombinator.com/item?id=502"
+    key_antigo = delivery_key(url_antigo, @topic)
+    key_novo = delivery_key(url_novo, @topic)
+
+    # Entregas feitas há 40 dias (fora da janela de 30d das fontes).
+    DigestItemDelivery.create!(digest_type: DIGEST_TYPE, channel_id: "123456",
+                               item_type: ITEM_TYPE, item_key: key_antigo,
+                               sent_at: 40.days.ago)
+
+    res, sent_msgs = perform_capturing("123456",
+                                       [hn_item("Antigo 40d", url_antigo), hn_item("Novo 4d", url_novo)])
+
+    mensagem = sent_msgs.last.to_s
+    assert res[:sent]
+    assert mensagem.include?("Novo 4d")
+    refute mensagem.include?("Antigo 40d"),
+           "item de 40d já enviado não deve voltar (supressão permanente da C2a)"
+    assert_equal [key_antigo, key_novo].sort, digest_keys("123456").sort
+  end
+
+  # 6. limits_concurrency: uma execução por TÓPICO no worker do Solid Queue
+  # — a causa da corrida (select+envio em paralelo duplicando itens no
+  # Discord antes da marca), mesmo remédio do friday (C2a-r5).
+  test "C2c-6: limits_concurrency serializa por topico" do
+    job_a = Last30DaysTopicJob.new(@topic.id, "123456")
+    job_b = Last30DaysTopicJob.new(@topic.id, "123456")
+
+    assert_equal "Last30DaysTopicJob/last30days_topic/#{@topic.id}", job_a.concurrency_key
+    assert_equal job_a.concurrency_key, job_b.concurrency_key
+    assert_equal 1, Last30DaysTopicJob.concurrency_limit
+    assert_equal :block, Last30DaysTopicJob.concurrency_on_conflict
+    assert job_a.concurrency_limited?, "expected concurrency limiting to be enabled"
+
+    outro_topico = Topic.create!(name: "Kubernetes", active: true)
+    assert_not_equal job_a.concurrency_key,
+                     Last30DaysTopicJob.new(outro_topico.id, "123456").concurrency_key,
+                     "tópicos distintos não disputam a mesma chave"
+  end
+
+  # 7. Padrão do friday (C2a): registro DEPOIS do envio; erro no envio NÃO
+  # grava a entrega — a próxima execução reenvia. DiscordApiClient levanta
+  # RuntimeError ("Discord API error: ...") no caminho de envio.
+  test "C2c-7: falha no envio nao registra entrega" do
+    url = "https://news.ycombinator.com/item?id=701"
+    original_chunk = DiscordMessageChunker.method(:chunk)
+    original_send = DiscordApiClient.method(:send_message)
+    DiscordMessageChunker.define_singleton_method(:chunk) { |message, **_kwargs| [message] }
+    DiscordApiClient.define_singleton_method(:send_message) do |_c, _m|
+      raise RuntimeError, "Discord API error: 500 boom"
+    end
+
+    err = assert_raises(RuntimeError) do
+      Fetcher::Channels::Hackernews.stubs(:search).with(query: @topic.name, limit: 10)
+            .returns([hn_item("Item 701", url)])
+      Fetcher::Channels::Github.stubs(:search).with(query: @topic.name, limit: 10).returns([])
+      Fetcher::Channels::Polymarket.stubs(:search).with(query: @topic.name, limit: 10).returns([])
+      Last30DaysTopicJob.new.perform(@topic.id, "123456")
+    end
+    assert_match(/boom/, err.message)
+
+    assert_equal 0, digest_keys.size,
+                 "entrega não deve ser registrada quando o envio falhou"
+  ensure
+    if original_chunk
+      DiscordMessageChunker.singleton_class.send(:remove_method, :chunk)
+      DiscordMessageChunker.define_singleton_method(:chunk, original_chunk)
+    end
+    if original_send
+      DiscordApiClient.singleton_class.send(:remove_method, :send_message)
+      DiscordApiClient.define_singleton_method(:send_message, original_send)
+    end
   end
 end
