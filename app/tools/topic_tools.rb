@@ -71,6 +71,10 @@ class TopicRemoveTool < TopicToolBase
     topic = Topic.find_by(name: norm)
     return error("Tópico não encontrado: #{name}") unless topic
 
+    # Diferente de RemoveProfileTool (destroy! irreversível), TopicRemoveTool
+    # faz soft-delete (active: false) — reversível via TopicAddTool.
+    # Por isso a UX é de etapa única; a mitigação C3a (conteúdo externo) não se
+    # aplica aqui, e o gate C3b (confirmação destrutiva) não é necessário.
     topic.update!(active: false)
     success(format_topic(topic))
   rescue ActiveRecord::RecordInvalid => e

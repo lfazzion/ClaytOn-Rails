@@ -305,11 +305,200 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
   # ── 4. RemoveProfileTool ──────────────────────────────────────────────────────
 
-  test 'remove_profile por handle remove perfil de verdade (destroy!) em um unico turno' do
+  # 4.1 — Confirmação de uso único (ator + ação + alvo + expiração)
+  test 'remove_profile sem confirm_token retorna preview e NÃO destrói' do
+    profile = create(:social_profile, :twitter, platform_username: 'preview_only')
+
+    tool = RemoveProfileTool.new
+    res = tool.execute(identifier: 'preview_only')
+
+    assert_equal :confirmation_required, res[:status]
+    assert_includes res[:reason], 'Confirme'
+    assert SocialProfile.exists?(profile.id)
+    assert res[:data][:confirm_token].present?
+    assert res[:data][:expires_at].present?
+    assert_equal 'preview_only', res[:data][:target][:platform_username]
+  end
+
+  test 'remove_profile com confirm_token de outro ator NÃO autoriza' do
+    profile = create(:social_profile, :twitter, platform_username: 'target_actor')
+
+    # Cria confirmação com ator original
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'target_actor')
+    token = preview[:data][:confirm_token]
+
+    # Tenta usar com outro ator (dono na allowlist — o portão de dono passa;
+    # a checagem de CONFIRMAÇÃO de ator que deve recusar)
+    Thread.current[:cleitin_actor] = { user_id: '67890', username: 'dono2' }
+    ENV['DISCORD_OWNER_IDS'] = '12345,67890'
+    res = tool.execute(identifier: 'target_actor', confirm_token: token)
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'ator'
+    assert SocialProfile.exists?(profile.id)
+  end
+
+  test 'remove_profile com confirm_token de outro alvo NÃO autoriza' do
+    profile_a = create(:social_profile, :twitter, platform_username: 'target_a')
+    profile_b = create(:social_profile, :twitter, platform_username: 'target_b')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'target_a')
+    token = preview[:data][:confirm_token]
+
+    # Tenta usar token do target_a no target_b
+    res = tool.execute(identifier: 'target_b', confirm_token: token)
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'alvo'
+    assert SocialProfile.exists?(profile_a.id)
+    assert SocialProfile.exists?(profile_b.id)
+  end
+
+  test 'remove_profile com confirm_token de ação diferente NÃO autoriza (vínculo de ação)' do
+    profile = create(:social_profile, :twitter, platform_username: 'action_bind')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'action_bind')
+    token = preview[:data][:confirm_token]
+
+    # Corrompe o vínculo: o token passa a apontar para outra ação (a
+    # implementação grava/leve a convenção JSON com chaves string; manter a
+    # convenção ao manipular — ver teste de expiração).
+    cache_key = "remove_profile_confirm:#{token}"
+    raw = Rails.cache.read(cache_key)
+    if raw.is_a?(String)
+      hash = JSON.parse(raw)
+      hash['action'] = 'add_profile'
+      Rails.cache.write(cache_key, JSON.generate(hash))
+    else
+      Rails.cache.write(cache_key, raw.merge(action: 'add_profile'))
+    end
+
+    res = tool.execute(identifier: 'action_bind', confirm_token: token)
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'ação diferente'
+    # O alvo NÃO é destruído: o vínculo de ação protege contra regressão.
+    assert SocialProfile.exists?(profile.id)
+    # E o token foi consumido (claim): não serve nem para nova tentativa.
+    refute Rails.cache.exist?(cache_key)
+  end
+
+  test 'remove_profile com confirm_token expirado NÃO autoriza' do
+    profile = create(:social_profile, :twitter, platform_username: 'expired_target')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'expired_target')
+    token = preview[:data][:confirm_token]
+
+    # Expira o token manipulando o cache. O value gravado pelo app é a
+    # convenção que o app lê de volta (r3: string JSON, chaves STRING —
+    # JSON.parse devolve chaves string). Manter a convenção na manipulação:
+    # mergear com chave símbolo gera DUAS chaves 'expires_at' no Hash
+    # (string + símbolo) e o JSON sai com chave duplicada.
+    cache_key = "remove_profile_confirm:#{token}"
+    raw = Rails.cache.read(cache_key)
+    if raw.is_a?(String)
+      hash = JSON.parse(raw)
+      hash['expires_at'] = 1.minute.ago.iso8601
+      Rails.cache.write(cache_key, JSON.generate(hash))
+    else
+      Rails.cache.write(cache_key, raw.merge(expires_at: 1.minute.ago.iso8601))
+    end
+
+    res = tool.execute(identifier: 'expired_target', confirm_token: token)
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'expir'
+    assert SocialProfile.exists?(profile.id)
+  end
+
+  test 'remove_profile com confirm_token válido EXECUTA destroy! uma única vez (consumo provado)' do
+    profile = create(:social_profile, :twitter, platform_username: 'valid_confirm')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'valid_confirm')
+    token = preview[:data][:confirm_token]
+
+    # Primeira execução com token válido
+    res1 = tool.execute(identifier: 'valid_confirm', confirm_token: token)
+    assert_equal :success, res1[:status]
+    assert_equal 'removed', res1[:data][:status]
+    refute SocialProfile.exists?(profile.id)
+
+    # Prova o CONSUMO mesmo quando a segunda chamada é legítima: o alvo
+    # reexiste (perfil do mesmo handle criado de novo), então a 2ª chamada
+    # passa em find_profile e CHEGA na validação do token — e é o token
+    # consumido (claim) que a recusa, não o alvo ausente.
+    profile2 = create(:social_profile, :twitter, platform_username: 'valid_confirm')
+    res2 = tool.execute(identifier: 'valid_confirm', confirm_token: token)
+
+    assert_equal :error, res2[:status]
+    assert_includes res2[:reason], 'Confirmação inválida ou inexistente'
+    assert SocialProfile.exists?(profile2.id), 'o alvo reexistente NÃO pode ser destruído com token já consumido'
+  end
+
+  test 'duas chamadas concorrentes com o MESMO token executam destroy! exatamente uma vez (consumo atômico)' do
+    profile = create(:social_profile, :twitter, platform_username: 'race_confirm')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'race_confirm')
+    token = preview[:data][:confirm_token]
+    cache_key = "remove_profile_confirm:#{token}"
+    assert Rails.cache.exist?(cache_key)
+
+    # Duas threads reais correm para consumir o MESMO token. claim_token é
+    # um delete atômico com retorno conferido: em ambos os stores reais só
+    # UM delete consegue apagar a chave (FileStore: File.delete — o SO
+    # garante exclusão única; SolidCache: DELETE...WHERE no SQLite — 1ª
+    # transação apaga, a 2ª recebe 0 linhas). Os demais 3 caminhos
+    # (diferentes atores, alvo inexistente, claim vencido) NÃO executam
+    # destroy!.
+    barrier = Queue.new
+    2.times { barrier << true }
+    results = Array.new(2)
+    threads = 2.times.map do |i|
+      Thread.new do
+        Thread.current[:cleitin_actor] = { user_id: '12345', username: 'dono' }
+        barrier.pop # as duas threads só prosseguem juntas — a corrida é real
+        results[i] = tool.execute(identifier: 'race_confirm', confirm_token: token)
+      end
+    end
+    threads.each(&:join)
+
+    execs = results.count { |r| r[:status] == :success }
+    rejeitadas = results.count { |r| r[:status] == :error && r[:reason].include?('Confirmação inválida ou inexistente') }
+
+    assert_equal 1, execs, 'duas execuções = destruição dupla (bloqueador)'
+    assert_equal 1, rejeitadas, 'exatamente uma rejeição por token consumido'
+    refute SocialProfile.exists?(profile.id)
+    refute Rails.cache.exist?(cache_key), 'o token deve ter saído do cache'
+  end
+
+  test 'remove_profile por handle remove perfil de verdade (destroy!) após confirmação válida' do
     profile = create(:social_profile, :twitter, platform_username: 'to_remove_hndl')
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'to_remove_hndl')
+    preview = tool.execute(identifier: 'to_remove_hndl')
+    token = preview[:data][:confirm_token]
+
+    res = tool.execute(identifier: 'to_remove_hndl', confirm_token: token)
+
+    assert_equal :success, res[:status]
+    assert_equal 'removed', res[:data][:status]
+    refute SocialProfile.exists?(profile.id)
+  end
+
+  test 'remove_profile por ID numerico remove perfil de verdade após confirmação válida' do
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_id')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: profile.id.to_s)
+    token = preview[:data][:confirm_token]
+
+    res = tool.execute(identifier: profile.id.to_s, confirm_token: token)
 
     assert_equal :success, res[:status]
     assert_equal 'removed', res[:data][:status]
@@ -317,10 +506,13 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'remove_profile por ID numerico remove perfil de verdade' do
-    profile = create(:social_profile, :twitter, platform_username: 'to_remove_id')
+    profile = create(:social_profile, :twitter, platform_username: 'to_remove_id2')
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: profile.id.to_s)
+    preview = tool.execute(identifier: profile.id.to_s)
+    token = preview[:data][:confirm_token]
+
+    res = tool.execute(identifier: profile.id.to_s, confirm_token: token)
 
     assert_equal :success, res[:status]
     assert_equal 'removed', res[:data][:status]
@@ -368,7 +560,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     profile_id = profile.id
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'cascade_user')
+    preview = tool.execute(identifier: 'cascade_user')
+    token = preview[:data][:confirm_token]
+
+    res = tool.execute(identifier: 'cascade_user', confirm_token: token)
 
     assert_equal :success, res[:status]
     assert_equal 'removed', res[:data][:status]
@@ -384,7 +579,10 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     dp = create(:discovered_profile, source_profile: profile)
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'source_user')
+    preview = tool.execute(identifier: 'source_user')
+    token = preview[:data][:confirm_token]
+
+    res = tool.execute(identifier: 'source_user', confirm_token: token)
 
     assert_equal :success, res[:status]
     refute SocialProfile.exists?(profile.id)
@@ -394,24 +592,48 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
   test 'remove_profile rescata RecordNotDestroyed e retorna erro amigavel' do
     profile = create(:social_profile, :twitter, platform_username: 'not_destroyed')
-    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'not_destroyed')
+    preview = tool.execute(identifier: 'not_destroyed')
+    token = preview[:data][:confirm_token]
+    cache_key = "remove_profile_confirm:#{token}"
+
+    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
+
+    res = tool.execute(identifier: 'not_destroyed', confirm_token: token)
 
     assert_equal :error, res[:status]
     assert_includes res[:reason], 'Erro ao remover'
+    # DECISÃO (ressalva 3): em falha do destroy! o token PERMANECE consumido.
+    # O claim (delete atômico) acontece ANTES do destroy! — a falha não devolve
+    # a chave. O dono precisa pedir uma confirmação NOVA para tentar de novo:
+    # em ação destrutiva, reexecução automática pós-falha é mais perigosa que
+    # reconfirmação.
+    refute Rails.cache.exist?(cache_key), 'token não pode ser liberado após falha do destroy!'
+    # O alvo também NÃO pode ser destruído de novo reusando o token morto.
+    res2 = tool.execute(identifier: 'not_destroyed', confirm_token: token)
+    assert_equal :error, res2[:status]
+    assert_includes res2[:reason], 'Confirmação inválida ou inexistente'
+    assert SocialProfile.exists?(profile.id), 'o alvo sobrevivente não pode ser destruído com token consumido'
   end
 
   test 'remove_profile rescata InvalidForeignKey e retorna erro amigavel' do
     profile = create(:social_profile, :twitter, platform_username: 'fk_error_user')
-    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::InvalidForeignKey.new('Foreign key violation'))
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'fk_error_user')
+    preview = tool.execute(identifier: 'fk_error_user')
+    token = preview[:data][:confirm_token]
+    cache_key = "remove_profile_confirm:#{token}"
+
+    SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::InvalidForeignKey.new('Foreign key violation'))
+
+    res = tool.execute(identifier: 'fk_error_user', confirm_token: token)
 
     assert_equal :error, res[:status]
     assert_includes res[:reason], 'Erro ao remover'
+    # Mesma decisão do teste acima: falha do destroy! NÃO libera o token.
+    refute Rails.cache.exist?(cache_key)
+    assert SocialProfile.exists?(profile.id)
   end
 
   test 'remove_profile grava log de auditoria estruturado antes do destroy' do
@@ -425,12 +647,20 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     Rails.logger.stubs(:info).with { |msg| logs << msg.to_s; true }
 
     tool = RemoveProfileTool.new
-    res = tool.execute(identifier: 'audit_rm_user')
+    preview = tool.execute(identifier: 'audit_rm_user')
+    token = preview[:data][:confirm_token]
+
+    res = tool.execute(identifier: 'audit_rm_user', confirm_token: token)
 
     assert_equal :success, res[:status]
-    capturado = logs.find { |linha| linha.include?('posts_count') }
-    assert capturado, 'esperava log com prefixo [RemoveProfileTool]'
+    # O preview grava TAMBÉM um log de auditoria (stage 'preview') — apontar
+    # para a linha do EXECUTE (stage 'execute') é o que prova o log antes do
+    # destroy com os dados finais do perfil.
+    linhas_audit = logs.select { |l| l.include?('[RemoveProfileTool]') }
+    capturado = linhas_audit.last
+    assert capturado, 'esperava log de auditoria [RemoveProfileTool] (execute)'
     assert_includes capturado, '[RemoveProfileTool]'
+    assert_equal 'execute', JSON.parse(capturado.sub(/\A\[RemoveProfileTool\]\s*/, ''))['stage']
 
     payload = JSON.parse(capturado.sub(/\A\[RemoveProfileTool\]\s*/, ''))
     assert_equal profile_id, payload['id']
@@ -627,7 +857,11 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert_equal 'active', other.reload.monitoring_status
 
     remove_tool = RemoveProfileTool.new
-    res = remove_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789')
+    preview = remove_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789')
+    assert_equal :confirmation_required, preview[:status]
+    assert_equal 'UCn8SzhX6Z1qW9_123456789', preview[:data][:target][:platform_username]
+
+    res = remove_tool.execute(identifier: 'UCn8SzhX6Z1qW9_123456789', confirm_token: preview[:data][:confirm_token])
 
     assert_equal :success, res[:status]
     refute SocialProfile.exists?(orig.id)

@@ -241,14 +241,136 @@ class RemoveProfileTool < ManagementToolBase
 
   param :identifier, type: :string, desc: 'ID numérico ou username do perfil', required: true
   param :platform, type: :string, desc: 'Plataforma opcional para desambiguação', required: false
+  param :confirm_token, type: :string, desc: 'Token de confirmação de uso único (retornado na primeira chamada)', required: false
 
-  def run(identifier:, platform: nil)
+  CONFIRM_TTL = 2.minutes
+  CONFIRM_ACTION = 'remove_profile'
+
+  def run(identifier:, platform: nil, confirm_token: nil)
     return owner_error unless owner?
 
     profile = find_profile(identifier, platform)
     return error('Perfil ambíguo: especifique a plataforma') if profile == :ambiguous
     return error("Perfil não encontrado: #{identifier}") if profile.nil?
 
+    actor_id = Thread.current[:cleitin_actor][:user_id].to_s
+
+    if confirm_token.blank?
+      return build_confirmation_preview(profile, actor_id)
+    end
+
+    execute_with_confirmation(profile, actor_id, confirm_token)
+  rescue ActiveRecord::RecordNotDestroyed, ActiveRecord::InvalidForeignKey => e
+    error("Erro ao remover: #{e.message}")
+  end
+
+  private
+
+  def build_confirmation_preview(profile, actor_id)
+    token = SecureRandom.hex(16)
+    expires_at = CONFIRM_TTL.from_now
+
+    payload = {
+      actor_id: actor_id,
+      action: CONFIRM_ACTION,
+      target_id: profile.id,
+      target_platform: profile.platform,
+      target_username: profile.platform_username,
+      posts_count: profile.social_posts.count,
+      snapshots_count: profile.profile_snapshots.count,
+      expires_at: expires_at.iso8601
+    }
+
+    cache_key = "remove_profile_confirm:#{token}"
+    # Convenção JSON nas duas pontas (r3, medido): FileStore/Marshal devolve
+    # chaves símbolo e SolidCache/JSON devolve string — gravar um Hash de
+    # símbolos era dependência de store. String JSON torna a leitura estável
+    # (chaves string) em qualquer store.
+    Rails.cache.write(cache_key, JSON.generate(payload), expires_in: CONFIRM_TTL)
+
+    audit_payload = payload.merge(confirm_token: token, stage: 'preview')
+    Rails.logger.info("[RemoveProfileTool] #{JSON.generate(audit_payload)}")
+
+    {
+      status: :confirmation_required,
+      reason: 'Esta ação é irreversível. Confirme com o token fornecido.',
+      data: {
+        confirm_token: token,
+        expires_at: expires_at.iso8601,
+        target: {
+          id: profile.id,
+          platform: profile.platform,
+          platform_username: profile.platform_username,
+          posts_count: profile.social_posts.count,
+          snapshots_count: profile.profile_snapshots.count
+        }
+      }
+    }
+  end
+
+  # Claim do token: remove a chave do cache e CONFERE o retorno.
+  # delete_entry em ambos os stores reais é atômico e reporta sucesso:
+  #   - FileStore (teste): File.delete — SO garante que só UM processo remove
+  #     o mesmo arquivo; delete_entry devolve true (removido) / false (já não
+  #     existia ou outro removeu primeiro).
+  #   - SolidCache (produção): DELETE WHERE key_hash=... no SQLite; o comitido
+  #     primeiro apaga a linha, o segundo recebe 0 linhas → false.
+  # (semântica medida nos sources: file_store.rb#delete_entry /
+  #  solid_cache store#entry_delete → Entry.delete_by_key > 0)
+  def claim_token(cache_key)
+    deleted = Rails.cache.delete(cache_key)
+    deleted == true
+  end
+
+  def execute_with_confirmation(profile, actor_id, confirm_token)
+    cache_key = "remove_profile_confirm:#{confirm_token}"
+    raw = Rails.cache.read(cache_key)
+
+    # CLAIM-PRIMÉIRO: o token sai do cache ANTES de qualquer validação
+    # (bloqueador C3b-r4: read→validar→delete deixava duas chamadas
+    # concorrentes com o mesmo token validando antes de qualquer delete).
+    # Quem falha no claim não valida nada — destruição dupla impossível.
+    unless claim_token(cache_key)
+      return error('Confirmação inválida ou inexistente')
+    end
+
+    # Mesma convenção da gravação (JSON string, chaves string) — parse com
+    # guard para valores ausentes/corrompidos.
+    cached = begin
+      raw.is_a?(String) ? JSON.parse(raw) : raw
+    rescue JSON::ParserError
+      nil
+    end
+
+    unless cached.is_a?(Hash)
+      return error('Confirmação inválida ou inexistente')
+    end
+
+    # Expiration check MUST come before actor/action/target checks
+    expires_at = Time.iso8601(cached['expires_at']) rescue nil
+    if expires_at.nil? || expires_at < Time.current
+      return error('Confirmação expirada')
+    end
+
+    unless cached['actor_id'] == actor_id
+      return error('Confirmação não pertence a este ator')
+    end
+
+    unless cached['action'] == CONFIRM_ACTION
+      return error('Confirmação para ação diferente')
+    end
+
+    unless cached['target_id'] == profile.id
+      return error('Confirmação para alvo diferente')
+    end
+
+    # Token válido e consumido (claim atomico) — executa destroy!
+    # Decisão documentada: se o destroy! falhar (RecordNotDestroyed /
+    # InvalidForeignKey), o token PERMANECE consumido — o claim já aconteceu
+    # antes do destroy e a falha não devolve a chave. O dono pede uma
+    # confirmação NOVA (token novo) para tentar de novo: em ações
+    # destrutivas, reexecução automática após falha é mais perigosa que
+    # uma reconfirmação.
     formatted = format_profile(profile)
     audit_payload = {
       id: profile.id,
@@ -256,14 +378,15 @@ class RemoveProfileTool < ManagementToolBase
       platform_username: profile.platform_username,
       posts_count: profile.social_posts.count,
       snapshots_count: profile.profile_snapshots.count,
-      actor: Thread.current[:cleitin_actor]
+      actor: Thread.current[:cleitin_actor],
+      confirm_token: confirm_token,
+      stage: 'execute'
     }
     Rails.logger.info("[RemoveProfileTool] #{JSON.generate(audit_payload)}")
+
     profile.destroy!
 
     success(formatted.merge(status: 'removed'))
-  rescue ActiveRecord::RecordNotDestroyed, ActiveRecord::InvalidForeignKey => e
-    error("Erro ao remover: #{e.message}")
   end
 end
 
