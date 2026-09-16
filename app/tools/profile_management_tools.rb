@@ -146,12 +146,18 @@ class AddProfileTool < ManagementToolBase
       channel_url = is_channel_id ? "https://www.youtube.com/channel/#{normalized_handle}" : "https://www.youtube.com/@#{normalized_handle}"
 
       begin
-        metadata = ScrapingServices::YoutubeScraperService.extract_channel_metadata(channel_url, timeout: 8)
+        # B8a: o serviço devolve [dados, causa]. `Timeout::Error` continua
+        # propagando (timeout: 8) — tratado abaixo. `causa` acompanha a
+        # mensagem de falha: antes o alerta era "não encontrado ou sem
+        # metadata válida" opaco, agora cita a causa nomeada (bot_check,
+        # network, ...).
+        metadata, causa = ScrapingServices::YoutubeScraperService.extract_channel_metadata(channel_url, timeout: 8)
       rescue Timeout::Error
         return error('validação demorou — tente de novo')
       end
 
-      return error("Perfil do YouTube não encontrado ou sem metadata válida: #{normalized_handle}") if metadata.nil?
+      detail = causa ? " (causa: #{causa})" : ""
+      return error("Perfil do YouTube não encontrado ou sem metadata válida#{detail}: #{normalized_handle}") if metadata.nil?
 
       begin
         profile = SocialProfile.create!(

@@ -65,7 +65,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalx', timeout: 8)
-                                           .returns(metadata)
+                                           .returns([metadata, nil])
     ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
       @captured_profile_id = profile_id
       true
@@ -94,7 +94,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with('https://www.youtube.com/@canalurl', timeout: 8)
-                                           .returns(metadata)
+                                           .returns([metadata, nil])
     ScrapeYoutubeJob.expects(:perform_later).with(kind_of(Integer)) do |profile_id|
       @captured_profile_id = profile_id
       true
@@ -112,7 +112,9 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'add_profile em youtube com metadata nil retorna error e não cria' do
-    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(nil)
+    # B8a: o serviço devolve [dados, causa]; dados nil com causa 'unknown'
+    # (canal não encontrado / falha genérica) → erro amigável.
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns([nil, 'unknown'])
     ScrapeYoutubeJob.expects(:perform_later).never
 
     assert_no_difference 'SocialProfile.count' do
@@ -189,7 +191,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
     ScrapingServices::YoutubeScraperService.expects(:extract_channel_metadata)
                                            .with("https://www.youtube.com/channel/#{channel_id}", timeout: 8)
-                                           .returns(metadata)
+                                           .returns([metadata, nil])
     ScrapeYoutubeJob.stubs(:perform_later)
 
     tool = AddProfileTool.new
@@ -213,7 +215,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
     ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata)
                                            .with("https://www.youtube.com/channel/#{channel_id}", timeout: 8)
-                                           .returns(metadata)
+                                           .returns([metadata, nil])
     ScrapeYoutubeJob.stubs(:perform_later)
 
     tool = AddProfileTool.new
@@ -248,7 +250,8 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
   end
 
   test 'add_profile trata RecordInvalid e retorna erro amigável' do
-    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns({ title: 'X' })
+    # B8a: o serviço devolve [dados, causa].
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns([{ title: 'X' }, nil])
     SocialProfile.stubs(:create!).raises(ActiveRecord::RecordInvalid.new(SocialProfile.new.tap { |p| p.errors.add(:platform_username, 'inválido') }))
 
     tool = AddProfileTool.new
@@ -503,7 +506,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
       title: 'Canal Race',
       subscriber_count: 1_000
     }
-    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns([metadata, nil])
 
     winner = create(:social_profile, platform: 'youtube', platform_username: 'racechannel',
                                      platform_user_id: 'UC_RACE_ID', display_name: 'Canal Race',
@@ -531,7 +534,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
       title: 'Canal YouTube',
       subscriber_count: 5_000
     }
-    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns([metadata, nil])
 
     winner = create(:social_profile, platform: 'youtube', platform_username: 'handle_antigo',
                                      platform_user_id: 'UC_DIFF_HANDLE_ID', display_name: 'Canal YouTube',
@@ -577,7 +580,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
       title: 'Canal YouTube',
       subscriber_count: 5_000
     }
-    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns(metadata)
+    ScrapingServices::YoutubeScraperService.stubs(:extract_channel_metadata).returns([metadata, nil])
 
     winner = create(:social_profile, platform: 'youtube', platform_username: 'handle_antigo',
                                      platform_user_id: 'UC_ARCHIVED_HANDLE_ID', display_name: 'Canal YouTube',
