@@ -82,6 +82,26 @@ CANARY_LOCALE="${CANARY_LOCALE:-1}"
 CANARY_EXTRA_ARGS="${CANARY_EXTRA_ARGS:-}"
 
 # ---------------------------------------------------------------------------
+# Limpeza dos temporários por trap (6): a cópia do jar nasce com a permissão
+# RESTRICTIVA do mktemp (0600) e NUNCA é relaxada (chmod aqui vazaria o
+# conteúdo sensível). Se o canário cair de pé (Ctrl-C, timeout do braço,
+# exit no pré-requisito, set -e), o trap em EXIT derruba o que restou —
+# sem deixar um 0600 com cookies do usuário parado em /tmp.
+# As variáveis guardam o caminho CRIADO no braço atual (globais pelo
+# escopo do trap; run_arm atualiza a cada braço).
+# ---------------------------------------------------------------------------
+CANARY_TMP_OUT=""
+CANARY_TMP_ERR=""
+CANARY_TMP_COOKIE_COPY=""
+
+cleanup_canary_tmp() {
+  rm -f "${CANARY_TMP_OUT:-}" "${CANARY_TMP_ERR:-}" "${CANARY_TMP_COOKIE_COPY:-}" 2>/dev/null || true
+}
+trap cleanup_canary_tmp EXIT
+trap 'cleanup_canary_tmp; trap - EXIT; exit 130' INT
+trap 'cleanup_canary_tmp; trap - EXIT; exit 143' TERM
+
+# ---------------------------------------------------------------------------
 # Pré-requisito: jar de cookies real.
 #
 # Um jar sintético (SID canario123 etc.) ou inexistente não diz nada sobre
@@ -190,11 +210,13 @@ run_arm() {
 
   # Braço "com cookie": usa uma CÓPIA temporária do jar (em /tmp). O
   # yt-dlp reescreve o arquivo de --cookies; apontar direto para o jar do
-  # usuário violaria a regra "não alterar cookies". A cópia é derrubada
-  # no fim do braço.
+  # usuário violaria a regra "não alterar cookies". A cópia nasce com a
+  # permissão restrita do mktemp (0600) e é derrubada no fim do braço OU
+  # pelo trap EXIT se o canário cair antes (item 6).
   local cookie_copy=""
   if [[ "$use_cookie" == "1" ]]; then
     cookie_copy="$(mktemp "${TMPDIR:-/tmp}/canary-jar.XXXXXX")"
+    CANARY_TMP_COOKIE_COPY="$cookie_copy"
     if ! cp -f "$CANARY_COOKIE_JAR" "$cookie_copy"; then
       echo "[CANÁRIO] ERRO: não consegui copiar o jar $CANARY_COOKIE_JAR para a cópia temporária." >&2
       rm -f "$cookie_copy"
@@ -210,6 +232,8 @@ run_arm() {
   local out err rc
   out="$(mktemp)"
   err="$(mktemp)"
+  CANARY_TMP_OUT="$out"
+  CANARY_TMP_ERR="$err"
 
   set +e
   timeout "$CANARY_TIMEOUT" "${cmd[@]}" > "$out" 2> "$err"
@@ -235,10 +259,14 @@ run_arm() {
 
   # Derruba os temporários no fim do braço (não deixa lixo, incluída a
   # cópia do jar — o original continua intocado em $CANARY_COOKIE_JAR).
+  # O reset das globais evita que o trap EXIT repita a remoção.
   rm -f "$out" "$err"
   if [[ -n "$cookie_copy" ]]; then
     rm -f "$cookie_copy"
   fi
+  CANARY_TMP_OUT=""
+  CANARY_TMP_ERR=""
+  CANARY_TMP_COOKIE_COPY=""
   return 0
 }
 

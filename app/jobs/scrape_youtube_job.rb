@@ -32,6 +32,40 @@ class ScrapeYoutubeJob < ApplicationJob
     ScrapingServices::RateLimitError
   ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
 
+  # B3: a transição sem-cookie é EXCLUSIVA do `rescue Fetcher::CookieJar::Expired`.
+  # Qualquer outra falha (rede/timeout/parser/etc) NÃO mais chama `cookies_path: nil`
+  # — virou "parcial nomeado mantendo o jar". A causa nomeada é derivada da classe
+  # da exceção (timeout/network); `parser` e demais não são causas nomeadas do
+  # item 3, então caem em `unknown`. `RateLimitError` ainda propaga para o
+  # handler de retry de perform.
+  #
+  # `filter_map` + rescue espelha o RECOVERABLE acima: constância ausente no
+  # ambiente (ex.: OpenURI/Faraday não carregados) é filtrada, não quebra o
+  # boot; o mapeamento por `kind_of?` em runtime nunca levanta `NameError`.
+  TIMEOUT_CAUSE_ERRORS = %w[
+    Timeout::Error
+    Net::ReadTimeout Net::OpenTimeout
+    Errno::ETIMEDOUT
+  ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
+
+  NETWORK_CAUSE_ERRORS = %w[
+    Errno::ECONNRESET Errno::ECONNREFUSED Errno::ECONNABORTED
+    Errno::EHOSTUNREACH Errno::ENETUNREACH Errno::EADDRNOTAVAIL Errno::EPIPE
+    SocketError
+    Net::HTTPError
+    OpenSSL::SSL::SSLError
+    OpenURI::HTTPError
+    Faraday::Error
+  ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
+
+  # B3: classe da exceção → causa nomeada do parcial. Ordem: timeout antes de
+  # network (timeout é um subconjunto temporal); parser e demais → unknown.
+  def partial_cause_for(exception)
+    return "timeout" if TIMEOUT_CAUSE_ERRORS.any? { |k| exception.kind_of?(k) }
+    return "network" if NETWORK_CAUSE_ERRORS.any? { |k| exception.kind_of?(k) }
+    "unknown"
+  end
+
   def perform(profile_id, options = {})
     profile = SocialProfile.find(profile_id)
     raise ArgumentError, "Perfil #{profile_id} não é YouTube" unless profile.platform == "youtube"
@@ -43,17 +77,20 @@ class ScrapeYoutubeJob < ApplicationJob
     proxy = current_proxy(options)
     channel_url = build_channel_url(profile)
 
-    metadata, metadata_note = extract_metadata_with_cookies(channel_url, proxy: proxy)
+    # B8a: o contrato de metadata agora é [dados, causa, nota]. A causa
+    # nomeada (bot_check | members_only | timeout | network | session_rejected
+    # | unknown) é a que o serviço extraiu do stderr — NUNCA mais um alerta
+    # genérico "returned nil" sem motivo. A nota "sessão expirada" vem da
+    # transição sem-cookie após Fetcher::CookieJar::Expired (única legítima).
+    metadata, metadata_cause, metadata_note = extract_metadata_with_cookies(channel_url, proxy: proxy)
     if metadata.nil?
-      # ITEM 1: o motivo da coleta sem cookie (quando houve) acompanha o
-      # alerta — "degraded" opaco era o defeito: sem saber se a sessão tinha
-      # expirado ou se o canal era o problema.
       detail = metadata_note ? " (sem cookies: #{metadata_note})" : ""
+      motivo_causa = metadata_cause ? " (causa: #{metadata_cause})" : ""
       profile.update!(collection_status: "degraded")
       ScrapingFailureAlertJob.perform_later(
         "youtube",
         profile.id,
-        "extract_channel_metadata returned nil#{detail}",
+        "extract_channel_metadata returned nil#{motivo_causa}#{detail}",
         "metadata_failure"
       )
       return
@@ -123,7 +160,10 @@ class ScrapeYoutubeJob < ApplicationJob
     cookies, = Fetcher::SessionCookies.for("youtube.com")
     result = nil
     Fetcher::CookieJar.with_netscape_file("youtube.com", cookies: cookies) do |cookies_path|
-      metadata = ScrapingServices::YoutubeScraperService.extract_channel_metadata(
+      # B8a: o serviço devolve [dados, causa] — causa nomeada na falha
+      # (bot_check/members/timeout/network/session_rejected/unknown), nil no
+      # sucesso. O helper repassa isso ao chamador em [metadata, causa, nota].
+      metadata, cause = ScrapingServices::YoutubeScraperService.extract_channel_metadata(
         channel_url, proxy: proxy, cookies_path: cookies_path
       )
       Fetcher::CookieJar.refresh_from_netscape!(
@@ -132,17 +172,22 @@ class ScrapeYoutubeJob < ApplicationJob
         auth_cookies: Fetcher::Channels::Youtube::AUTH_COOKIES,
         expires_at: 7.days.from_now
       )
-      result = [metadata, nil]
+      result = [metadata, cause, nil]
     end
     result
   rescue Fetcher::CookieJar::Expired
+    # B4/B8a: Expired é a ÚNICA prova tipada que abre coleta sem-cookie.
+    # `session_rejected` (causa) identifica o motivo na degradação; a nota
+    # "sessão expirada" acompanha o alerta do chamador.
     Rails.logger.warn "[ScrapeYoutubeJob] Sessão de youtube.com ausente ou expirada. Coletando metadata sem cookies."
-    [
-      ScrapingServices::YoutubeScraperService.extract_channel_metadata(
-        channel_url, proxy: proxy, cookies_path: nil
-      ),
-      "sessão expirada"
-    ]
+    fallback_metadata, = ScrapingServices::YoutubeScraperService.extract_channel_metadata(
+      channel_url, proxy: proxy, cookies_path: nil
+    )
+    if fallback_metadata.nil?
+      [nil, "session_rejected", "sessão expirada"]
+    else
+      [fallback_metadata, nil, "sessão expirada"]
+    end
   rescue ScrapingServices::RateLimitError
     raise
   end
@@ -165,6 +210,10 @@ class ScrapeYoutubeJob < ApplicationJob
       result
     end
   rescue Fetcher::CookieJar::Expired
+    # B3/B4: ÚNICA transição sem-cookie legítima. A sessão ausente/expirada é
+    # a prova tipada externa — o jar vazio não tem o que manter, então a
+    # coleta segue SEM cookie. O serviço devolve a 3-tupla [itens, fallback,
+    # causa] (com causa `session_rejected` quando a sessão expirou).
     Rails.logger.warn "[ScrapeYoutubeJob] Sessão de youtube.com ausente ou expirada. Coletando sem cookies."
     ScrapingServices::YoutubeScraperService.extract_videos_detailed(
       channel_url,
@@ -175,17 +224,15 @@ class ScrapeYoutubeJob < ApplicationJob
   rescue ScrapingServices::RateLimitError
     raise
   rescue *RECOVERABLE_SCRAPER_ERRORS => e
-    # ACHADO D: só erros RECUPERÁVEIS conhecidos (rede/timeout/parser do
-    # scraper) justificam o fallback sem cookies. Qualquer outra exceção —
-    # inclusive NoMethodError ou quebra de contrato (bug de programação) —
-    # DEVE propagar, e não virar um "sucesso" silencioso sem cookies.
-    Rails.logger.warn "[ScrapeYoutubeJob] Erro recuperável coletando vídeos com cookies (#{e.class}): #{e.message}. Coletando sem cookies."
-    ScrapingServices::YoutubeScraperService.extract_videos_detailed(
-      channel_url,
-      limit: limit,
-      proxy: proxy,
-      cookies_path: nil
-    )
+    # B3 (REVERSO do ACHADO D): uma falha recuperável de REDE/TIMEOUT/PARSER
+    # na sessão AUTENTICADA NÃO justifica coleta anônima — sem cookie o
+    # bloqueio só piora e o run viraria "sucesso anônimo" (o defeito do B1).
+    # Devolve um run PARCIAL NOMEADO mantendo o jar: [[], false, causa], com a
+    # causa derivada da classe da exceção (network/timeout/unknown). O `jar`
+    # NÃO é descartado — a sessão segue valendo para o próximo run.
+    cause = partial_cause_for(e)
+    Rails.logger.warn "[ScrapeYoutubeJob] Falha recuperável coletando vídeos com cookies (#{e.class}): #{e.message}. Parcial nomeado (#{cause}), mantendo o jar."
+    [[], false, cause]
   end
 
   def build_channel_url(profile)

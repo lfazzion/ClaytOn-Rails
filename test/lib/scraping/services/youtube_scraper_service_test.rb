@@ -139,6 +139,149 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     assert_equal 1, videos.size, "o fallback flat deve ter devolvido os itens"
   end
 
+  # B4 — prova TÍPADA da transição sem cookie. Os DOIS caminhos de sessão
+  # rejeitada passam por UM único ponto de transição por lado — serviço:
+  # SessionRejected (texto-inferido no stderr) deságua em
+  # transition_without_cookie; job: Fetcher::CookieJar::Expired é resgatada no
+  # helper (lado job, medido em test/jobs/scrape_youtube_job_test.rb "B4 (job)").
+  # É pelo TIPO da prova que a transição é auditável — nunca por string solta
+  # em dois lugares. O negativo (outra causa NUNCA abre coleta sem cookie) é
+  # medido pelo teste "bot_check não cai no fallback sem-cookie" acima.
+  test 'B4: SessionRejected abre o ÚNICO ponto de transição (folha flat recebe cookies_path: nil, uma vez)' do
+    svc = ScrapingServices::YoutubeScraperService
+    falha = stub(success?: false, exitstatus: 1)
+    flat_item = {
+      platform_post_id: 'fv1', title: 'FV1', post_type: 'video', posted_at: nil,
+      views_count: nil, likes_count: nil, comments_count: nil,
+      thumbnail_url: nil, video_url: 'https://youtube.com/watch?v=fv1'
+    }
+
+    # O caminho detalhado /videos falha com a sessão rejeitada (a causa
+    # inferida do stderr; o resgate do serviço levanta a prova TÍPADA).
+    svc.stubs(:execute_yt_dlp)
+      .with { |cmd| !cmd.include?("--flat-playlist") }
+      .returns(["", "ERROR: [youtube] cookies are no longer valid", falha])
+
+    # A FOLHA da transição: é ela quem recebe cookies_path: nil — e só a
+    # transition_without_cookie a chama assim. O .with fixa a assinatura
+    # exata (limit/proxy/cookies_path: nil); se qualquer outro ponto abrir
+    # coleta sem cookie, a expectativa de 1 chamada com esses args falha.
+    svc.expects(:extract_videos_flat)
+      .with('https://www.youtube.com/channel/UCtest', limit: 1, proxy: nil, cookies_path: nil)
+      .returns([flat_item])
+
+    result = svc.extract_videos_detailed('https://www.youtube.com/channel/UCtest', limit: 1)
+
+    assert_equal [[flat_item], true, 'session_rejected'], result,
+                 'a transição devolve o parcial flat com a causa nomeada'
+  end
+
+  # B6 — casos adversariais do classificador: as entradas que o padrão antigo
+  # (`include?("bot")` + prefixo `sign in to confirm`) capturava por engano.
+  test 'B6: "sign in to confirm your age" NÃO é bot_check (cai em unknown)' do
+    cause, = ScrapingServices::YoutubeScraperService.send(
+      :classify_failure_cause,
+      '',
+      "ERROR: please sign in to confirm your age"
+    )
+
+    refute_equal 'bot_check', cause, '"confirm your age" não é frase de anti-bot'
+    assert_equal 'unknown', cause
+  end
+
+  test 'B6: palavras com "bot" que não são anti-bot (robot/hobbit) NÃO são bot_check' do
+    casos = [
+      'ERROR: [youtube] robot detection unavailable',
+      'ERROR: [youtube] hobbit quest interrupted'
+    ]
+    casos.each do |msg|
+      cause, = ScrapingServices::YoutubeScraperService.send(:classify_failure_cause, '', msg)
+      refute_equal 'bot_check', cause, "#{msg.inspect} não é frase de anti-bot"
+      assert_equal 'unknown', cause
+    end
+  end
+
+  test 'B6: "members-only" (plural hifenizado) vira members_only' do
+    cause, = ScrapingServices::YoutubeScraperService.send(
+      :classify_failure_cause,
+      '',
+      'ERROR: [youtube] This channel has members-only content'
+    )
+
+    assert_equal 'members_only', cause
+  end
+
+  # B7 — Timeout::Error e erros de REDE que escalam do execute_yt_dlp (o
+  # subprocess expõe Errno/Socket) viram causa NOMEADA — o rescue genérico
+  # de StandardError os converteria em 'unknown'.
+  test 'B7: Timeout::Error do execute_yt_dlp vira causa "timeout" (não "unknown")' do
+    svc = ScrapingServices::YoutubeScraperService
+    svc.stubs(:execute_yt_dlp).raises(Timeout::Error.new('execution expired'))
+
+    result = svc.extract_videos_detailed('https://www.youtube.com/channel/UCtest', limit: 1)
+
+    assert_equal [[], false, 'timeout'], result
+  end
+
+  test 'B7: erro de rede (ECONNRESET) do execute_yt_dlp vira causa "network" (não "unknown")' do
+    svc = ScrapingServices::YoutubeScraperService
+    svc.stubs(:execute_yt_dlp).raises(Errno::ECONNRESET.new('connection reset by peer'))
+
+    result = svc.extract_videos_detailed('https://www.youtube.com/channel/UCtest', limit: 1)
+
+    assert_equal [[], false, 'network'], result
+  end
+
+  test 'B7: SocketError do execute_yt_dlp vira causa "network" (não "unknown")' do
+    svc = ScrapingServices::YoutubeScraperService
+    svc.stubs(:execute_yt_dlp).raises(SocketError.new('getaddrinfo: Name or service not known'))
+
+    result = svc.extract_videos_detailed('https://www.youtube.com/channel/UCtest', limit: 1)
+
+    assert_equal [[], false, 'network'], result
+  end
+
+  # B8b — /shorts é ENRIQUECIMENTO: ausente/vazia (causa 'unknown') segue
+  # sucesso (causa nil); falha OPERACIONAL (bot-check/rede/timeout/membros)
+  # vira parcial nomeado com a CAUSA DO /SHORTS — nunca "success" silencioso.
+  test 'B8b: /shorts ausente/vazia (causa unknown) segue sucesso com causa nil' do
+    svc = ScrapingServices::YoutubeScraperService
+    fake_ok = stub(success?: true, exitstatus: 0)
+    fake_fail = stub(success?: false, exitstatus: 1)
+    videos_json = "{\"id\":\"v1\",\"title\":\"V1\",\"webpage_url\":\"https://youtube.com/watch?v=v1\"}\n" \
+                  "{\"id\":\"v2\",\"title\":\"V2\",\"webpage_url\":\"https://youtube.com/watch?v=v2\"}\n"
+
+    svc.stubs(:build_videos_command).returns(['yt-dlp', 'vdetail'])
+    svc.stubs(:build_shorts_command).returns(['yt-dlp', 'sdetail'])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'vdetail']).returns([videos_json, '', fake_ok])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'sdetail']).returns(['', 'ERROR: [youtube] unable to extract data', fake_fail])
+
+    videos, fallback, cause = svc.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 3)
+
+    assert_equal 2, videos.size, '/videos segue valendo quando /shorts é ausente/vazia'
+    refute fallback
+    assert_nil cause, 'ausência inocente de /shorts NÃO degrada o run (sucesso, causa nil)'
+  end
+
+  test 'B8b: falha operacional em /shorts vira parcial nomeado com a causa do /shorts' do
+    svc = ScrapingServices::YoutubeScraperService
+    fake_ok = stub(success?: true, exitstatus: 0)
+    fake_fail = stub(success?: false, exitstatus: 1)
+    videos_json = "{\"id\":\"v1\",\"title\":\"V1\",\"webpage_url\":\"https://youtube.com/watch?v=v1\"}\n" \
+                  "{\"id\":\"v2\",\"title\":\"V2\",\"webpage_url\":\"https://youtube.com/watch?v=v2\"}\n"
+
+    svc.stubs(:build_videos_command).returns(['yt-dlp', 'vdetail'])
+    svc.stubs(:build_shorts_command).returns(['yt-dlp', 'sdetail'])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'vdetail']).returns([videos_json, '', fake_ok])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'sdetail']).returns(['', "ERROR: [youtube] Sign in to confirm you're not a bot", fake_fail])
+
+    videos, fallback, cause = svc.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 3)
+
+    assert_equal 2, videos.size, '/videos segue valendo na falha operacional do /shorts'
+    refute fallback, 'o run NÃO cai em fallback flat: é um PARCIAL nomeado'
+    assert_equal 'bot_check', cause, 'falha OPERACIONAL do /shorts NUNCA vira "success" silencioso'
+  end
+
   # TDD — build_metadata_command deve aceitar cookies_path e propagá-lo ao
   # comando de metadata.
   test 'build_metadata_command inclui --cookies quando cookies_path é informado' do
@@ -149,27 +292,6 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
       cookies_path: '/tmp/cookies.txt'
     )
 
-    assert_includes cmd, '--cookies'
-    assert_includes cmd, '/tmp/cookies.txt'
-  end
-
-  test 'extract_channel_metadata repassa cookies_path para build_metadata_command' do
-    fake_status = Struct.new(:success?).new(true)
-    json_output = '{"channel_id":"UC123","channel":"Canal","channel_follower_count":10,"description":"x","thumbnails":[]}'
-    ScrapingServices::YoutubeScraperService.stubs(:execute_yt_dlp).returns([json_output, '', fake_status])
-
-    ScrapingServices::YoutubeScraperService.extract_channel_metadata(
-      'https://www.youtube.com/channel/UC123',
-      proxy: nil,
-      cookies_path: '/tmp/cookies.txt'
-    )
-
-    cmd = ScrapingServices::YoutubeScraperService.send(
-      :build_metadata_command,
-      'https://www.youtube.com/channel/UC123',
-      nil,
-      cookies_path: '/tmp/cookies.txt'
-    )
     assert_includes cmd, '--cookies'
     assert_includes cmd, '/tmp/cookies.txt'
   end
@@ -248,31 +370,52 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     assert_equal true, details[:no_cookie_fallback_allowed?]
   end
 
-  test 'fallback sem cookie NÃO é permitido para causas não-session_rejected' do
-    %w[bot_check members_only timeout network unknown].each do |cause|
-      _, details = ScrapingServices::YoutubeScraperService.send(
-        :classify_failure_cause,
-        '',
-        "stderr genérico para #{cause}"
-      )
-
-      assert_equal false, details[:no_cookie_fallback_allowed?],
-                   "causa #{cause} não deveria permitir fallback sem cookie"
+  test 'B2/ressalva: fallback sem-cookie só é permitido p/ session_rejected (stderr realista)' do
+    # Ressalva: o teste antigo constrói strings genéricas ("stderr genérico
+    # para X") e só checa o booleano. Aqui cada caso usa um stderr REALISTA
+    # e afirma a causa esperada E a permissão de fallback (as duas faces da
+    # invariante: só sessão rejeitada libera coleta sem-cookie).
+    casos = [
+      ["ERROR: [youtube] Sign in to confirm you're not a bot", "bot_check", false],
+      ["This channel has members-only content", "members_only", false],
+      ["Read timed out while connecting", "timeout", false],
+      ["connection reset by peer", "network", false],
+      ["unexpected token in JSON", "unknown", false],
+      ["ERROR: [youtube] cookies are no longer valid", "session_rejected", true]
+    ]
+    casos.each do |stderr, causa_esperada, fallback_ok|
+      causa, details = ScrapingServices::YoutubeScraperService.send(:classify_failure_cause, stderr, '')
+      assert_equal causa_esperada, causa,
+                   "stderr #{stderr.inspect} deve classificar #{causa_esperada} (obteve #{causa.inspect})"
+      assert_equal fallback_ok, details[:no_cookie_fallback_allowed?],
+                   "causa #{causa} → fallback permitido? #{fallback_ok} (obteve #{details[:no_cookie_fallback_allowed?]})"
     end
   end
 
-  test 'extract_channel_metadata passa cookies_path para build_metadata_command' do
+  # Ressalva-3 (consolida as antigas L156-175 x L264-277): UMA única
+  # cobertura de cookies_path — a que captura o comando REALMENTE ENTREGUE
+  # a execute_yt_dlp (espionado no método). Os testes antigos só
+  # reconstruíam o comando (falso-green: passavam até se o build mudasse,
+  # sem medir o que execute_yt_dlp recebeu de fato).
+  test 'extract_channel_metadata entrega --cookies ao execute_yt_dlp quando cookies_path é informado' do
+    svc = ScrapingServices::YoutubeScraperService
     fake_status = Struct.new(:success?).new(true)
     json_output = '{"channel_id":"UC123","channel":"Canal","channel_follower_count":10,"description":"x","thumbnails":[]}'
+    captured = []
 
-    ScrapingServices::YoutubeScraperService.stubs(:execute_yt_dlp).returns([json_output, '', fake_status])
+    svc.stubs(:execute_yt_dlp).with { |cmd, **opts| captured << cmd; true }.returns([json_output, '', fake_status])
 
-    ScrapingServices::YoutubeScraperService.extract_channel_metadata(
+    svc.extract_channel_metadata(
       'https://www.youtube.com/channel/UC123',
       proxy: nil,
       cookies_path: '/tmp/cookies.txt'
     )
 
-    assert ScrapingServices::YoutubeScraperService.send(:build_metadata_command, 'https://www.youtube.com/channel/UC123', nil, cookies_path: '/tmp/cookies.txt').include?('--cookies')
+    assert_equal 1, captured.size, 'execute_yt_dlp deve ser chamado exatamente uma vez'
+    cmd = captured.first
+    cookies_idx = cmd.index('--cookies')
+    assert_not_nil cookies_idx, 'o comando entregue a execute_yt_dlp deve incluir --cookies'
+    assert_equal '/tmp/cookies.txt', cmd[cookies_idx + 1], 'o valor do jar é o cookies_path informado'
   end
 end
+

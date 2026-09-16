@@ -6,7 +6,8 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
   test 'extract_channel_metadata returns valid data when yt-dlp available' do
     skip 'yt-dlp not installed' unless system('which yt-dlp > /dev/null 2>&1')
 
-    result = ScrapingServices::YoutubeScraperService.extract_channel_metadata(
+    # B8a: o contrato devolve [dados, causa] — causa nil no sucesso.
+    result, cause = ScrapingServices::YoutubeScraperService.extract_channel_metadata(
       'https://www.youtube.com/@YouTube'
     )
 
@@ -16,6 +17,7 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     assert result[:channel_id].present?, 'channel_id deve estar presente'
     assert result[:title].present?, 'title deve estar presente'
     assert_not_nil result[:subscriber_count], 'subscriber_count não deve ser nil com --playlist-items 0'
+    assert_nil cause, 'coleta bem-sucedida não deve ter causa (obtida: #{cause.inspect})'
   end
 
   test 'extract_videos_detailed parses output correctly' do

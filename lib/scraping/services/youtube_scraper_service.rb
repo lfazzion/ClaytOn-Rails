@@ -6,6 +6,73 @@ require 'timeout'
 
 module ScrapingServices
   class YoutubeScraperService
+    # Prova tipada de rejeição de sessão. B4: a transição para coleta SEM
+    # cookie só é legítima após UMA prova TÍPADA de sessão rejeitada — ou a
+    # externa (Fetcher::CookieJar::Expired, no chamador) ou esta, levada aqui
+    # quando o próprio serviço lê o stderr e detecta "cookies are no longer
+    # valid". Os DOIS caminhos de sessão rejeitada passam pelo MESMO ponto de
+    # transição (`transition_without_cookie`), e é por este tipo que a
+    # transição é auditável — nunca por inferção de solta string em dois
+    # lugares.
+    class SessionRejected < StandardError
+      attr_reader :cause_name
+
+      def initialize(cause_name = "session_rejected")
+        @cause_name = cause_name
+        super("sessão rejeitada (#{cause_name}) — coleta sem cookie é a única transição legítima")
+      end
+    end
+
+    # Classes de erro de REDE que podem ser levantadas no caminho do yt-dlp
+    # (o processo externo falha e o Ruby expõe um Errno/Socket). B7:
+    # resgatadas ANTES do rescue genérico de `StandardError` e mapeadas para a
+    # causa `network` — o rescue largo as converteria em `unknown`. O processo
+    # é subprocess (Open3.capture3), então rede vira Errno/SocketError, NUNCA
+    # Faraday (client HTTP Ruby, que este caminho não usa). `filter_map` +
+    # rescue espelha o desenho defensivo de RECOVERABLE_SCRAPER_ERRORS no job:
+    # constância ausente no ambiente não quebra o boot.
+    NETWORK_ERRORS = %w[
+      SocketError
+      Net::ReadTimeout Net::OpenTimeout Net::HTTPError
+      Errno::ECONNRESET Errno::ECONNREFUSED Errno::ETIMEDOUT
+      Errno::EHOSTUNREACH Errno::ENETUNREACH Errno::EADDRNOTAVAIL
+      Errno::EAI_AGAIN Errno::EPIPE
+      OpenSSL::SSL::SSLError
+    ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
+
+    # B5: anti-bot é reconhecido APENAS por frases específicas de verificação
+    # anti-bot — a sub-string genérica `bot` e o prefixo `sign in to confirm`
+    # (que batia em "confirm your age") eram os furos. Cada padrão casa uma
+    # frase completa de anti-bot; `bot` solto, "robotic", "hobbit" etc. NÃO
+    # batem em nenhum, e "sign in to confirm your age" NÃO completa nenhuma
+    # frase → cai em `unknown`, não `bot_check`.
+    BOT_CHECK_PATTERNS = [
+      # O anti-bot canônico do YouTube (frase dos fixtures); casa por
+      # sub-string, então também cobre "please sign in to confirm you're not a
+      # bot". Aceita apostrofo reto (') ou curvo (\u2019).
+      /sign in to confirm (you['\u2019]?re|you are)\s*(a )?(not a )?(bot|human|robot)/i,
+      /verify (you['\u2019]?re|you are)\s*(a )?(not a )?(robot|bot|human)/i,
+      /i['\u2019]?m not a robot/i,
+      /are you (a )?(bot|robot)/i,
+      # IP sob bloqueio anti-bot (sem exigir sign-in).
+      /unusual traffic/i,
+      /access to this page has been (temporarily )?limited/i,
+      /suspicious (activity|traffic)/i
+    ].freeze
+
+    # `members?` casa a singular `member` e a plural `members`; `\s*-?\s*` casa
+    # o hífen ou o espaço. Resultado: cobre `member-only`, `members-only`
+    # (plural hifenizado, que o padrão antigo não reconhecia) e `members only`.
+    MEMBERS_ONLY_PATTERN = /members?\s*-?\s*only/i.freeze
+
+    # Erros de parse do output (JSON malformado) do yt-dlp: mapeados para a
+    # causa `unknown` (parser não é uma causa nomeada do item 3, e NUNCA
+    # libera fallback sem-cookie). O parser do JSON do Ruby expõe
+    # `JSON::ParserError` (subclasse de `JSON::JSONError`); é a única classe
+    # de parse que o caminho do yt-dlp pode levantar (JSON.parse em
+    # parse_metadata / parse_video_list).
+    PARSE_ERRORS = [JSON::ParserError, JSON::JSONError].freeze
+
     class << self
       # Cliente do player do YouTube para o extrator.
       #
@@ -14,25 +81,36 @@ module ScrapingServices
       # cookies em headless/VM. O canário mede se esta escolha altera o
       # resultado na VM do maestro.
       PLAYER_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=mweb"].freeze
+      # B8a: devolve [metadata, causa]. Antes descartava o stderr
+      # (`output, _, status`) e devolvia só `nil` — o job gravava `degraded`
+      # com alerta genérico, e bot-check/membros/rede/sessão rejeitada no
+      # caminho de metadata ficavam SEM causa. Agora captura o stderr,
+      # classifica a causa e a PROPAGA: falha → [nil, causa nomeada];
+      # sucesso → [dados, nil]. `Timeout::Error` continua propagando (o
+      # AddProfileTool usa timeout: 8 e trata "validação demorou" — ver
+      # profile_management_tools.rb).
       def extract_channel_metadata(channel_url, proxy: nil, timeout: 240, cookies_path: nil)
         command = build_metadata_command(channel_url, proxy, cookies_path: cookies_path)
-        output, _, status = execute_yt_dlp(command, timeout: timeout)
+        output, stderr, status = execute_yt_dlp(command, timeout: timeout)
 
-        return nil unless status.success? && output.strip.present?
+        unless status.success? && output.strip.present?
+          cause, = classify_failure_cause(stderr, output)
+          return [nil, cause]
+        end
 
         # video_count fica nil aqui: a contagem real enumera todas as entradas
         # das 3 abas (--flat-playlist; medido 72,5s p/ 5259 vídeos) e ficou sob
         # demanda — quem precisar chama `total_video_count` explicitamente.
-        parse_metadata(JSON.parse(output.strip))
+        [parse_metadata(JSON.parse(output.strip)), nil]
       rescue Timeout::Error => e
         Rails.logger.error "[YoutubeScraperService] Timeout ao extrair metadata: #{e.message}"
         raise
-      rescue JSON::ParserError => e
+      rescue *PARSE_ERRORS => e
         Rails.logger.error "[YoutubeScraperService] JSON inválido ao extrair metadata: #{e.message}"
-        nil
+        [nil, 'unknown']
       rescue StandardError => e
         Rails.logger.error "[YoutubeScraperService] Erro ao extrair metadata: #{e.message}"
-        nil
+        [nil, 'unknown']
       end
 
       def extract_videos_detailed(channel_url, limit: 10, proxy: nil, cookies_path: nil)
@@ -40,51 +118,63 @@ module ScrapingServices
 
         videos_cmd = build_videos_command(channel_url, videos_limit, proxy, cookies_path: cookies_path)
         videos_output, videos_stderr, videos_status = execute_yt_dlp(videos_cmd)
-        videos_cause = classify_failure_cause(videos_stderr, '') unless videos_status.success? && videos_output.strip.present?
 
-        unless videos_status.success? && videos_output.strip.present?
-          fallback_allowed = videos_cause&.first == "session_rejected"
-          unless fallback_allowed
-            # Item 4: bot_check/members_only/timeout/network/unknown NÃO caem
-            # em coleta sem-cookie (sem cookie o bloqueio só piora; devolvemos
-            # o run parcial nomeado). Só session_rejected tem permissão.
-            cause, = videos_cause || ["unknown"]
-            return [[], false, cause]
+        # B8b: separa "aba /shorts ausente/vazia" de "falha operacional". Se o
+        # /videos teve dados, o /shorts é apenas um ENRIQUECIMENTO — a sua
+        # ausência inocente (canal sem a aba) segue sucesso; uma falha
+        # OPERACIONAL (bot-check, rede, timeout, membros, sessão) vira parcial
+        # nomeado, e NÃO mais "success" silencioso (o furo que B8b fechou).
+        if videos_status.success? && videos_output.strip.present?
+          videos = parse_video_list(videos_output)
+          if shorts_limit.positive?
+            shorts_cmd = build_shorts_command(channel_url, shorts_limit, proxy, cookies_path: cookies_path)
+            shorts_output, shorts_stderr, shorts_status = execute_yt_dlp(shorts_cmd)
+            return shorts_result(shorts_output, shorts_stderr, shorts_status, videos)
           end
-
-          # session_rejected: fallback flat-playlist SEM cookie (o cookie que
-          # falhou não serve). Chamada ÚNICA com o limit integral: o
-          # extract_videos_flat aplica o split 2/3-1/3 internamente nas duas
-          # abas. Chamar por "metade" (videos_limit/shorts_limit) duplicava o
-          # /videos e cortava o /shorts (medido: limit 2 devolvia [fv1, fv1],
-          # sem nenhum short).
-          flat_videos = extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: nil)
-
-          cause, = videos_cause
-          return [flat_videos, true, cause]
+          # Orçamento de shorts zero: nada a enriquecer, /videos segue valendo.
+          return [videos, false, nil]
         end
 
-        shorts_output = ''
-        shorts_ok = true
-        if shorts_limit.positive?
-          shorts_cmd = build_shorts_command(channel_url, shorts_limit, proxy, cookies_path: cookies_path)
-          shorts_output, _, shorts_status = execute_yt_dlp(shorts_cmd)
-          shorts_ok = shorts_status.success? && shorts_output.strip.present?
+        # /videos FALHOU: classifica a causa a partir do stderr.
+        cause, = classify_failure_cause(videos_stderr, '')
+        if cause == "session_rejected"
+          # B4: prova TÍPADA — levanta a rejeição e o ÚNICO ponto de transição
+          # sem cookie (transition_without_cookie) é quem a captura. Nenhum
+          # outro caminho chama cookies_path: nil.
+          raise SessionRejected.new("session_rejected")
         end
-
-        # Canal sem aba /shorts (ou aba vazia) NÃO degrada a coleta: os
-        # vídeos detalhados do /videos seguem valendo, shorts simplesmente
-        # não entram no run. Só a falha do /videos (tratada acima) derruba
-        # para o caminho flat.
-        unless shorts_ok
-          Rails.logger.warn '[YoutubeScraperService] Aba /shorts sem dados detalhados; seguindo apenas com /videos'
-          return [parse_video_list(videos_output), false, nil]
-        end
-
-        [parse_video_list(videos_output) + parse_video_list(shorts_output), false, nil]
+        # bot_check / members_only / timeout / network / unknown: run parcial
+        # nomeado, mantendo o jar. NUNCA cai em coleta sem-cookie.
+        [[], false, cause]
+      rescue SessionRejected => proof
+        transition_without_cookie(channel_url, limit: limit, proxy: proxy, proof: proof)
+      rescue Timeout::Error
+        # B7: timeout REAL (Timeout.timeout no execute_yt_dlp) vira parcial
+        # nomeado 'timeout' — antes caía no rescue genérico → 'unknown'.
+        Rails.logger.error '[YoutubeScraperService] Timeout em extract_videos_detailed — parcial nomeado (timeout)'
+        [[], false, 'timeout']
+      rescue *NETWORK_ERRORS => e
+        # B7: erro de REDE (Errno/Socket) antes do rescue genérico.
+        Rails.logger.error "[YoutubeScraperService] Erro de rede em extract_videos_detailed (#{e.class}) — parcial nomeado (network)"
+        [[], false, 'network']
       rescue StandardError => e
-        Rails.logger.error "[YoutubeScraperService] Erro ao extrair videos detalhados: #{e.message}"
-        [extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: cookies_path), true, 'unknown']
+        # Último recurso: bug/contrato não-classificável → 'unknown' parcial
+        # NOMEADO mantendo o jar (antes era um flat com cookie 'unknown').
+        Rails.logger.error "[YoutubeScraperService] Erro não-classificável em extract_videos_detailed (#{e.class}): #{e.message}"
+        [[], false, 'unknown']
+      end
+
+      # B4: ÚNICO ponto de transição para coleta sem cookie. É auditável
+      # porque só a prova TÍPADA SessionRejected (acima) — ou a
+      # Fetcher::CookieJar::Expired do CHAMADOR, que o serviço NUNCA vê —
+      # abre este caminho. É aqui que os dois caminhos de sessão rejeitada
+      # (texto-inferido no serviço; Expired no job) se encontram: o job, ao
+      # capturar o Expired, chama extract_videos_detailed já com cookies_path:
+      # nil (o jar expirou e não há o quê manter); o texto-inferido levanta
+      # SessionRejected e deságua em transition_without_cookie.
+      def transition_without_cookie(channel_url, limit:, proxy:, proof:)
+        flat_videos = extract_videos_flat(channel_url, limit: limit, proxy: proxy, cookies_path: nil)
+        [flat_videos, true, proof.cause_name]
       end
 
       # Soma o total de vídeos do canal pelas abas /videos, /shorts e /streams.
@@ -100,6 +190,29 @@ module ScrapingServices
       end
 
       private
+
+      # B8b: monta o resultado quando o /videos teve dados e processa a aba
+      # /shorts: ausente/vazia → segue só /videos (sucesso, causa nil); falha
+      # operacional → parcial nomeado com a causa do /shorts.
+      def shorts_result(shorts_output, shorts_stderr, shorts_status, videos)
+        shorts_ok = shorts_status.success? && shorts_output.strip.present?
+        if shorts_ok
+          return [videos + parse_video_list(shorts_output), false, nil]
+        end
+        # A aba /shorts falhou (ou é vazia). Distingue:
+        shorts_cause, = classify_failure_cause(shorts_stderr, shorts_output)
+        if shorts_cause && shorts_cause != 'unknown'
+          # Falha OPERACIONAL do /shorts (bot-check/rede/timeout/membros/sessão):
+          # o run é um parcial nomeado — NUNCA "success" (o furo B8b).
+          Rails.logger.warn "[YoutubeScraperService] Aba /shorts com falha operacional (#{shorts_cause}); seguindo com /videos como parcial nomeado"
+          [videos, false, shorts_cause]
+        else
+          # Ausente/vazia inocente (canal sem a aba /shorts, 'unknown'): os
+          # vídeos do /videos seguem valendo, causa nil → success.
+          Rails.logger.warn '[YoutubeScraperService] Aba /shorts sem dados detalhados; seguindo apenas com /videos'
+          [videos, false, nil]
+        end
+      end
 
       def extract_videos_flat(channel_url, limit: 10, proxy: nil, cookies_path: nil)
         videos_limit, shorts_limit = split_limits(limit)
@@ -290,9 +403,24 @@ module ScrapingServices
       def classify_failure_cause(stderr, stdout)
         message = [stderr, stdout].compact.join("\n").downcase
 
-        cause = if message =~ /sign in to confirm/i || message.include?("bot")
+        # B5: bot_check APENAS por frase de anti-bot (BOT_CHECK_PATTERNS). O
+        # padrão antigo `message.include?("bot")` capturava qualquer palavra com
+        # "bot" e, pelo prefixo `sign in to confirm`, até "sign in to confirm
+        # your age" virava bot-check.
+        bot = BOT_CHECK_PATTERNS.any? { |re| message =~ re }
+
+        # B5: membros hifenizados (singular `member-only` E plural
+        # `members-only`) via MEMBERS_ONLY_PATTERN.
+        members = MEMBERS_ONLY_PATTERN.match?(message)
+
+        # Ordem importa: anti-bot e membros são sinais SEMÂNTICOS do conteúdo
+        # (o comando terminou, só que bloqueado) — se baterem, ganham de
+        # timeout/rede/sessão (que são sinais de TRANSPORTE). Um bot-check que
+        # também tem "unusual traffic" é bot-check; "timed out" só é timeout se
+        # não tiver sinal semântico antes.
+        cause = if bot
                   "bot_check"
-                elsif message.include?("member-only") || message.include?("members only")
+                elsif members
                   "members_only"
                 elsif message.include?("timed out") || message.include?("timeout")
                   "timeout"
