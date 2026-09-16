@@ -302,9 +302,31 @@ class RemoveProfileTool < ManagementToolBase
     }
   end
 
+  # Claim do token: remove a chave do cache e CONFERE o retorno.
+  # delete_entry em ambos os stores reais é atômico e reporta sucesso:
+  #   - FileStore (teste): File.delete — SO garante que só UM processo remove
+  #     o mesmo arquivo; delete_entry devolve true (removido) / false (já não
+  #     existia ou outro removeu primeiro).
+  #   - SolidCache (produção): DELETE WHERE key_hash=... no SQLite; o comitido
+  #     primeiro apaga a linha, o segundo recebe 0 linhas → false.
+  # (semântica medida nos sources: file_store.rb#delete_entry /
+  #  solid_cache store#entry_delete → Entry.delete_by_key > 0)
+  def claim_token(cache_key)
+    deleted = Rails.cache.delete(cache_key)
+    deleted == true
+  end
+
   def execute_with_confirmation(profile, actor_id, confirm_token)
     cache_key = "remove_profile_confirm:#{confirm_token}"
     raw = Rails.cache.read(cache_key)
+
+    # CLAIM-PRIMÉIRO: o token sai do cache ANTES de qualquer validação
+    # (bloqueador C3b-r4: read→validar→delete deixava duas chamadas
+    # concorrentes com o mesmo token validando antes de qualquer delete).
+    # Quem falha no claim não valida nada — destruição dupla impossível.
+    unless claim_token(cache_key)
+      return error('Confirmação inválida ou inexistente')
+    end
 
     # Mesma convenção da gravação (JSON string, chaves string) — parse com
     # guard para valores ausentes/corrompidos.
@@ -315,14 +337,12 @@ class RemoveProfileTool < ManagementToolBase
     end
 
     unless cached.is_a?(Hash)
-      Rails.cache.delete(cache_key)
       return error('Confirmação inválida ou inexistente')
     end
 
     # Expiration check MUST come before actor/action/target checks
     expires_at = Time.iso8601(cached['expires_at']) rescue nil
     if expires_at.nil? || expires_at < Time.current
-      Rails.cache.delete(cache_key)
       return error('Confirmação expirada')
     end
 
@@ -338,9 +358,13 @@ class RemoveProfileTool < ManagementToolBase
       return error('Confirmação para alvo diferente')
     end
 
-    # Token válido — consome (usa uma única vez) e executa destroy!
-    Rails.cache.delete(cache_key)
-
+    # Token válido e consumido (claim atomico) — executa destroy!
+    # Decisão documentada: se o destroy! falhar (RecordNotDestroyed /
+    # InvalidForeignKey), o token PERMANECE consumido — o claim já aconteceu
+    # antes do destroy e a falha não devolve a chave. O dono pede uma
+    # confirmação NOVA (token novo) para tentar de novo: em ações
+    # destrutivas, reexecução automática após falha é mais perigosa que
+    # uma reconfirmação.
     formatted = format_profile(profile)
     audit_payload = {
       id: profile.id,

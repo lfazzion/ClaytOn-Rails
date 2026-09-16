@@ -353,6 +353,36 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert SocialProfile.exists?(profile_b.id)
   end
 
+  test 'remove_profile com confirm_token de ação diferente NÃO autoriza (vínculo de ação)' do
+    profile = create(:social_profile, :twitter, platform_username: 'action_bind')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'action_bind')
+    token = preview[:data][:confirm_token]
+
+    # Corrompe o vínculo: o token passa a apontar para outra ação (a
+    # implementação grava/leve a convenção JSON com chaves string; manter a
+    # convenção ao manipular — ver teste de expiração).
+    cache_key = "remove_profile_confirm:#{token}"
+    raw = Rails.cache.read(cache_key)
+    if raw.is_a?(String)
+      hash = JSON.parse(raw)
+      hash['action'] = 'add_profile'
+      Rails.cache.write(cache_key, JSON.generate(hash))
+    else
+      Rails.cache.write(cache_key, raw.merge(action: 'add_profile'))
+    end
+
+    res = tool.execute(identifier: 'action_bind', confirm_token: token)
+
+    assert_equal :error, res[:status]
+    assert_includes res[:reason], 'ação diferente'
+    # O alvo NÃO é destruído: o vínculo de ação protege contra regressão.
+    assert SocialProfile.exists?(profile.id)
+    # E o token foi consumido (claim): não serve nem para nova tentativa.
+    refute Rails.cache.exist?(cache_key)
+  end
+
   test 'remove_profile com confirm_token expirado NÃO autoriza' do
     profile = create(:social_profile, :twitter, platform_username: 'expired_target')
 
@@ -382,7 +412,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert SocialProfile.exists?(profile.id)
   end
 
-  test 'remove_profile com confirm_token válido EXECUTA destroy! uma única vez' do
+  test 'remove_profile com confirm_token válido EXECUTA destroy! uma única vez (consumo provado)' do
     profile = create(:social_profile, :twitter, platform_username: 'valid_confirm')
 
     tool = RemoveProfileTool.new
@@ -395,10 +425,53 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     assert_equal 'removed', res1[:data][:status]
     refute SocialProfile.exists?(profile.id)
 
-    # Segunda execução com MESMO token não repete (perfil já não existe)
+    # Prova o CONSUMO mesmo quando a segunda chamada é legítima: o alvo
+    # reexiste (perfil do mesmo handle criado de novo), então a 2ª chamada
+    # passa em find_profile e CHEGA na validação do token — e é o token
+    # consumido (claim) que a recusa, não o alvo ausente.
+    profile2 = create(:social_profile, :twitter, platform_username: 'valid_confirm')
     res2 = tool.execute(identifier: 'valid_confirm', confirm_token: token)
+
     assert_equal :error, res2[:status]
-    assert_includes res2[:reason], 'não encontrado'
+    assert_includes res2[:reason], 'Confirmação inválida ou inexistente'
+    assert SocialProfile.exists?(profile2.id), 'o alvo reexistente NÃO pode ser destruído com token já consumido'
+  end
+
+  test 'duas chamadas concorrentes com o MESMO token executam destroy! exatamente uma vez (consumo atômico)' do
+    profile = create(:social_profile, :twitter, platform_username: 'race_confirm')
+
+    tool = RemoveProfileTool.new
+    preview = tool.execute(identifier: 'race_confirm')
+    token = preview[:data][:confirm_token]
+    cache_key = "remove_profile_confirm:#{token}"
+    assert Rails.cache.exist?(cache_key)
+
+    # Duas threads reais correm para consumir o MESMO token. claim_token é
+    # um delete atômico com retorno conferido: em ambos os stores reais só
+    # UM delete consegue apagar a chave (FileStore: File.delete — o SO
+    # garante exclusão única; SolidCache: DELETE...WHERE no SQLite — 1ª
+    # transação apaga, a 2ª recebe 0 linhas). Os demais 3 caminhos
+    # (diferentes atores, alvo inexistente, claim vencido) NÃO executam
+    # destroy!.
+    barrier = Queue.new
+    2.times { barrier << true }
+    results = Array.new(2)
+    threads = 2.times.map do |i|
+      Thread.new do
+        Thread.current[:cleitin_actor] = { user_id: '12345', username: 'dono' }
+        barrier.pop # as duas threads só prosseguem juntas — a corrida é real
+        results[i] = tool.execute(identifier: 'race_confirm', confirm_token: token)
+      end
+    end
+    threads.each(&:join)
+
+    execs = results.count { |r| r[:status] == :success }
+    rejeitadas = results.count { |r| r[:status] == :error && r[:reason].include?('Confirmação inválida ou inexistente') }
+
+    assert_equal 1, execs, 'duas execuções = destruição dupla (bloqueador)'
+    assert_equal 1, rejeitadas, 'exatamente uma rejeição por token consumido'
+    refute SocialProfile.exists?(profile.id)
+    refute Rails.cache.exist?(cache_key), 'o token deve ter saído do cache'
   end
 
   test 'remove_profile por handle remove perfil de verdade (destroy!) após confirmação válida' do
@@ -520,6 +593,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     tool = RemoveProfileTool.new
     preview = tool.execute(identifier: 'not_destroyed')
     token = preview[:data][:confirm_token]
+    cache_key = "remove_profile_confirm:#{token}"
 
     SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::RecordNotDestroyed.new('Failed to destroy', profile))
 
@@ -527,6 +601,17 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
     assert_equal :error, res[:status]
     assert_includes res[:reason], 'Erro ao remover'
+    # DECISÃO (ressalva 3): em falha do destroy! o token PERMANECE consumido.
+    # O claim (delete atômico) acontece ANTES do destroy! — a falha não devolve
+    # a chave. O dono precisa pedir uma confirmação NOVA para tentar de novo:
+    # em ação destrutiva, reexecução automática pós-falha é mais perigosa que
+    # reconfirmação.
+    refute Rails.cache.exist?(cache_key), 'token não pode ser liberado após falha do destroy!'
+    # O alvo também NÃO pode ser destruído de novo reusando o token morto.
+    res2 = tool.execute(identifier: 'not_destroyed', confirm_token: token)
+    assert_equal :error, res2[:status]
+    assert_includes res2[:reason], 'Confirmação inválida ou inexistente'
+    assert SocialProfile.exists?(profile.id), 'o alvo sobrevivente não pode ser destruído com token consumido'
   end
 
   test 'remove_profile rescata InvalidForeignKey e retorna erro amigavel' do
@@ -535,6 +620,7 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
     tool = RemoveProfileTool.new
     preview = tool.execute(identifier: 'fk_error_user')
     token = preview[:data][:confirm_token]
+    cache_key = "remove_profile_confirm:#{token}"
 
     SocialProfile.any_instance.stubs(:destroy!).raises(ActiveRecord::InvalidForeignKey.new('Foreign key violation'))
 
@@ -542,6 +628,9 @@ class ProfileManagementToolsTest < ActiveSupport::TestCase
 
     assert_equal :error, res[:status]
     assert_includes res[:reason], 'Erro ao remover'
+    # Mesma decisão do teste acima: falha do destroy! NÃO libera o token.
+    refute Rails.cache.exist?(cache_key)
+    assert SocialProfile.exists?(profile.id)
   end
 
   test 'remove_profile grava log de auditoria estruturado antes do destroy' do
