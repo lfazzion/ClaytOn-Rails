@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_09_04_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_09_16_200000) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -102,7 +102,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_04_120000) do
     t.datetime "created_at", null: false
     t.text "description"
     t.string "external_id", null: false
-    t.string "genres"
+        t.string "genres"
+    t.datetime "last_sent_at"
     t.string "media_type"
     t.json "metadata", default: {}
     t.string "original_language"
@@ -115,6 +116,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_04_120000) do
     t.datetime "updated_at", null: false
     t.float "vote_average"
     t.integer "vote_count"
+    t.index ["last_sent_at"], name: "index_external_catalogs_on_last_sent_at"
     t.index ["media_type"], name: "index_external_catalogs_on_media_type"
     t.index ["release_date"], name: "index_external_catalogs_on_release_date"
     t.index ["source", "external_id"], name: "index_external_catalogs_on_source_and_external_id", unique: true

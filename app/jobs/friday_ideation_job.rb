@@ -27,6 +27,8 @@ class FridayIdeationJob < ApplicationJob
       else
         raise
       end
+    else
+      mark_catalogs_as_sent(@sent_catalog_ids)
     end
     Rails.logger.info "[FridayIdeationJob] Digest de ideias enviado para canal #{channel_id}"
   end
@@ -46,7 +48,8 @@ class FridayIdeationJob < ApplicationJob
       lines << ''
     end
 
-    popular_catalogs = ExternalCatalog.popular.limit(5)
+    popular_catalogs = ExternalCatalog.popular_recent(30).limit(5)
+    @sent_catalog_ids = popular_catalogs.map(&:id)
     if popular_catalogs.any?
       lines << '**Catálogos populares recentes:**'
       popular_catalogs.each do |c|
@@ -74,5 +77,11 @@ class FridayIdeationJob < ApplicationJob
     end
 
     lines.join("\n")
+  end
+
+  def mark_catalogs_as_sent(ids)
+    return if ids.blank?
+
+    ExternalCatalog.where(id: ids).update_all(last_sent_at: Time.current)
   end
 end

@@ -200,4 +200,22 @@ class Last30DaysTopicJobTest < ActiveSupport::TestCase
 
     assert res[:sent]
   end
+
+  # S2-10: Garantia transacional no envio — falha no Discord não consome os itens
+  test "perform quando envio no Discord falha nao grava TopicDelivery para permitir retry (S2-10)" do
+    hn_results = [{ "title" => "Rails 8.1 Released", "url" => "https://rubyonrails.org/8.1", "source" => "hackernews" }]
+    Fetcher::Channels::Hackernews.stubs(:search).returns(hn_results)
+    Fetcher::Channels::Github.stubs(:search).returns([])
+    Fetcher::Channels::Polymarket.stubs(:search).returns([])
+
+    DiscordApiClient.stubs(:send_message).raises(RuntimeError.new("Discord API error"))
+
+    job = Last30DaysTopicJob.new
+    assert_raises(RuntimeError) do
+      job.perform(@topic.id, "123456")
+    end
+
+    assert_equal 0, TopicDelivery.where(topic_id: @topic.id).count,
+                 "TopicDelivery não deve ser gravado se o envio para o Discord falhar"
+  end
 end

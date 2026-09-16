@@ -224,5 +224,125 @@ test 'perform formata sugestoes quando LLM devolve bloco JSON' do
   ensure
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end
+
+  # S2-01 / S2-02: Dedup por envio anterior na janela de 30 dias
+  test 'perform nao repete catalogos ja enviados na janela de 30 dias' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+    create(:external_catalog, title: 'Anime Ja Enviado 1', popularity: 100.0, last_sent_at: 2.days.ago)
+    create(:external_catalog, title: 'Anime Ja Enviado 2', popularity: 95.0, last_sent_at: 10.days.ago)
+    create(:external_catalog, title: 'Anime Novo 1', popularity: 80.0, last_sent_at: nil)
+    create(:external_catalog, title: 'Anime Novo 2', popularity: 75.0, last_sent_at: nil)
+    create(:external_catalog, title: 'Anime Reenviavel', popularity: 70.0, last_sent_at: 40.days.ago)
+
+    mock_response = stub(content: 'Sugestões')
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    sent_message = nil
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      sent_message = msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    assert_not_nil sent_message
+    refute_includes sent_message, 'Anime Ja Enviado 1'
+    refute_includes sent_message, 'Anime Ja Enviado 2'
+    assert_includes sent_message, 'Anime Novo 1'
+    assert_includes sent_message, 'Anime Novo 2'
+    assert_includes sent_message, 'Anime Reenviavel'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  # S2-01: Recência (publicado/coletado recentemente)
+  test 'perform prioriza catalogos com recencia de coleta ou publicacao' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+    create(:external_catalog, title: 'Anime Muito Antigo', popularity: 99.0, created_at: 60.days.ago, release_date: 60.days.ago.to_date)
+    create(:external_catalog, title: 'Anime Coletado Recente', popularity: 60.0, created_at: 2.days.ago, release_date: 90.days.ago.to_date)
+    create(:external_catalog, title: 'Anime Lancado Recente', popularity: 50.0, created_at: 60.days.ago, release_date: 5.days.ago.to_date)
+
+    mock_response = stub(content: 'Sugestões')
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    sent_message = nil
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      sent_message = msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    assert_not_nil sent_message
+    refute_includes sent_message, 'Anime Muito Antigo'
+    assert_includes sent_message, 'Anime Coletado Recente'
+    assert_includes sent_message, 'Anime Lancado Recente'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  # S2-02: Idempotência de reexecução no mesmo período
+  test 'perform marca de envio e idempotente em re-execucoes no mesmo periodo' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+    cat1 = create(:external_catalog, title: 'Anime Idempotente 1', popularity: 90.0)
+    cat2 = create(:external_catalog, title: 'Anime Idempotente 2', popularity: 80.0)
+
+    mock_response = stub(content: 'Sugestões')
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    messages = []
+    DiscordApiClient.stubs(:send_message).with do |_channel, msg|
+      messages << msg
+      true
+    end
+
+    job = FridayIdeationJob.new
+    job.perform
+
+    cat1.reload
+    cat2.reload
+    assert_not_nil cat1.last_sent_at, 'last_sent_at deve ser preenchido após envio com sucesso'
+    assert_not_nil cat2.last_sent_at, 'last_sent_at deve ser preenchido após envio com sucesso'
+
+    cat3 = create(:external_catalog, title: 'Anime Idempotente 3', popularity: 70.0)
+
+    job.perform
+
+    assert_equal 2, messages.size
+    first_run_msg = messages.first
+    second_run_msg = messages.second
+
+    assert_includes first_run_msg, 'Anime Idempotente 1'
+    assert_includes first_run_msg, 'Anime Idempotente 2'
+
+    assert_includes second_run_msg, 'Anime Idempotente 3'
+    refute_includes second_run_msg, 'Anime Idempotente 1'
+    refute_includes second_run_msg, 'Anime Idempotente 2'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  # S2-02: Envio falho não marca last_sent_at
+  test 'perform nao marca catalogos como enviados se o envio no Discord falhar' do
+    ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
+    cat = create(:external_catalog, title: 'Anime Falha Envio', popularity: 85.0)
+
+    mock_response = stub(content: 'Sugestões')
+    AiRouter.stubs(:complete).returns(mock_response)
+
+    DiscordApiClient.stubs(:send_message).raises(RuntimeError.new('Discord indisponivel 500'))
+
+    job = FridayIdeationJob.new
+    assert_raises(RuntimeError) do
+      job.perform
+    end
+
+    cat.reload
+    assert_nil cat.last_sent_at, 'last_sent_at não deve ser gravado se o envio para o Discord falhar'
+  ensure
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
 end
 

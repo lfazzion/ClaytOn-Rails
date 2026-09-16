@@ -100,4 +100,37 @@ class ExternalCatalogTest < ActiveSupport::TestCase
     assert_nil catalog.vote_count
     assert catalog.valid?
   end
+
+  test "popular scope tem desempate deterministico por id (S2-04)" do
+    cat_b = create(:external_catalog, title: 'Cat B', popularity: 50.0)
+    cat_a = create(:external_catalog, title: 'Cat A', popularity: 50.0)
+
+    results = ExternalCatalog.popular.where(id: [cat_a.id, cat_b.id])
+    expected_order = [cat_b, cat_a].sort_by(&:id)
+    assert_equal expected_order.map(&:id), results.pluck(:id)
+  end
+
+  test "unsent scope filtra registros enviados na janela de dias especificada" do
+    sent_recent = create(:external_catalog, last_sent_at: 5.days.ago)
+    sent_old = create(:external_catalog, last_sent_at: 35.days.ago)
+    never_sent = create(:external_catalog, last_sent_at: nil)
+
+    results = ExternalCatalog.unsent(30)
+    assert_includes results, never_sent
+    assert_includes results, sent_old
+    refute_includes results, sent_recent
+  end
+
+  test "popular_recent scope combina recencia, dedup de envio e ordenacao deterministica" do
+    cat_old = create(:external_catalog, title: 'Antigo', popularity: 100.0, created_at: 40.days.ago, release_date: 40.days.ago.to_date)
+    cat_sent = create(:external_catalog, title: 'Ja Enviado', popularity: 90.0, last_sent_at: 3.days.ago)
+    cat_ok2 = create(:external_catalog, title: 'Ok 2', popularity: 70.0)
+    cat_ok1 = create(:external_catalog, title: 'Ok 1', popularity: 80.0)
+
+    results = ExternalCatalog.popular_recent(30)
+    refute_includes results, cat_old
+    refute_includes results, cat_sent
+    assert_equal cat_ok1, results.first
+    assert_equal cat_ok2, results.second
+  end
 end

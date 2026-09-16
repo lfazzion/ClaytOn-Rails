@@ -84,8 +84,10 @@ class Last30DaysTopicJob < ApplicationJob
     message = result[:text]
     rendered_keys = result[:url_keys]
 
-    # Achado 5: find_or_initialize_by + save! — atualiza sent_at SEMPRE,
-    # não só no create (find_or_create_by! só executa o bloco no create).
+    # S2-10: Enviar para o Discord PRIMEIRO. Gravar TopicDelivery apenas apos
+    # envio com sucesso, garantindo idempotencia transacional em caso de retry.
+    send_message_chunks(channel_id, message)
+
     now = Time.current
     rendered_keys.each do |uk|
       td = TopicDelivery.find_or_initialize_by(topic_id: topic.id, url_key: uk)
@@ -95,8 +97,6 @@ class Last30DaysTopicJob < ApplicationJob
       # Concorrência: outro worker gravou antes; tenta atualizar
       TopicDelivery.where(topic_id: topic.id, url_key: uk).update_all(sent_at: now)
     end
-
-    send_message_chunks(channel_id, message)
     Rails.logger.info "[Last30DaysTopicJob] Digest do tópico #{topic.name} enviado para canal #{channel_id}"
 
     { topic_id: topic.id, clusters: filtered_clusters, sent: true }
