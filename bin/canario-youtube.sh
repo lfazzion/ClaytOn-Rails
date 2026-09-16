@@ -3,8 +3,10 @@
 # canario-youtube.sh — Canário C1 para coleta do YouTube.
 #
 # Mede, por canal, quatro braços de execução do yt-dlp e classifica cada
-# um com os MESMOS padrões do classificador do serviço
-# (lib/scraping/services/youtube_scraper_service.rb, classify_failure_cause):
+# um com a MESMA FONTE ÚNICA do classificador do serviço:
+# lib/scraping/failure_cause_classify.rb (consumido pelo serviço via
+# require e pelo canário via `ruby -r`; ver "Classificador de causa —
+# fonte ÚNICA" mais abaixo e o teste B10):
 #
 #   bot_check / members_only / timeout / network / session_rejected / "-"
 #
@@ -78,8 +80,14 @@ YT_DLP="${YT_DLP:-yt-dlp}"
 # mantém o padrão do serviço para que a medição seja comparável.
 CANARY_LOCALE="${CANARY_LOCALE:-1}"
 
-# Flags extra opcionais (ex.: --js-runtimes, quando deno existe na máquina).
+# Flags extra opcionais (ex.: --js-runtimes, quando deno existe na VM).
 CANARY_EXTRA_ARGS="${CANARY_EXTRA_ARGS:-}"
+
+# B10: fonte única de classificação — o MESMO módulo que o serviço consome,
+# resolvido a partir deste script (canario-youtube.sh vive em bin/).
+# Apontar CANARY_CLASSIFIER para um path inexistente força a cópia embutida
+# (o teste B10 usa exatamente isso para provar a sincronia da cópia).
+CANARY_CLASSIFIER="${CANARY_CLASSIFIER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/scraping/failure_cause_classify.rb}"
 
 # ---------------------------------------------------------------------------
 # Limpeza dos temporários por trap (6): a cópia do jar nasce com a permissão
@@ -145,14 +153,24 @@ count_entries() {
 }
 
 # ---------------------------------------------------------------------------
-# Classificador de causa — idêntico em padrões e PRIORIDADE ao método
-# classify_failure_cause do serviço (downcase + concatenação de stderr+stdout):
-#   1) "sign in to confirm" / "bot"            -> bot_check
-#   2) "member-only" / "members only"          -> members_only
-#   3) "timed out" / "timeout"                 -> timeout
-#   4) "connection reset"/"network"/"unreachable"/"resolve host" -> network
-#   5) "cookies are no longer valid"/"session rejected"/"auth_token" -> session_rejected
-#   senão                                        -> "-"
+# Classificador de causa — fonte ÚNICA (B10).
+#
+# Caminho primário: o canário delega a classificação ao MESMO módulo que o
+# serviço consome (lib/scraping/failure_cause_classify.rb, executado via
+# `ruby -r`). É o MESMO CÓDIGO de produção — a divergência do canário antigo
+# (que reimplementava "sign in to confirm"||"bot" sem fronteiras e perdia o
+# "members-only" hifenizado) ficou impossível de reocorrer no caminho
+# primário.
+#
+# Cópia embutida (fallback): replica os padrões específicos de produção e só é
+# usada quando a fonte única está indisponível (sem Ruby no host ou módulo
+# ausente). Ela é mantida em sincronia PELA BATERIA — o teste "B10: canário
+# classifica idêntico ao serviço" (test/lib/scraping/services/youtube_scraper
+# _service_test.rb) roda os DOIS caminhos (delegação e cópia embutida, via
+# CANARY_CLASSIFIER) na mesma bateria de entradas; divergência trava o teste.
+#
+# Prioridade (idêntica ao serviço):
+#   bot_check > members_only > timeout > network > session_rejected > "-"
 # ---------------------------------------------------------------------------
 classify_cause() {
   local stderr_file="$1" stdout_file="$2"
@@ -160,17 +178,42 @@ classify_cause() {
   # Junta stderr+stdout e baixa para minúsculas, como o serviço.
   msg="$({ cat "$stderr_file"; cat "$stdout_file"; } 2>/dev/null | tr '[:upper:]' '[:lower:]')"
 
-  if [[ "$msg" == *"sign in to confirm"* || "$msg" == *"bot"* ]]; then
+  # B10 (caminho primário): fonte única — o módulo que o serviço consome.
+  local ruby_cause
+  if [[ -f "${CANARY_CLASSIFIER:-}" ]] && command -v ruby >/dev/null 2>&1; then
+    if ruby_cause="$(ruby -r"$CANARY_CLASSIFIER" -e '
+      msg = (File.read(ARGV[0]) + File.read(ARGV[1])).downcase
+      causa = FailureCauseClassify.classify_failure_cause(msg)[0]
+      puts(causa == "unknown" ? "-" : causa)
+    ' "$stderr_file" "$stdout_file" 2>/dev/null)"; then
+      printf '%s\n' "$ruby_cause"
+      return 0
+    fi
+    echo "[CANÁRIO] WARN: fonte única de classificação indisponível (${CANARY_CLASSIFIER}); usando cópia embutida" >&2
+  fi
+
+  # B10 (fallback): cópia embutida dos padrões específicos de produção,
+  # sincronizada com lib/scraping/failure_cause_classify.rb pela bateria
+  # (teste B10). Os padrões rodam sobre msg (já em minúsculas), em ERE:
+  # as fronteiras ("sign in to confirm your age" NÃO completa a frase de
+  # anti-bot; "robot"/"hobbit" NÃO casam em nenhuma) estão nos grupos
+  # alternados — não em sub-string solta como o canário antigo.
+  local re_bot re_members re_timeout re_network re_session
+  re_bot='sign in to confirm (you.re|you are) *(a )?(not a )?(bot|human|robot)|verify (you.re|you are) *(a )?(not a )?(robot|bot|human)|i.m not a robot|are you (a )?(bot|robot)|unusual traffic|access to this page has been (temporarily )?limited|suspicious (activity|traffic)'
+  re_members='members? *-? *only'
+  re_timeout='timed out|timeout'
+  re_network='connection reset|network|unreachable|resolve host'
+  re_session='cookies are no longer valid|session rejected|auth_token'
+
+  if [[ "$msg" =~ $re_bot ]]; then
     echo "bot_check"
-  elif [[ "$msg" == *"member-only"* || "$msg" == *"members only"* ]]; then
+  elif [[ "$msg" =~ $re_members ]]; then
     echo "members_only"
-  elif [[ "$msg" == *"timed out"* || "$msg" == *"timeout"* ]]; then
+  elif [[ "$msg" =~ $re_timeout ]]; then
     echo "timeout"
-  elif [[ "$msg" == *"connection reset"* || "$msg" == *"network"* || \
-          "$msg" == *"unreachable"* || "$msg" == *"resolve host"* ]]; then
+  elif [[ "$msg" =~ $re_network ]]; then
     echo "network"
-  elif [[ "$msg" == *"cookies are no longer valid"* || "$msg" == *"session rejected"* || \
-          "$msg" == *"auth_token"* ]]; then
+  elif [[ "$msg" =~ $re_session ]]; then
     echo "session_rejected"
   else
     echo "-"
@@ -321,16 +364,22 @@ fi
 echo
 echo "RESUMO — como ler os padrões:"
 echo "  rc=0 e entradas>0 ........ o braço LISTOU vídeos: coleta saudável (causa '-')."
-echo "  causa=bot_check ........... o YouTube respondeu 'sign in to confirm'/'bot': o IP"
-echo "                             está sob anti-bot. Nem cookie real nem mweb resolvem;"
-echo "                             o que falta é PO Token / IP residencial (exatamente o"
-echo "                             achado do maestro: 8 braços, todos rc=1 + bot_check)."
+echo "  causa=bot_check ........... o stderr casou com uma FRASE de anti-bot (a MESMA"
+echo "                             lista de produção, via fonte única failure_cause_"
+echo "                             classify.rb): o IP está sob anti-bot. Nem cookie real"
+echo "                             nem mweb resolvem; o que falta é PO Token / IP"
+echo "                             residencial (exatamente o achado do maestro: 8"
+echo "                             braços, todos rc=1 + bot_check)."
 echo "  causa=session_rejected .. cookie existe mas a sessão foi rejeitada ('cookies are"
 echo "                             no longer valid' / 'session rejected' / 'auth_token')."
-echo "  causa=members_only ...... o canal/aba requer membros pagos."
+echo "  causa=members_only ...... o canal/aba requer membros pagos ('member-only',"
+echo "                             'members-only' hifenizado, 'members only')."
 echo "  causa=timeout ............ estourou CANARY_TIMEOUT (ou 'timed out' no stderr)."
 echo "  causa=network ............ falha de rede ('connection reset' / 'unreachable' /"
 echo "                             'resolve host')."
+echo "  causa=- com rc!=0 ......... falha com stderr que NÃO casou nenhum padrão de"
+echo "                             produção (causa 'unknown' no serviço): a leitura do"
+echo "                             stderr está no artefato — não dá para afirmar a causa."
 echo "  entradas=0 com rc!=0 ..... não listou nada; a causa acima diz por quê."
 echo
 echo "Leitura prática:"

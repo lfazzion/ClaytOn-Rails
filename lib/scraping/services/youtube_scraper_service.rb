@@ -40,30 +40,17 @@ module ScrapingServices
       OpenSSL::SSL::SSLError
     ].filter_map { |name| Object.const_get(name) rescue nil }.freeze
 
-    # B5: anti-bot é reconhecido APENAS por frases específicas de verificação
-    # anti-bot — a sub-string genérica `bot` e o prefixo `sign in to confirm`
-    # (que batia em "confirm your age") eram os furos. Cada padrão casa uma
-    # frase completa de anti-bot; `bot` solto, "robotic", "hobbit" etc. NÃO
-    # batem em nenhum, e "sign in to confirm your age" NÃO completa nenhuma
-    # frase → cai em `unknown`, não `bot_check`.
-    BOT_CHECK_PATTERNS = [
-      # O anti-bot canônico do YouTube (frase dos fixtures); casa por
-      # sub-string, então também cobre "please sign in to confirm you're not a
-      # bot". Aceita apostrofo reto (') ou curvo (\u2019).
-      /sign in to confirm (you['\u2019]?re|you are)\s*(a )?(not a )?(bot|human|robot)/i,
-      /verify (you['\u2019]?re|you are)\s*(a )?(not a )?(robot|bot|human)/i,
-      /i['\u2019]?m not a robot/i,
-      /are you (a )?(bot|robot)/i,
-      # IP sob bloqueio anti-bot (sem exigir sign-in).
-      /unusual traffic/i,
-      /access to this page has been (temporarily )?limited/i,
-      /suspicious (activity|traffic)/i
-    ].freeze
+    # B10: fonte ÚNICA dos padrões — lib/scraping/failure_cause_classify.rb,
+    # consumida pelo serviço (este require) e pelo canário (bin/canario-youtube.sh,
+    # via `ruby -r <este arquivo>`). A divergência do canário antigo ("sign in to
+    # confirm"||"bot" sem fronteiras; `members-only` hifenizado não reconhecido)
+    # ficou impossível de reocorrer: os DOIS lados executam o MESMO código.
+    require_relative '../failure_cause_classify'
 
-    # `members?` casa a singular `member` e a plural `members`; `\s*-?\s*` casa
-    # o hífen ou o espaço. Resultado: cobre `member-only`, `members-only`
-    # (plural hifenizado, que o padrão antigo não reconhecia) e `members only`.
-    MEMBERS_ONLY_PATTERN = /members?\s*-?\s*only/i.freeze
+    # Causas reconhecidas pelo classificador (fonte única no módulo;
+    # enumerada aqui só para documentação/validação do contrato de 3-tupla
+    # que o job e o canário leem).
+    FAILURE_CAUSES = %w[bot_check members_only timeout network session_rejected unknown].freeze
 
     # Erros de parse do output (JSON malformado) do yt-dlp: mapeados para a
     # causa `unknown` (parser não é uma causa nomeada do item 3, e NUNCA
@@ -191,27 +178,32 @@ module ScrapingServices
 
       private
 
-      # B8b: monta o resultado quando o /videos teve dados e processa a aba
-      # /shorts: ausente/vazia → segue só /videos (sucesso, causa nil); falha
-      # operacional → parcial nomeado com a causa do /shorts.
+      # B8b/B8: monta o resultado quando o /videos teve dados e processa a
+      # aba /shorts. Regra de causa (o bloqueador 8 fechou o falso sucesso):
+      #   * causa NIL SÓ com status.success? E saída vazia/ausente comprovada
+      #     (canal sem a aba /shorts — ausência inocente, /videos segue valendo);
+      #   * QUALQUER status de falha vira PARCIAL NOMEADO, usando a causa do
+      #     stderr; quando o stderr não casa nenhum padrão, 'unknown' é o
+      #     fallback — NUNCA um "success" silencioso (o furo que B8 fechou).
       def shorts_result(shorts_output, shorts_stderr, shorts_status, videos)
-        shorts_ok = shorts_status.success? && shorts_output.strip.present?
-        if shorts_ok
+        # Sucesso com saída vazia/ausente comprovada: a única situação que
+        # devolve causa nil (aba ausente — canal sem /shorts).
+        if shorts_status.success? && shorts_output.strip.empty?
+          Rails.logger.warn '[YoutubeScraperService] Aba /shorts ausente/vazia (sucesso com saída vazia); seguindo apenas com /videos'
+          return [videos, false, nil]
+        end
+
+        if shorts_status.success?
+          # Sucesso COM dados: mescla /videos + /shorts, causa nil.
           return [videos + parse_video_list(shorts_output), false, nil]
         end
-        # A aba /shorts falhou (ou é vazia). Distingue:
+
+        # Status de FALHA: sempre parcial nomeado. 'unknown' é o fallback quando
+        # o stderr não casa nenhum padrão reconhecido — uma falha operacional
+        # com stderr não reconhecido NUNCA vira "success" silencioso.
         shorts_cause, = classify_failure_cause(shorts_stderr, shorts_output)
-        if shorts_cause && shorts_cause != 'unknown'
-          # Falha OPERACIONAL do /shorts (bot-check/rede/timeout/membros/sessão):
-          # o run é um parcial nomeado — NUNCA "success" (o furo B8b).
-          Rails.logger.warn "[YoutubeScraperService] Aba /shorts com falha operacional (#{shorts_cause}); seguindo com /videos como parcial nomeado"
-          [videos, false, shorts_cause]
-        else
-          # Ausente/vazia inocente (canal sem a aba /shorts, 'unknown'): os
-          # vídeos do /videos seguem valendo, causa nil → success.
-          Rails.logger.warn '[YoutubeScraperService] Aba /shorts sem dados detalhados; seguindo apenas com /videos'
-          [videos, false, nil]
-        end
+        Rails.logger.warn "[YoutubeScraperService] Aba /shorts com falha operacional (#{shorts_cause}); seguindo com /videos como parcial nomeado"
+        [videos, false, shorts_cause]
       end
 
       def extract_videos_flat(channel_url, limit: 10, proxy: nil, cookies_path: nil)
@@ -400,42 +392,16 @@ module ScrapingServices
         "#{message[0, STDERR_LOG_LIMIT]}... [truncado, #{message.length} chars]"
       end
 
+      # B10: delegação ao classificador de fonte ÚNICA
+      # (lib/scraping/failure_cause_classify.rb) — o MESMO módulo que o canário
+      # executa. Junta stderr+stdout, baixa para minúsculas (exatamente o que o
+      # canário faz em bash) e devolve o par [causa, detalhes] do módulo. A
+      # ordem de prioridade (semântico ganha do transporte) e as fronteiras
+      # ("sign in to confirm your age" NÃO é bot; "robot"/"hobbit" NÃO são)
+      # vivem no módulo — não há mais duas implementações para divergirem.
       def classify_failure_cause(stderr, stdout)
         message = [stderr, stdout].compact.join("\n").downcase
-
-        # B5: bot_check APENAS por frase de anti-bot (BOT_CHECK_PATTERNS). O
-        # padrão antigo `message.include?("bot")` capturava qualquer palavra com
-        # "bot" e, pelo prefixo `sign in to confirm`, até "sign in to confirm
-        # your age" virava bot-check.
-        bot = BOT_CHECK_PATTERNS.any? { |re| message =~ re }
-
-        # B5: membros hifenizados (singular `member-only` E plural
-        # `members-only`) via MEMBERS_ONLY_PATTERN.
-        members = MEMBERS_ONLY_PATTERN.match?(message)
-
-        # Ordem importa: anti-bot e membros são sinais SEMÂNTICOS do conteúdo
-        # (o comando terminou, só que bloqueado) — se baterem, ganham de
-        # timeout/rede/sessão (que são sinais de TRANSPORTE). Um bot-check que
-        # também tem "unusual traffic" é bot-check; "timed out" só é timeout se
-        # não tiver sinal semântico antes.
-        cause = if bot
-                  "bot_check"
-                elsif members
-                  "members_only"
-                elsif message.include?("timed out") || message.include?("timeout")
-                  "timeout"
-                elsif message.include?("connection reset") || message.include?("network") ||
-                      message.include?("unreachable") || message.include?("resolve host")
-                  "network"
-                elsif message.include?("cookies are no longer valid") || message.include?("session rejected") ||
-                      message.include?("auth_token")
-                  "session_rejected"
-                else
-                  "unknown"
-                end
-
-        no_cookie_fallback = cause == "session_rejected"
-        [cause, { no_cookie_fallback_allowed?: no_cookie_fallback }]
+        FailureCauseClassify.classify_failure_cause(message)
       end
 
       def parse_metadata(data)

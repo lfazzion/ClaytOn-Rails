@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require 'test_helper'
+require 'open3'
+require 'shellwords'
+require 'tmpdir'
 
 class YoutubeScraperServiceTest < ActiveSupport::TestCase
   # TDD — garante que o stderr do yt-dlp NÃO seja descartado.
@@ -241,10 +244,37 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
     assert_equal [[], false, 'network'], result
   end
 
-  # B8b — /shorts é ENRIQUECIMENTO: ausente/vazia (causa 'unknown') segue
-  # sucesso (causa nil); falha OPERACIONAL (bot-check/rede/timeout/membros)
-  # vira parcial nomeado com a CAUSA DO /SHORTS — nunca "success" silencioso.
-  test 'B8b: /shorts ausente/vazia (causa unknown) segue sucesso com causa nil' do
+  # B8b/B8 — /shorts é ENRIQUECIMENTO. As DUAS fixtures foram separadas (a
+  # antiga mesclava e CRISTALIZAVA o falso sucesso que B8 eliminava):
+  #   * FIXTURE A — aba ausente/vazia BEM-SUCEDIDA: exit 0 e saída vazia.
+  #     Ausência comprovada (canal sem a aba /shorts) → segue sucesso, causa
+  #     nil. É a ÚNICA situação que devolve causa nil.
+  #   * FIXTURE B — falha operacional DESCONHECIDA: exit 1 com stderr que não
+  #     casa nenhum padrão ('unable to extract data'). Vira PARCIAL nomeado
+  #     'unknown' — nunca mais "success" silencioso.
+  # Justificativa da correção (B9): o teste antigo usava exit 1 + 'ERROR:
+  # [youtube] unable to extract data' rotulado "aba ausente/vazia" e exigia
+  # causa nil — codificava exatamente o falso sucesso que o bloqueador 8
+  # existia para eliminar; agora a fixture de falha espera 'unknown'.
+  test 'B8b: /shorts ausente/vazia BEM-SUCEDIDA (exit 0, saída vazia) segue sucesso com causa nil' do
+    svc = ScrapingServices::YoutubeScraperService
+    fake_ok = stub(success?: true, exitstatus: 0)
+    videos_json = "{\"id\":\"v1\",\"title\":\"V1\",\"webpage_url\":\"https://youtube.com/watch?v=v1\"}\n" \
+                  "{\"id\":\"v2\",\"title\":\"V2\",\"webpage_url\":\"https://youtube.com/watch?v=v2\"}\n"
+
+    svc.stubs(:build_videos_command).returns(['yt-dlp', 'vdetail'])
+    svc.stubs(:build_shorts_command).returns(['yt-dlp', 'sdetail'])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'vdetail']).returns([videos_json, '', fake_ok])
+    svc.stubs(:execute_yt_dlp).with(['yt-dlp', 'sdetail']).returns(['', '', fake_ok])
+
+    videos, fallback, cause = svc.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 3)
+
+    assert_equal 2, videos.size, '/videos segue valendo quando /shorts é ausente (sucesso com saída vazia)'
+    refute fallback
+    assert_nil cause, 'ausência inocente de /shorts comprovada pelo exit 0 NÃO degrada o run (sucesso, causa nil)'
+  end
+
+  test 'B8b: falha OPERACIONAL em /shorts com stderr não reconhecido vira parcial com causa unknown' do
     svc = ScrapingServices::YoutubeScraperService
     fake_ok = stub(success?: true, exitstatus: 0)
     fake_fail = stub(success?: false, exitstatus: 1)
@@ -258,9 +288,106 @@ class YoutubeScraperServiceTest < ActiveSupport::TestCase
 
     videos, fallback, cause = svc.extract_videos_detailed('https://www.youtube.com/@TeGeCe', limit: 3)
 
-    assert_equal 2, videos.size, '/videos segue valendo quando /shorts é ausente/vazia'
-    refute fallback
-    assert_nil cause, 'ausência inocente de /shorts NÃO degrada o run (sucesso, causa nil)'
+    assert_equal 2, videos.size, '/videos segue valendo na falha operacional do /shorts'
+    refute fallback, 'o run NÃO cai em fallback flat: é um PARCIAL nomeado'
+    assert_equal 'unknown', cause,
+                 'falha (exit 1) com stderr não reconhecido é parcial NOMEADO unknown — nunca "success" com causa nil'
+  end
+
+  # B10 — o canário (bin/canario-youtube.sh) tem de classificar com a MESMA
+  # fonte única do serviço (lib/scraping/failure_cause_classify.rb). O
+  # classificador em bash do canário antigo reimplementava os padrões e
+  # divergiu ("sign in to confirm"||"bot" sem fronteiras batia em
+  # "confirm your age"/"robot"; "members-only" hifenizado não era
+  # reconhecido) — o artefato de diagnóstico reportava falsos bot_check e
+  # perdia members_only. Este teste extrai a função classify_cause do
+  # canário e a roda na MESMA bateria do classify_failure_cause do serviço;
+  # qualquer divergência volta a travar aqui.
+  test 'B10: canário classifica idêntico ao serviço (bateria da fonte única)' do
+    # Este teste vive em test/lib/scraping/services/ → a raiz do repo está
+    # 4 níveis acima (__dir__ = .../test/lib/scraping/services).
+    root = File.expand_path('../../../..', __dir__)
+    canario_sh = File.join(root, 'bin/canario-youtube.sh')
+    module_rb = File.join(root, 'lib/scraping/failure_cause_classify.rb')
+    assert File.exist?(canario_sh), "canário ausente: #{canario_sh}"
+    assert File.exist?(module_rb), "fonte única ausente: #{module_rb}"
+
+    fn = File.read(canario_sh)[/^classify_cause\(\) \{.*?^\}/m]
+    refute_nil fn, 'não consegui extrair classify_cause() do canário (a função deve permanecer autocontida)'
+
+    # As 5 entradas que o revisor assinalou + timeout/rede/sessão para
+    # pinar o classificador inteiro. Cada caso: [entrada, causa esperada].
+    bateria = [
+      ['sign in to confirm your age', 'unknown'],
+      ['robot', 'unknown'],
+      ['hobbit', 'unknown'],
+      ['members-only', 'members_only'],
+      ["Sign in to confirm you're not a bot", 'bot_check'],
+      ['Read timed out while connecting', 'timeout'],
+      ['connection reset by peer', 'network'],
+      ['cookies are no longer valid', 'session_rejected']
+    ]
+
+    Dir.mktmpdir do |dir|
+      battery_file = File.join(dir, 'battery.txt')
+      script_file = File.join(dir, 'driver.sh')
+      File.write(battery_file, bateria.map { |m, _| m }.join("\n") + "\n")
+
+      # Driver: injeta a função extraída do canário + laço que alimenta
+      # stderr/stdout por entrada e imprime "entrada => causa".
+      # Nota: `fn` termina em "}" SEM quebra de linha — separo com "\n" explícito,
+      # senão cola em "}battery_file=" (syntax error medido no 1º run).
+      driver = +"#!/usr/bin/env bash\nset -euo pipefail\n"
+      driver << fn
+      driver << "\n"
+      driver << <<~'EOS'
+        battery_file="$1"
+        dir_err="$(mktemp)"
+        dir_out="$(mktemp)"
+        trap 'rm -f "$dir_err" "$dir_out"' EXIT
+        while IFS= read -r input; do
+          [ -z "$input" ] && continue
+          printf '%s' "$input" > "$dir_err"
+          : > "$dir_out"
+          cause="$(classify_cause "$dir_err" "$dir_out")"
+          printf '%s => %s\n' "$input" "$cause"
+        done < "$battery_file"
+      EOS
+      File.write(script_file, driver)
+
+      out, err, status = Open3.capture3(
+        "CANARY_CLASSIFIER=#{Shellwords.escape(module_rb)} bash #{Shellwords.escape(script_file)} #{Shellwords.escape(battery_file)}"
+      )
+      assert status.success?, "driver do canário (fonte única) falhou:\n#{err}\n#{out}"
+
+      # O canário escreve '-' para causa inexistente; o serviço escreve
+      # 'unknown'. Normaliza para comparar (o contrato da tabela é '-').
+      canario = out.each_line.map { |l| l.chomp.split(' => ', 2) }.to_h
+
+      # B10-guarda: força o CAMINHO EMBUTIDO do canário (CANARY_CLASSIFIER
+      # apontando para módulo inexistente) e mede a MESMA bateria — a cópia
+      # embutida no bash tem de se sincronizar com a fonte única.
+      out2, err2, status2 = Open3.capture3(
+        "CANARY_CLASSIFIER=/nonexistent-module.rb bash #{Shellwords.escape(script_file)} #{Shellwords.escape(battery_file)}"
+      )
+      assert status2.success?, "driver do canário (cópia embutida) falhou:\n#{err2}\n#{out2}"
+      canario_embutido = out2.each_line.map { |l| l.chomp.split(' => ', 2) }.to_h
+
+      divergencias = []
+      bateria.each do |input, esp|
+        servico, = ScrapingServices::YoutubeScraperService.send(:classify_failure_cause, input, '')
+        divergencias << "serviço: #{input.inspect} → espere #{esp}, obteve #{servico.inspect}" unless servico == esp
+
+        esperada_canario = esp == 'unknown' ? '-' : esp
+        obteve = canario[input]
+        divergencias << "canário (fonte única): #{input.inspect} → espere #{esperada_canario.inspect}, obteve #{obteve.inspect}" unless obteve == esperada_canario
+
+        obteve_emb = canario_embutido[input]
+        divergencias << "canário (cópia embutida): #{input.inspect} → espere #{esperada_canario.inspect}, obteve #{obteve_emb.inspect}" unless obteve_emb == esperada_canario
+      end
+      assert_equal [], divergencias,
+                   "bateria diverge entre canário e serviço:\n#{divergencias.join("\n")}"
+    end
   end
 
   test 'B8b: falha operacional em /shorts vira parcial nomeado com a causa do /shorts' do
