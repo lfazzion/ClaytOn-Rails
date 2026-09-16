@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_09_04_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_09_14_000001) do
   create_table "browser_session_cookies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "domain", null: false
@@ -60,6 +60,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_04_120000) do
     t.index ["active_skill_name"], name: "index_conversations_on_active_skill_name", where: "active_skill_name IS NOT NULL"
     t.index ["scope", "last_active_at"], name: "index_conversations_on_scope_and_last_active_at"
     t.index ["scope"], name: "index_conversations_on_active_scope", unique: true, where: "active = 1"
+  end
+
+  create_table "digest_item_deliveries", force: :cascade do |t|
+    t.string "channel_id", null: false
+    t.datetime "created_at", null: false
+    t.string "digest_type", null: false
+    t.string "item_key", null: false
+    t.string "item_type", null: false
+    t.datetime "sent_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["digest_type", "channel_id", "item_type", "item_key"], name: "index_digest_item_deliveries_unique_key", unique: true
+    t.index ["digest_type", "channel_id", "sent_at"], name: "index_digest_item_deliveries_on_sent_at"
   end
 
   create_table "discovered_profiles", force: :cascade do |t|
