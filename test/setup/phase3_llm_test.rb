@@ -45,71 +45,140 @@ class Phase3LlmTest < ActiveSupport::TestCase
     end
   end
 
-  # ── DETERMINISMO: sincronização explícita, não timing ─────────────────────
+  # ── DETERMINISMO: barreira de partida em DUAS FILAS + store atômico REAL ──
   #
   # Duas fontes de determinismo, ambas obrigatórias:
   #
-  #   1. Sincronização entre threads (não timing):
-  #      Fila Queue.new + started.pop (barreira) garante que TODAS as N threads
-  #      estejam prontas ANTES de qualquer uma executar reserve_quota!. O join
-  #      (threads.each(&:join)) garante que todas terminaram. Nenhum sleep, nenhum
-  #      `timeout` — a barreira é sincronização REAL pelo modelo de memória Ruby.
+  #   1. Barreira REAL de partida (duas filas), não timing:
+  #      Fila "pronto" (ready_barrier): cada worker sinaliza que CHEGOU antes
+  #      de reservar; o thread principal só consome os N sinais DEPOIS de
+  #      criadas as N threads. Fila "go" (go_barrier): o principal libera
+  #      exatamente N autorizações e SÓ então cada worker chama
+  #      reserve_quota!. Sem esse segundo estágio (barreira de UMA fila só,
+  #      onde o worker que sinaliza primeiro já segue para reservar), a
+  #      reserva ficaria escalonada na criação das threads e o teste
+  #      mediria MENOS concorrência do que promete — risco de tautologia:
+  #      passaria mesmo com reservas seriadas, mascarando increment
+  #      não-atômico. Com as duas filas, TODOS os N chamam
+  #      reserve_quota! simultaneamente. Sincronização REAL pelo modelo de
+  #      memória Ruby (Queue), sem sleep e sem `timeout`.
   #
-  #   2. Store com incremento atômico (não read-modify-write):
-  #      Produção (production.rb:14) usa SolidCache (SQLite): increment executa
-  #      `UPDATE counter = counter + 1` — uma única instrução SQL, atômica entre
-  #      conexões. O ambiente de teste (test.rb:4) usa FileStore, cujo increment
-  #      faz read → modify → write EM DISCO, sem lock entre a leitura e a escrita.
-  #      Com 10 threads concorrentes, duas podem ler o MESMO valor (ex.: 3), ambas
-  #      escrever 4, e a cota perde UM incremento — o teste já mediu 7 sucessos
-  #      onde cabiam 5 (CI #33998764355).
+  #   2. Store atômico REAL de produção, não dublê:
+  #      O teste ancora a concorrência no SolidCache::Store real (mesmo
+  #      store do production.rb:14). O increment do SolidCache é atômico
+  #      entre conexões: Entry.lock_and_write (solid_cache 1.0.10,
+  #      app/models/solid_cache/entry.rb:70-79) executa o
+  #      read-modify-write INTEIRO dentro de UMA transação SQL
+  #      (ActiveRecord `transaction`): localiza a linha com
+  #      `lock.where(key_hash: ...).pick(:key, :value)`, a block calcula
+  #      o novo valor e `write` (UPSERT) grava no MESMO escopo de
+  #      transação — equivalente ao CAS de produção. Verificado no código
+  #      instalado: em PostgreSQL o escopo `lock` emite `SELECT ... FOR
+  #      UPDATE`; neste projeto o shard de cache é SQLite3 e o visitante
+  #      Arel do SQLite3 DESCARTA a cláusula de lock (activerecord
+  #      8.1.3.1, arel/visitors/sqlite.rb:62-65, "Locks are not
+  #      supported in SQLite") — a atomicidade entre conexões nesse
+  #      engine vem da serialização da transação de escrita do próprio
+  #      SQLite, não de FOR UPDATE.
   #
-  #      O FakeAtomicCacheStore abaixo substitui o FileStore por um Hash+mutex
-  #      cujo increment (leitura + soma + escrita) ocorre DENTRO do mesmo lock,
-  #      equivalente ao UPDATE atômico do SolidCache em produção. Provado sem
-  #      flake: 3000/3000 rodadas com exatamente max sucessos (prova em
-  #      tmp/contraste_atomic.rb).
+  #      Por que não mais o FakeAtomicCacheStore: o dublê (Hash+mutex)
+  #      modelava a garantia, mas o teste de produção deve medir a garantia
+  #      REAL — o store que o production.rb:14 usa. O FileStore do env de
+  #      teste (test.rb:4) faz read-modify-write EM DISCO; seu lock_file
+  #      (activesupport file_store.rb:148-159) só flocqueia quando o
+  #      arquivo JÁ existe — na criação concorrente (chave ainda ausente),
+  #      dois threads leem nil, ambos escrevem 1, e o increment é perdido.
+  #      É a raiz do flake medido no CI (35/200 rodadas com got 6/7/8 no
+  #      FileStore, 0/200 no store atômico).
   #
-  #  Resultado: deterministico — NÃO dependente de escalonamento de threads
-  #  ou de kernel.
+  #  Resultado: determinístico — mede a garantia de produção SEM depender de
+  #  escalonamento de threads ou de kernel.
   test 'concurrent reserves: between N attempts for quota M, exactly M succeed (reservas only)' do
     max = 5
     client.define_singleton_method(:max_daily_requests) { max }
 
-    # Store atômico (mutex+hash, interface Cache::Store) — modela o
-    # increment atômico do SolidCache de produção. O increment de FileStore
-    # (read-modify-write) vaza sob concorrência (raiz do flake CI).
-    original_store = Rails.cache
-    Rails.cache = TestSupport::FakeAtomicCacheStore.new
-    Rails.cache.write(cache_key, 0, expires_in: 26.hours)
+    # GARANTIA REAL DE PRODUÇÃO: ancoramos a concorrência no SolidCache real
+    # (mesmo store do production.rb:14). O increment do SolidCache é atômico
+    # entre conexões (Entry.lock_and_write = transação de read-modify-write —
+    # solid_cache 1.0.10, app/models/solid_cache/entry.rb:70-79). É o MESMO
+    # padrão Mocha das 4 suítes de release (ex.: test/services/
+    # alert_throttler_solid_cache_release_test.rb:14-16, que roda no env de
+    # teste).
+    solid = SolidCache::Store.new(local_cache: false)
+    solid.clear
+    Rails.stubs(:cache).returns(solid)
 
-    total = max * 2
-    success_count = 0
-    agg_mutex = Mutex.new
-    started_barrier = Queue.new
+    # Unstub PROTEGIDO: qualquer exceção no bloco (solid.write, criação das
+    # threads, Thread#join) pularia a última linha — e o stub vazaria para os
+    # testes seguintes do MESMO processo. O `ensure` garante que o FileStore
+    # original VOLTA mesmo em falha. A prova de que isso funciona está no
+    # teste 'unstub is protected when the body raises in the middle' abaixo.
+    begin
+      solid.write(cache_key, 0, expires_in: 26.hours)
 
-    threads = Array.new(total) do
-      t = Thread.new do
-        started_barrier << true                      # B1: sinaliza "pronto"
-        begin
-          client.send(:reserve_quota!)                # B2: executa a reserva
-          agg_mutex.synchronize { success_count += 1 }
-        rescue Llm::BaseClient::QuotaExceededError
-          # rejected — expected para threads excedentes
+      total = max * 2
+      success_count = 0
+      agg_mutex = Mutex.new
+      ready_barrier = Queue.new # fila 1: cada worker sinaliza "pronto"
+      go_barrier = Queue.new    # fila 2: principal libera "go"
+
+      threads = Array.new(total) do
+        t = Thread.new do
+          # Estágio 1: sinalizo que CHEGUEI, mas AINDA NÃO reservo —
+          # espero a autorização de partida.
+          ready_barrier << true
+          go_barrier.pop
+          begin
+            client.send(:reserve_quota!)
+            agg_mutex.synchronize { success_count += 1 }
+          rescue Llm::BaseClient::QuotaExceededError
+          end
         end
+        t.abort_on_exception = true
+        t
       end
-      t.abort_on_exception = true                    # propaga erro SEM engolir
-      t
+
+      # Estágio 2: espero TODOS os `total` sinais de "pronto" ...
+      total.times { ready_barrier.pop }
+      # ... e SÓ então libero as `total` autorizações: todas as threads
+      # entram em reserve_quota! simultaneamente.
+      total.times { go_barrier << true }
+      threads.each(&:join)
+    ensure
+      # Sempre executa, com exceção ou não: restaura o store original.
+      Rails.unstub(:cache)
+      solid.clear
     end
 
-    # B3: barreira — só prossegue quando TODOS os threads sinalizaram
-    total.times { started_barrier.pop }
-    threads.each(&:join)
-
-    Rails.cache = original_store                     # restaura FileStore
-
     assert_equal max, success_count,
-      "expected exactly #{max} reservations to succeed, got #{success_count}; store=#{Rails.cache.class}"
+      "expected exactly #{max} reservations to succeed, got #{success_count}; store=#{solid.class}"
+  end
+
+  # Prova do UNSTUB PROTEGIDO (item 2 da revisão do perito): força uma
+  # exceção no MEIO do bloco com o stub ativo e verifica que o `Rails.cache`
+  # VOLTOU ao store original (FileStore do env de teste). Sem o `ensure`, a
+  # exceção pulava a restauração e o stub vazava para os testes seguintes.
+  test 'unstub is protected when the body raises in the middle' do
+    original = Rails.cache # FileStore do env de teste (test.rb:4)
+
+    solid = SolidCache::Store.new(local_cache: false)
+    solid.clear
+    Rails.stubs(:cache).returns(solid)
+
+    assert_raises NoMethodError do
+      begin
+        solid.write(cache_key, 0, expires_in: 26.hours)
+        solid.forca_excecao_no_meio_do_bloco # NoMethodError: método inexistente
+      ensure
+        Rails.unstub(:cache)
+        solid.clear
+      end
+    end
+
+    # A exceção escapou (assert_raises passou) e o `ensure` rodou:
+    # `Rails.cache` está de volta ao FileStore original, MESMO OBJETO.
+    assert_same original, Rails.cache,
+      'Rails.cache deveria estar no store original (FileStore) após a exceção'
   end
 
   test 'complete rolls back quota when RubyLLM.chat raises non-rate-limit error (preparação)' do
