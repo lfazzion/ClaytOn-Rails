@@ -16,6 +16,28 @@ class FridayIdeationJobTest < ActiveSupport::TestCase
     ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
   end
 
+  # C2a-r5 (bloqueador r2): o job NÃO pode rodar em paralelo consigo mesmo —
+  # duas execuções concorrentes select+enviam os mesmos itens antes de
+  # qualquer uma registrar a entrega no `perform`, o que repetiria itens no
+  # Discord (a marca posterior do índice único de DigestItemDelivery não
+  # desfaz o efeito externo já feito). O remédio escolhido (perito r2) é
+  # `limits_concurrency`, que serializa a execução no worker do Solid Queue —
+  # não reabre a decisão documentada de marcar-DEPOIS-do-envio no perform.
+  # Padrão de teste do repo (ver scrape_twitter_job_test.rb:26-38): assere a
+  # DECLARAÇÃO efetiva, via `concurrency_key`/`concurrency_limited?`, sem
+  # tentar misturar concorrência real (ver relatório r5 sobre o que não é
+  # provável em teste unitário).
+  test 'limits_concurrency serializa todas as execucoes do job (bloqueador r2)' do
+    job_a = FridayIdeationJob.new
+    job_b = FridayIdeationJob.new
+
+    assert_equal 'FridayIdeationJob/friday_ideation', job_a.concurrency_key
+    assert_equal job_a.concurrency_key, job_b.concurrency_key
+    assert_equal 1, FridayIdeationJob.concurrency_limit
+    assert_equal :block, FridayIdeationJob.concurrency_on_conflict
+    assert job_a.concurrency_limited?, 'expected concurrency limiting to be enabled'
+  end
+
   test 'perform monta mensagem corretamente' do
     ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
     create(:event, title: 'BGS 2026', event_type: 'bgs', start_date: 3.days.from_now)

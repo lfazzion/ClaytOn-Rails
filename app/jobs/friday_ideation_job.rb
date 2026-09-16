@@ -5,6 +5,20 @@ class FridayIdeationJob < ApplicationJob
 
   queue_as :default
 
+  # C2a-r5 (bloqueador r2): serializa a execução deste job no worker do Solid
+  # Queue para fechar a corrida de envio concorrente — duas execuções
+  # simultâneas poderiam selecionar e enviar os mesmos itens antes de qualquer
+  # uma registrar a entrega (o índice único de DigestItemDelivery só protege a
+  # marca posterior, não o efeito externo já feito no Discord). A chave é uma
+  # constante única porque o job não recebe argumentos e resolve o canal
+  # (único) dentro do perform; logo todo digest deste tipo disputa a mesma
+  # chave e nunca roda em paralelo consigo mesmo. `on_conflict` padrão (:block)
+  # aguarda a execução em andamento terminar em vez de descartar a 2ª — não
+  # perde o digest semanal por colisão. Preserva a decisão de marcar-DEPOIS-do-
+  # envio (ver comentário no perform): serializar ataca a causa (paralelismo),
+  # não o sintoma.
+  limits_concurrency key: "friday_ideation", to: 1
+
   # C2a (campanha 1409, veredito perito seção C2 — S2-01/S2-04): política
   # declarada de "novidade". O mesmo item NUNCA repete no mesmo
   # digest_type + canal (estado em DigestItemDelivery, tabela própria — nunca
