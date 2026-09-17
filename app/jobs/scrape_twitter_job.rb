@@ -75,8 +75,12 @@ class ScrapeTwitterJob < ApplicationJob
     return nil unless ENV['USE_PROXY'] == 'true'
 
     # MISSÃO YT-1: `perform_later` chega sem options — cair no proxy do
-    # ambiente, padrão do Ferrum (ferrum.rb:74). Override por options.
-    options[:proxy] || ENV['SCRAPING_PROXY']
+    # ambiente. A analogia com Ferrum (ferrum.rb:74) vale só para DE ONDE
+    # LER o proxy: o ferrum usa .present? e não tem o gate USE_PROXY.
+    # Override por options; MISSÃO YT-2: .presence — string vazia é truthy,
+    # e com SCRAPING_PROXY="" (modelo de .env.example:47) "" viraria
+    # --proxy "" / --proxy-server "" nos consumers.
+    options[:proxy].presence || ENV['SCRAPING_PROXY'].presence
   end
 
   def update_profile(profile, data)

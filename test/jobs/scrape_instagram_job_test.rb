@@ -276,4 +276,15 @@ class ScrapeInstagramJobTest < ActiveJob::TestCase
                    job.send(:current_proxy, { proxy: 'http://explicit:9999' })
     end
   end
+
+  # MISSÃO YT-2: com SCRAPING_PROXY vazio (modelo de .env.example:47), "" é
+  # truthy em Ruby — current_proxy não pode devolver "" (o consumidor de
+  # Instagram passaria --proxy "" / --proxy-server ""). Esperado: nil.
+  test 'current_proxy devolve nil com SCRAPING_PROXY vazio (USE_PROXY=true)' do
+    job = ScrapeInstagramJob.new
+    with_proxy_env(scraping_proxy: '') do
+      assert_nil job.send(:current_proxy, {}),
+                 'SCRAPING_PROXY vazio não pode virar --proxy "" (YT-2)'
+    end
+  end
 end
