@@ -3,6 +3,7 @@
 require "timeout"
 require Rails.root.join("lib/fetcher/cookie_jar")
 require Rails.root.join("lib/fetcher/channels/youtube")
+require_relative "../services/alert_throttler"
 
 # Mantém viva a sessão do YouTube renovando o cookie antes que ele vença.
 #
@@ -32,8 +33,16 @@ class RefreshSessionCookiesJob < ApplicationJob
 
   # Distinta de `CookieJar::Expired` de propósito: "o jar já estava vazio quando
   # começamos" e "o servidor rejeitou no meio da renovação" pedem investigações
-  # opostas do dono, e o log é o único canal por onde ele fica sabendo.
+  # opostas do dono. (COOKIE-1: e agora o dono fica sabendo pelo ALERTA, não só
+  # pelo log — ver `alertar_rejeicao!`.)
   class SessaoRejeitada < StandardError; end
+
+  # Identidade sintética do incidente de rejeição do JAR no dedupe por estado
+  # (`AlertThrottler`), separada dos incidentes POR PERFIL do `ScrapeYoutubeJob`
+  # (que usa `profile.id` numérico). "jar" não colide com ID de perfil.
+  ALERT_SCRAPER = "youtube"
+  ALERT_PERFIL  = "jar"
+  ALERT_TIPO    = "session_rejected"
 
   # O procedimento viaja NA MENSAGEM, e não só no `docs/MEMORY.md`, porque em
   # 05-06/08/2026 a sessão foi perdida QUATRO vezes pela mesma causa: o export
@@ -64,10 +73,17 @@ class RefreshSessionCookiesJob < ApplicationJob
     else
       log("sessão de youtube.com renovada")
     end
+    # Rotação bem-sucedida: a sessão voltou a ser viva. O dono resolveu a
+    # rejeição (refez a exportação), então limpa o incidente para que a
+    # PRÓXIMA rejeição — não a repetição desta — dispare o alerta.
+    AlertThrottler.resolve_incident(ALERT_SCRAPER, ALERT_PERFIL)
   rescue SessaoRejeitada
-    log("ERRO: o YouTube rejeitou a sessão durante a renovação. O jar foi preservado " \
-        "intacto — a sessão não morreu por exportação velha, morreu do lado do servidor. " \
-        "Precisa de exportação nova, e o PROCEDIMENTO importa: #{PROCEDIMENTO}")
+    invalidar_sessao!
+    log("ERRO: o YouTube rejeitou a sessão durante a renovação. O jar foi INVALIDADO " \
+        "(o payload continua preservado para diagnóstico) — a sessão não morreu por " \
+        "exportação velha, morreu do lado do servidor. Precisa de exportação nova, " \
+        "e o PROCEDIMENTO importa: #{PROCEDIMENTO}")
+    alertar_rejeicao!
   rescue Fetcher::CookieJar::Expired
     log("ERRO: sessão de youtube.com já estava expirada — precisa de exportação nova")
   rescue Timeout::Error
@@ -78,6 +94,45 @@ class RefreshSessionCookiesJob < ApplicationJob
   end
 
   private
+
+  # COOKIE-1 (defeito 1): rejeição do servidor tem que matar o jar no lado do
+  # LEITOR, senão o `expires_at` local — que o YouTube NÃO sabe que morreu —
+  # mantém o registro "vivo" e os jobs de coleta seguem gastando chamada num
+  # cookie morto. É o que ficou 5,7 dias em produção: `valid?` devolvia true
+  # e o job só logava, sem reagir.
+  #
+  # O mecanismo é empurrar `expires_at` para o passado no `BrowserSessionCookie`
+  # do domínio: o único portão de leitura do jar é
+  # `expires_at > Time.current` (`CookieJar#live_record`), então `valid?` vira
+  # false, `for` devolve `[]`, `require!` levanta `Expired` — o caminho já
+  # existia no código. O payload CIFRADO fica no banco de propósito: é o
+  # diagnóstico do dono (o que a exportação trouxe, por que o servidor
+  # rejeitou) — apagar era perder a cena do crime.
+  #
+  # Toco SÓ no registro de `youtube.com`; os outros domínios do jar
+  # (reddit/x) continuam imunes, e o `CookieJar` em si não muda de contrato
+  # (invalidar não é rotação nem reescrita de payload — é marcar a sessão
+  # morta).
+  def invalidar_sessao!
+    BrowserSessionCookie.where(domain: "youtube.com")
+                        .update_all(expires_at: 1.minute.ago)
+  end
+
+  # COOKIE-1 (defeito 2): rejeição precisa de ALERTA, não de linha de log.
+  # Reuse o caminho de alerta do repo — `ScrapingFailureAlertJob` (que entrega
+  # via `DiscordApiClient`) — e a deduplicação por transição de estado do
+  # `AlertThrottler`: emite na PRIMEIRA rejeição e NÃO repete a cada 10 min.
+  # O job roda em loop; sem o dedupe, o dono seria bombardeado a cada rodada
+  # até refazer a exportação. É exatamente o padrão que o
+  # `ScrapeYoutubeJob` já usa para o próprio incidente de perfil.
+  def alertar_rejeicao!
+    ScrapingFailureAlertJob.perform_later(
+      ALERT_SCRAPER,
+      ALERT_PERFIL,
+      "o YouTube rejeitou a sessão durante a renovação — o jar foi invalidado",
+      ALERT_TIPO
+    )
+  end
 
   # Só o par que rotaciona, e só se mudou. Nunca o valor — isto vai para o log.
   def assinatura
