@@ -245,7 +245,10 @@ class ScrapeYoutubeJob < ApplicationJob
   def current_proxy(options)
     return nil unless ENV['USE_PROXY'] == 'true'
 
-    options[:proxy]
+    # MISSÃO YT-1: `perform_later` chega sem options (ProfileManagementTools
+    # 180/435) — cair no proxy do ambiente, padrão do Ferrum (ferrum.rb:74).
+    # options[:proxy] explícito continua valendo (override).
+    options[:proxy] || ENV['SCRAPING_PROXY']
   end
 
   def update_profile(profile, metadata)

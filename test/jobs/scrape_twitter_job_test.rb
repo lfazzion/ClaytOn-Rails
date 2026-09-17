@@ -239,4 +239,44 @@ class ScrapeTwitterJobTest < ActiveJob::TestCase
     initially_verified_profile.reload
     assert_equal true, initially_verified_profile.verified
   end
+
+  # MISSÃO YT-1: current_proxy precisa cair em ENV['SCRAPING_PROXY'] quando
+  # options[:proxy] não vem (perform_later sem options), mantendo o gate
+  # USE_PROXY == 'true' — padrão do config/initializers/ferrum.rb:74.
+  # Valor fake apenas; o valor real do proxy nunca é escrito em teste.
+  def with_proxy_env(use_proxy: 'true', scraping_proxy: 'http://user:pass@proxy.fake:8080')
+    saved = [ENV['USE_PROXY'], ENV['SCRAPING_PROXY']]
+    ENV['USE_PROXY'] = use_proxy
+    ENV['SCRAPING_PROXY'] = scraping_proxy
+    yield
+  ensure
+    ENV['USE_PROXY'], ENV['SCRAPING_PROXY'] = saved
+  end
+
+  test 'current_proxy usa ENV[SCRAPING_PROXY] quando options chega vazio (USE_PROXY=true)' do
+    job = ScrapeTwitterJob.new
+    with_proxy_env do
+      assert_equal 'http://user:pass@proxy.fake:8080',
+                   job.send(:current_proxy, {}),
+                   'options vazio deve cair no proxy do ambiente, como o Ferrum (ferrum.rb:74)'
+    end
+  end
+
+  test 'current_proxy devolve nil sem USE_PROXY mesmo com SCRAPING_PROXY definido' do
+    job = ScrapeTwitterJob.new
+    with_proxy_env(use_proxy: nil) do
+      assert_nil job.send(:current_proxy, {})
+    end
+    with_proxy_env(use_proxy: 'false') do
+      assert_nil job.send(:current_proxy, {})
+    end
+  end
+
+  test 'current_proxy: options[:proxy] explícito ganha de ENV[SCRAPING_PROXY]' do
+    job = ScrapeTwitterJob.new
+    with_proxy_env do
+      assert_equal 'http://explicit:9999',
+                   job.send(:current_proxy, { proxy: 'http://explicit:9999' })
+    end
+  end
 end

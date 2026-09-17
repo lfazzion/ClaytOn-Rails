@@ -74,7 +74,9 @@ class ScrapeInstagramJob < ApplicationJob
   def current_proxy(options)
     return nil unless ENV['USE_PROXY'] == 'true'
 
-    options[:proxy]
+    # MISSÃO YT-1: `perform_later` chega sem options — cair no proxy do
+    # ambiente, padrão do Ferrum (ferrum.rb:74). Override por options.
+    options[:proxy] || ENV['SCRAPING_PROXY']
   end
 
   def update_profile(profile, data)
