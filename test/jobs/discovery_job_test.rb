@@ -138,4 +138,20 @@ class DiscoveryJobTest < ActiveJob::TestCase
     dp = DiscoveredProfile.find_by(username: 'linked_handle')
     assert_equal @profile, dp.source_profile
   end
+
+  test 'should isolate profile with nil LLM response content and continue processing remaining profiles' do
+    profile2 = create(:social_profile, platform: 'twitter', platform_username: 'influencer2', last_collected_at: 1.hour.ago)
+    create(:social_post, social_profile: @profile, content: '@handle1', posted_at: 1.day.ago)
+    create(:social_post, social_profile: profile2, content: '@handle2', posted_at: 1.day.ago)
+
+    nil_response = stub(content: nil)
+    valid_response = stub(content: '[{"handle":"@handle2","platform":"twitter","categoria":"PATROCINADOR_PROSPECTO","razao":"fit"}]')
+    AiRouter.stubs(:complete).returns(nil_response).then.returns(valid_response)
+
+    assert_difference 'DiscoveredProfile.count', 1 do
+      DiscoveryJob.perform_now
+    end
+
+    assert_not_nil DiscoveredProfile.find_by(username: 'handle2')
+  end
 end

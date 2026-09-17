@@ -18,7 +18,8 @@ class ProfileClassifierTest < ActiveSupport::TestCase
     handles = [{ platform: 'instagram', username: '@test', bio: nil }]
 
     mock_response = stub(content: '[{"handle":"@test","platform":"instagram","categoria":"IGNORAR","razao":"bot"}]')
-    AiRouter.expects(:complete).returns(mock_response)
+    expected_prompt = Llm::PromptLoader.load('discovery', handles: handles)
+    AiRouter.expects(:complete).with(expected_prompt, context: :background).returns(mock_response)
 
     result = Discovery::ProfileClassifier.classify(handles, source_profile: @source_profile)
 
@@ -59,6 +60,17 @@ class ProfileClassifierTest < ActiveSupport::TestCase
     assert_empty result
   end
 
+  test 'should return empty array when response content is nil' do
+    handles = [{ platform: 'twitter', username: '@user1', bio: nil }]
+
+    mock_response = stub(content: nil)
+    AiRouter.expects(:complete).returns(mock_response)
+
+    result = Discovery::ProfileClassifier.classify(handles, source_profile: @source_profile)
+
+    assert_empty result
+  end
+
   test 'should symbolize keys in parsed JSON' do
     handles = [{ platform: 'instagram', username: '@someone', bio: 'Influencer' }]
 
@@ -70,5 +82,39 @@ class ProfileClassifierTest < ActiveSupport::TestCase
     assert result.first.key?(:handle)
     assert result.first.key?(:categoria)
     assert_not result.first.key?('handle')
+  end
+
+  test 'should handlenull response from LLM as empty array' do
+    handles = [{platform: 'twitter', username: '@user1', bio: nil }]
+
+    mock_response = stub(content: 'null')
+    AiRouter.expects(:complete).returns(mock_response)
+
+    result = Discovery::ProfileClassifier.classify(handles, source_profile: @source_profile)
+
+    assert_empty result
+  end
+
+  test 'shouldextract list when response is an object wrapping results' do
+    handles = [{ platform: 'twitter', username: '@user1', bio: 'Developer' }]
+
+    mock_response = stub(content: '{"results": [{"handle":"@user1","categoria":"PATROCINADOR_PROSPECTO"}]}')
+AiRouter.expects(:complete).returns(mock_response)
+
+result = Discovery::ProfileClassifier.classify(handles, source_profile: @source_profile)
+
+    assert_equal 1, result.size
+    assert_equal 'PATROCINADOR_PROSPECTO', result.first[:categoria]
+  end
+
+  test 'should return empty array and log warning when response is a loose object' do
+    handles = [{ platform: 'twitter', username: '@user1', bio: nil }]
+
+    mock_response = stub(content: '{"error": "not found", "status": 404}')
+    AiRouter.expects(:complete).returns(mock_response)
+
+    result = Discovery::ProfileClassifier.classify(handles, source_profile: @source_profile)
+
+    assert_empty result
   end
 end

@@ -8,12 +8,16 @@ class ScrapingFailureAlertJobTest < ActiveJob::TestCase
   setup do
     ENV["ALERT_THROTTLE_ENABLED"] = "true"
     ENV["DISCORD_ADMIN_CHANNEL_ID"] = "123456789"
+    Rails.cache.delete("discord:admin_channel_id")
+    Rails.cache.delete("discord:admin_channel_lock")
   end
 
   teardown do
     ENV.delete("ALERT_THROTTLE_ENABLED")
     ENV.delete("DISCORD_ADMIN_CHANNEL_ID")
-    bucket = Time.current.to_i / 1.hour.to_i
+    Rails.cache.delete("discord:admin_channel_id")
+    Rails.cache.delete("discord:admin_channel_lock")
+bucket = Time.current.to_i / 1.hour.to_i
     Rails.cache.delete("alert_throttle:partial_collection:#{bucket}")
     Rails.cache.delete("alert_throttle:rate_limit:#{bucket}")
     Rails.cache.delete("alert_throttle:metadata_failure:#{bucket}")
@@ -125,6 +129,7 @@ class ScrapingFailureAlertJobTest < ActiveJob::TestCase
 
   test "perform não envia e libera lock quando canal admin não está configurado" do
     ENV["DISCORD_ADMIN_CHANNEL_ID"] = nil
+    Rails.cache.delete("discord:admin_channel_id")
     DiscordApiClient.expects(:get_bot_guilds).returns([])
     DiscordApiClient.expects(:send_message).never
 
@@ -172,7 +177,8 @@ class ScrapingFailureAlertJobTest < ActiveJob::TestCase
   end
 
   test "excecao em ensure_admin_channel libera o lock do incidente e propaga o erro" do
-    ENV["DISCORD_ADMIN_CHANNEL_ID"] = nil
+    ENV["DISCORD_ADMIN_CHANNEL_ID"]= nil
+    Rails.cache.delete("discord:admin_channel_id")
     DiscordApiClient.expects(:get_bot_guilds).raises(StandardError, "Network error fetching guilds")
     DiscordApiClient.expects(:send_message).never
 

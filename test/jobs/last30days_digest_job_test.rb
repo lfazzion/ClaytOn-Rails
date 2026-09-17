@@ -8,10 +8,12 @@ require_relative "../../app/models/topic"
 class Last30DaysDigestJobTest < ActiveSupport::TestCase
   setup do
     ENV["DISCORD_DIGEST_CHANNEL_ID"] = "digest-chan-99"
+    Rails.cache.delete("discord:digest_channel_id")
   end
 
   teardown do
     ENV.delete("DISCORD_DIGEST_CHANNEL_ID")
+    Rails.cache.delete("discord:digest_channel_id")
   end
 
   test "perform enfileira 1 job por topico ativo com wait deterministico e channel_id" do
@@ -39,6 +41,7 @@ class Last30DaysDigestJobTest < ActiveSupport::TestCase
   # Achado 8: sem channel_id (nil), DigestJob nao escala nenhum TopicJob
   test "perform sem channel_id nao escalona nenhum topic job" do
     ENV.delete("DISCORD_DIGEST_CHANNEL_ID")
+    Rails.cache.delete("discord:digest_channel_id")
     # Sem guilds → ensure_digest_channel retorna nil
     DiscordApiClient.stubs(:get_bot_guilds).returns([])
 

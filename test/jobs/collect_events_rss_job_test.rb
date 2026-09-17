@@ -98,4 +98,36 @@ class CollectEventsRssJobTest < ActiveJob::TestCase
       CollectEventsRssJob.perform_now
     end
   end
+
+  test "should isolate invalid event item and continue processing remaining batch" do
+    ScrapingServices::EventsRssParser.stubs(:fetch_events).returns([
+      {
+        title: nil,
+        source_url: "https://example.com/invalid",
+        description: "Invalid event",
+        event_type: "other"
+      },
+      {
+        title: "CCXP 2026",
+        source_url: "https://example.com/ccxp2026",
+        description: "Valid event",
+        event_type: "ccxp"
+      }
+    ])
+
+    assert_difference 'Event.count', 1 do
+      CollectEventsRssJob.perform_now
+    end
+
+    assert_nil Event.find_by(source_url: "https://example.com/invalid")
+    assert_not_nil Event.find_by(source_url: "https://example.com/ccxp2026")
+  end
+
+  test "should propagate error when fetch_events fails instead of silencing" do
+    ScrapingServices::EventsRssParser.stubs(:fetch_events).raises(StandardError.new("RSS network error"))
+
+    assert_raises(StandardError) do
+      CollectEventsRssJob.perform_now
+    end
+  end
 end
