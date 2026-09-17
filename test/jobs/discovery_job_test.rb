@@ -96,32 +96,26 @@ class DiscoveryJobTest < ActiveJob::TestCase
     end
   end
 
-  # Teste corrigido: o teste originalesperava propagação de NoMethodError,
-  # contrariando a spec de isolamento de falhas por perfil (S2-08/Bloqueador 2).
-  test 'should isolate and log NoMethodError from process_profile'do
+  test 'should propagate NoMethodError from process_profile' do
     create(:social_post, social_profile: @profile, content: '@someone', posted_at: 1.day.ago)
 
-Discovery::SocialGraphAnalyzer.expects(:extract_handles).with(@profile,anything).raises(NoMethodError.new('undefined method'))
-    Rails.logger.expects(:error).with { |msg| msg.include?('NoMethodError') }
+    Discovery::SocialGraphAnalyzer.expects(:extract_handles).with(@profile, anything).raises(NoMethodError.new('undefined method'))
 
-assert_nothing_raised do
+    assert_raises(NoMethodError) do
       DiscoveryJob.perform_now
     end
   end
 
-# Teste corrigido: o teste originalesperava propagação de ActiveRecord::StatementInvalid,
-  # contrariando a spec de isolamentode falhas por perfil (S2-08/Bloqueador 2).
-  test 'shouldisolate andlog persistence error from process_profile' do
+  test 'should propagate persistence error from process_profile' do
     create(:social_post, social_profile: @profile, content: '@someone', posted_at: 1.day.ago)
 
-    mock_response =stub(content: '[{"handle":"@someone","platform":"twitter","categoria":"IGNORAR","razao":"bot"}]')
+    mock_response = stub(content: '[{"handle":"@someone","platform":"twitter","categoria":"IGNORAR","razao":"bot"}]')
     AiRouter.stubs(:complete).returns(mock_response)
 
-    DiscoveryJob.any_instance.stubs(:save_discovered_profile).raises(ActiveRecord::StatementInvalid, 'DBerror')
-    Rails.logger.expects(:error).with { |msg| msg.include?('ActiveRecord::StatementInvalid') }
+    DiscoveryJob.any_instance.stubs(:save_discovered_profile).raises(ActiveRecord::StatementInvalid, 'DB error')
 
-    assert_nothing_raised do
-DiscoveryJob.perform_now
+    assert_raises(ActiveRecord::StatementInvalid) do
+      DiscoveryJob.perform_now
     end
   end
 
@@ -134,10 +128,10 @@ DiscoveryJob.perform_now
   end
 
   test 'should set source_profile on discovered profile' do
-create(:social_post, social_profile: @profile,content: '@linked_handle', posted_at: 1.day.ago)
+    create(:social_post, social_profile: @profile, content: '@linked_handle', posted_at: 1.day.ago)
 
-    mock_response= stub(content: '[{"handle":"@linked_handle","platform":"twitter","categoria":"CONCORRENTE","razao":"competitor"}]')
-AiRouter.expects(:complete).returns(mock_response)
+    mock_response = stub(content: '[{"handle":"@linked_handle","platform":"twitter","categoria":"CONCORRENTE","razao":"competitor"}]')
+    AiRouter.expects(:complete).returns(mock_response)
 
     DiscoveryJob.perform_now
 
@@ -145,10 +139,10 @@ AiRouter.expects(:complete).returns(mock_response)
     assert_equal @profile, dp.source_profile
   end
 
-test 'should isolate profile with nil LLM response contentand continueprocessingremaining profiles' do
-    profile2 = create(:social_profile, platform: 'twitter',platform_username: 'influencer2', last_collected_at: 1.hour.ago)
-create(:social_post, social_profile:@profile, content: '@handle1', posted_at: 1.day.ago)
-create(:social_post, social_profile:profile2, content: '@handle2', posted_at: 1.day.ago)
+  test 'should isolate profile with nil LLM response content and continue processing remaining profiles' do
+    profile2 = create(:social_profile, platform: 'twitter', platform_username: 'influencer2', last_collected_at: 1.hour.ago)
+    create(:social_post, social_profile: @profile, content: '@handle1', posted_at: 1.day.ago)
+    create(:social_post, social_profile: profile2, content: '@handle2', posted_at: 1.day.ago)
 
     nil_response = stub(content: nil)
     valid_response = stub(content: '[{"handle":"@handle2","platform":"twitter","categoria":"PATROCINADOR_PROSPECTO","razao":"fit"}]')

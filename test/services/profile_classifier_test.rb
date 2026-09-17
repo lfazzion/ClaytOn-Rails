@@ -50,7 +50,7 @@ class ProfileClassifierTest < ActiveSupport::TestCase
     assert_empty result
   end
 
-  test 'should return empty array onQuotaExceededError' do
+  test 'should return empty array on QuotaExceededError' do
     handles = [{ platform: 'twitter', username: '@user1', bio: nil }]
 
     AiRouter.expects(:complete).raises(Llm::BaseClient::QuotaExceededError.new('quota'))
@@ -60,7 +60,7 @@ class ProfileClassifierTest < ActiveSupport::TestCase
     assert_empty result
   end
 
-  test'should return empty array when response content is nil' do
+  test 'should return empty array when response content is nil' do
     handles = [{ platform: 'twitter', username: '@user1', bio: nil }]
 
     mock_response = stub(content: nil)
