@@ -10,6 +10,14 @@ class RefreshSessionCookiesJobTest < ActiveSupport::TestCase
     { "name" => "__Secure-1PSIDTS", "value" => "sidts-ANTIGO", "domain" => ".youtube.com", "path" => "/" }
   ].freeze
 
+  # Exportação NOVA do dono: mesma forma, outro `__Secure-1PSIDTS` — é a
+  # identidade que separa "rejeição da mesma sessão" de "nova exportação
+  # também rejeitada" (revisão 199, 3b). Valores sintéticos, como COOKIES.
+  COOKIES_NOVA = [
+    { "name" => "SID", "value" => "abc", "domain" => ".youtube.com", "path" => "/" },
+    { "name" => "__Secure-1PSIDTS", "value" => "sidts-NOVA", "domain" => ".youtube.com", "path" => "/" }
+  ].freeze
+
   setup do
     ENV["ALERT_THROTTLE_ENABLED"] = "true"
     ENV["DISCORD_ADMIN_CHANNEL_ID"] = "123456789"
@@ -37,31 +45,134 @@ class RefreshSessionCookiesJobTest < ActiveSupport::TestCase
     Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES, expires_at: 3.days.from_now)
   end
 
-  # O servidor devolve SÓ os anônimos — o mesmo sinal objetivo de sessão morta
-  # que os testes originais codificavam: `verify_session!` levanta `Expired`, o
-  # job converte em `SessaoRejeitada`.
   def rejeitar_no_stub!
-    ok = Struct.new(:success?).new(true)
-    Open3.stubs(:capture3).with do |*args|
-      caminho = args[args.index("--cookies") + 1]
-      File.write(caminho, "# Netscape HTTP Cookie File\n" \
-                          "#{['.youtube.com', 'TRUE', '/', 'TRUE', 2_000_000_000, 'PREF', 'x'].join("\t")}\n")
-      true
-    end.returns(["", "", ok])
+    rotacionar_no_stub!(nulo: true)
   end
 
-  # Roda o job com uma rotação bem-sucedida (o servidor devolve a sessão viva).
-  def rotacionar_no_stub!
+  # Roda o job com o resultado do yt-dlp escrito no arquivo de cookies:
+  #   nulo:        -> conjunto ANÔNIMO (mesmo sinal que o servidor devolve ao
+  #                    rejeitar: sem nenhum AUTH cookie) — o caso de rejeição.
+  #   nome/valor:  -> rotação que devolve `__Secure-1PSIDTS` renomeado (SID
+  #                    presente por padrão — controle do portão).
+  def rotacionar_no_stub!(nulo: false, nome: "SID", valor: "abc", psidts_valor: "sidts-NOVO")
     ok = Struct.new(:success?).new(true)
+    linhas =
+      if nulo
+        ["# Netscape HTTP Cookie File",
+         [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "PREF", "x"].join("\t")]
+      else
+        ["# Netscape HTTP Cookie File",
+         [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, nome, valor].join("\t"),
+         [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "__Secure-1PSIDTS", psidts_valor].join("\t")]
+      end
     Open3.stubs(:capture3).with do |*args|
       caminho = args[args.index("--cookies") + 1]
-      File.write(caminho, [
-        "# Netscape HTTP Cookie File",
-        [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "SID", "abc"].join("\t"),
-        [".youtube.com", "TRUE", "/", "TRUE", 2_000_000_000, "__Secure-1PSIDTS", "sidts-NOVO"].join("\t")
-      ].join("\n"))
+      File.write(caminho, "#{linhas.join("\n")}\n")
       true
     end.returns(["x", "", ok])
+  end
+
+  # Revisão 199 (item 3b) — o cenário histórico 05-06/08: a PRIMEIRA rejeição
+  # alerta; o dono refaz a exportação, que também é rejeitada; o sistema ficava
+  # MUDO para sempre, porque a mensagem de alerta era constante e o dedupe por
+  # transição via fingerprint considerava a 2ª rejeição uma "repetição
+  # idêntica" do mesmo incidente. A correção: a mensagem carrega a identidade
+  # da exportação rejeitada (assinatura = SHA1 do `__Secure-1PSIDTS`), então
+  # exportação nova → fingerprint novo → transição → re-alerta. E a MESMA
+  # exportação re-rejeitada → fingerprint igual → dedupe (sem spam nas 144x/dia).
+  test "rejeicao de exportacao NOVA re-alerta (fingerprint novo), repeticao dedupica" do
+    carregar!
+    rejeitar_no_stub!
+    RefreshSessionCookiesJob.perform_now
+    assert_equal 1, @alertas.size, "primeira rejeição já alertou"
+
+    # Entrega o alerta 1 de verdade (o setup só captava o `perform_later`):
+    # o corpo consolida o incidente com o fingerprint da exportação rejeitada.
+    mandou = 0
+    DiscordApiClient.stubs(:send_message).with { |_canal, _texto| mandou += 1; true }
+    ScrapingFailureAlertJob.perform_now(*@alertas.first)
+    assert_equal 1, mandou, "primeira entrega chega ao Discord"
+
+    # Dono refaz a exportação — jar vivo de novo — e o servidor REJEITA DE NOVO.
+    Fetcher::CookieJar.store!(domain: "youtube.com", cookies: COOKIES_NOVA, expires_at: 3.days.from_now)
+    assert Fetcher::CookieJar.valid?("youtube.com"), "a exportação nova deixa o jar vivo de novo"
+    primeira_msg = @alertas.first[2]
+    rejeitar_no_stub!
+    @alertas.clear
+    RefreshSessionCookiesJob.perform_now
+    assert_equal 1, @alertas.size, "a segunda rejeição (exportação nova) enfileira alerta de novo"
+
+    # As duas rejeições têm IDENTIDADES diferentes: a mensagem carrega a
+    # assinatura da exportação rejeitada (o `__Secure-1PSIDTS` rotaciona por
+    # exportação nova), então o fingerprint muda — e só assim o dedupe por
+    # transição do `AlertThrottler` trata a 2ª rejeição como TRANSIÇÃO, não
+    # como repetição idêntica (que era o silêncio do 3b).
+    assert_not_equal primeira_msg, @alertas.first[2],
+                     "rejeições de exportações diferentes não podem ser indistinguíveis no alerta"
+
+    # E o corpo do alerta 2 — com o estado consolidado do alerta 1 — é
+    # TRANSIÇÃO (fingerprint mudou), então é entregue: sem a correção
+    # (mensagem constante), `transition?` voltava false e o Discord ficava mudo.
+    ScrapingFailureAlertJob.perform_now(*@alertas[0])
+    assert_equal 2, mandou, "rejeição de exportação nova tem que re-alertar — era o silêncio do 3b"
+
+    # E não vira spam: a MESMA segunda rejeição repetida (fingerprint estável,
+    # consolidado no estado do cache) não re-envia — nem uma vez a mais, mesmo
+    # executando duas vezes seguidas. Nas 144 execuções/dia do loop, cada
+    # re-exportação (transição de fingerprint) alerta UMA vez; as repetições da
+    # MESMA exportação dedupem.
+    ScrapingFailureAlertJob.perform_now(*@alertas[0])
+    assert_equal 2, mandou, "repetição idêntica dedupica — não há spam no loop"
+    ScrapingFailureAlertJob.perform_now(*@alertas[0])
+    assert_equal 2, mandou, "segunda repetição idêntica continua deduplicada"
+  end
+
+  # Revisão 199 (item 4) — resolução indevida: a rotação passou no
+  # `verify_session!` (o portão aceita qualquer um dos AUTH_COOKIES, não só
+  # `SID`) mas a sessão NÃO foi provada viva (sem `SID` na resposta). O antigo
+  # `:79` fechava o incidente nos três ramos, inclusive nesse — e assim "a
+  # rotação funcionou mas a situação continua ruim" virava "resolvido", e a
+  # próxima rejeição ficava silenciada pelo dedupe. A correção:
+  # `resolve_incident` só quando `depois` (a assinatura) não é nil.
+  test "rotacao sem SID nao resolve o incidente (condicao continua existindo)" do
+    # Incidente anterior já entregue (rejeição real consolidada no corpo):
+    AlertThrottler.consolidate_incident("youtube", "jar", "session_rejected", "rejeicao anterior")
+    assert_not_nil AlertThrottler.incident_state("youtube", "jar")
+
+    carregar!
+    # A resposta do servidor traz `__Secure-1PSID` + `__Secure-1PSIDTS` mas SEM
+    # `SID`: passa no portão (`AUTH_COOKIES` intersecta), persiste o payload —
+    # e a assinatura (que exige `SID`) é nil. O ramo `depois.nil?` loga ERRO.
+    rotacionar_no_stub!(nome: "__Secure-1PSID", valor: "abc")
+
+    # O stub do log precisa estar ativo ANTES do `perform_now` para capturar
+    # as linhas daquela execução (mesmo padrão do teste de log do arquivo).
+    linhas = []
+    Rails.logger.stubs(:info).with { |m| linhas << m.to_s; true }
+    @resolveu = []
+    AlertThrottler.stubs(:resolve_incident).with { |s, p| @resolveu << [s, p]; true }
+
+    RefreshSessionCookiesJob.perform_now
+
+    # A correção: no ramo de ERRO o incidente NÃO é resolvido — a condição
+    # (sessão sem SID, jar persistido) continua existindo. É esta asserção
+    # que morre sem a correção (o antigo `:79` resolvia nos três ramos).
+    assert_empty @resolveu,
+                 "rotação que não provou a sessão (sem SID) não pode fechar o incidente aberto"
+    assert_not_nil AlertThrottler.incident_state("youtube", "jar"),
+                   "o incidente segue aberto — a próxima rejeição tem que re-alertar"
+
+    # E o log diz a verdade: o ERRO de derrubar a sessão, não a celebração.
+    texto = linhas.join("\n")
+    assert_match(/renovação derrubou/i, texto,
+                 "o ramo sem SID loga o ERRO, não a rotação bem-sucedida: #{texto}")
+    assert_no_match(/sessão de youtube.com renovada/i, texto)
+
+    # Higiene: o `resolve_incident` do `teardown` cai no stub ainda ativo
+    # (o mock só reseta DEPOIS do teardown) e não limparia a chave que este
+    # teste semeou no cache (`consolidate_incident` real). Limpo a chave
+    # diretamente para o incidente não vazar para o teste seguinte.
+    Rails.cache.delete(AlertThrottler.incident_key("youtube", "jar"))
   end
 
   test "sem sessao no jar nao gasta processo" do

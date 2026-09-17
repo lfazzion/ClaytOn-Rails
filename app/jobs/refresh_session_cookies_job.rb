@@ -67,23 +67,39 @@ class RefreshSessionCookiesJob < ApplicationJob
     depois = assinatura
 
     if depois.nil?
+      # Revisão 199 (item 4): a rotação passou no `verify_session!` mas sem
+      # `SID` (o portão aceita qualquer um dos AUTH_COOKIES) — a sessão NÃO foi
+      # provada viva. O incidente fica ABERTO de propósito: fechá-lo aqui
+      # tornaria "continua ruim" indistinguível de "foi consertado", e a
+      # próxima rejeição — que tem que alertar de novo — seria dedupada em
+      # silêncio. É o item 4 do veredito: resolução indevida no ramo de ERRO.
       log("ERRO: renovação derrubou a sessão de youtube.com — precisa de exportação nova")
     elsif antes == depois
       log("sessão de youtube.com viva, servidor não rotacionou desta vez")
     else
       log("sessão de youtube.com renovada")
     end
-    # Rotação bem-sucedida: a sessão voltou a ser viva. O dono resolveu a
-    # rejeição (refez a exportação), então limpa o incidente para que a
-    # PRÓXIMA rejeição — não a repetição desta — dispare o alerta.
-    AlertThrottler.resolve_incident(ALERT_SCRAPER, ALERT_PERFIL)
+    # Rotação com a sessão provada viva (assinatura != nil): o dono resolveu a
+    # rejeição (refez a exportação) ou o servidor seguiu devolvendo a sessão —
+    # limpa o incidente para que a PRÓXIMA rejeição — não a repetição desta —
+    # dispare o alerta. No ramo `depois.nil?` a condição segue existindo; o
+    # incidente não resolve (guard `unless` acima, item 4 da revisão 199).
+    AlertThrottler.resolve_incident(ALERT_SCRAPER, ALERT_PERFIL) unless depois.nil?
   rescue SessaoRejeitada
+    # Revisão 199 (3b): a assinatura é captada ANTES da invalidação — depois
+    # dela o portão do jar devolve [] e o payload rejeitado perde a
+    # identidade. É essa identidade (cada exportação nova rotaciona o
+    # `__Secure-1PSIDTS`) que separa "a exportação NOVA foi rejeitada"
+    # (transição de fingerprint → re-alerta) de "a MESMA sessão continua
+    # rejeitada" (dedupe → sem spam). Sem ela, a 2ª rejeição após
+    # recuperação falha era silenciada pelo throttle para sempre.
+    rejeitada_em = assinatura
     invalidar_sessao!
     log("ERRO: o YouTube rejeitou a sessão durante a renovação. O jar foi INVALIDADO " \
         "(o payload continua preservado para diagnóstico) — a sessão não morreu por " \
         "exportação velha, morreu do lado do servidor. Precisa de exportação nova, " \
         "e o PROCEDIMENTO importa: #{PROCEDIMENTO}")
-    alertar_rejeicao!
+    alertar_rejeicao!(rejeitada_em)
   rescue Fetcher::CookieJar::Expired
     log("ERRO: sessão de youtube.com já estava expirada — precisa de exportação nova")
   rescue Timeout::Error
@@ -125,13 +141,27 @@ class RefreshSessionCookiesJob < ApplicationJob
   # O job roda em loop; sem o dedupe, o dono seria bombardeado a cada rodada
   # até refazer a exportação. É exatamente o padrão que o
   # `ScrapeYoutubeJob` já usa para o próprio incidente de perfil.
-  def alertar_rejeicao!
+  def alertar_rejeicao!(assinatura_rejeitada = nil)
     ScrapingFailureAlertJob.perform_later(
       ALERT_SCRAPER,
       ALERT_PERFIL,
-      "o YouTube rejeitou a sessão durante a renovação — o jar foi invalidado",
+      "o YouTube rejeitou a sessão durante a renovação — o jar foi invalidado " \
+      "(fingerprint da exportação rejeitada: #{fingerprint_rejeicao(assinatura_rejeitada)})",
       ALERT_TIPO
     )
+  end
+
+  # Identidade da exportação rejeitada, estável por exportação: o job não sabe
+  # se a rejeição é a primeira da sessão atual ou a repetição dela — quem sabe
+  # é o fingerprint do `AlertThrottler`. Mesma exportação re-rejeitada → mesmo
+  # fingerprint → dedupe (sem spam no loop de 10 min / 144x dia). Exportação
+  # nova (o dono refaz o `store!`) rotaciona o `__Secure-1PSIDTS` → fingerprint
+  # novo → transição → re-alerta. Não carrega o valor do cookie, só 8 chars de
+  # SHA1 — o mesmo padrão que `assinatura` já emite no log.
+  def fingerprint_rejeicao(assinatura_rejeitada)
+    return "sem-identificacao" if assinatura_rejeitada.nil?
+
+    "sha1:#{assinatura_rejeitada}"
   end
 
   # Só o par que rotaciona, e só se mudou. Nunca o valor — isto vai para o log.
