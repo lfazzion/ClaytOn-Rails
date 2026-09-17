@@ -11,7 +11,7 @@ module Discovery
         batch = handles.first(MAX_BATCH_SIZE)
         prompt = Llm::PromptLoader.load('discovery', handles: batch)
 
-        response = AiRouter.complete(prompt: prompt, context: :background)
+        response = AiRouter.complete(prompt, context: :background)
         parse_classification(response.content, source_profile)
       rescue Llm::BaseClient::QuotaExceededError => e
         Rails.logger.warn "[ProfileClassifier] Quota esgotada, adiando classificação: #{e.message}"

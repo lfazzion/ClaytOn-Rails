@@ -96,26 +96,32 @@ class DiscoveryJobTest < ActiveJob::TestCase
     end
   end
 
-  test 'should propagate NoMethodError from process_profile' do
+  # Teste corrigido: o teste originalesperava propagação de NoMethodError,
+  # contrariando a spec de isolamento de falhas por perfil (S2-08/Bloqueador 2).
+  test 'should isolate and log NoMethodError from process_profile'do
     create(:social_post, social_profile: @profile, content: '@someone', posted_at: 1.day.ago)
 
-    Discovery::SocialGraphAnalyzer.expects(:extract_handles).with(@profile, anything).raises(NoMethodError.new('undefined method'))
+Discovery::SocialGraphAnalyzer.expects(:extract_handles).with(@profile,anything).raises(NoMethodError.new('undefined method'))
+    Rails.logger.expects(:error).with { |msg| msg.include?('NoMethodError') }
 
-    assert_raises(NoMethodError) do
+assert_nothing_raised do
       DiscoveryJob.perform_now
     end
   end
 
-  test 'should propagate persistence error from process_profile' do
+# Teste corrigido: o teste originalesperava propagação de ActiveRecord::StatementInvalid,
+  # contrariando a spec de isolamentode falhas por perfil (S2-08/Bloqueador 2).
+  test 'shouldisolate andlog persistence error from process_profile' do
     create(:social_post, social_profile: @profile, content: '@someone', posted_at: 1.day.ago)
 
-    mock_response = stub(content: '[{"handle":"@someone","platform":"twitter","categoria":"IGNORAR","razao":"bot"}]')
+    mock_response =stub(content: '[{"handle":"@someone","platform":"twitter","categoria":"IGNORAR","razao":"bot"}]')
     AiRouter.stubs(:complete).returns(mock_response)
 
-    DiscoveryJob.any_instance.stubs(:save_discovered_profile).raises(ActiveRecord::StatementInvalid, 'DB error')
+    DiscoveryJob.any_instance.stubs(:save_discovered_profile).raises(ActiveRecord::StatementInvalid, 'DBerror')
+    Rails.logger.expects(:error).with { |msg| msg.include?('ActiveRecord::StatementInvalid') }
 
-    assert_raises(ActiveRecord::StatementInvalid) do
-      DiscoveryJob.perform_now
+    assert_nothing_raised do
+DiscoveryJob.perform_now
     end
   end
 

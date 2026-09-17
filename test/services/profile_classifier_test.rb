@@ -18,7 +18,8 @@ class ProfileClassifierTest < ActiveSupport::TestCase
     handles = [{ platform: 'instagram', username: '@test', bio: nil }]
 
     mock_response = stub(content: '[{"handle":"@test","platform":"instagram","categoria":"IGNORAR","razao":"bot"}]')
-    AiRouter.expects(:complete).returns(mock_response)
+    expected_prompt = Llm::PromptLoader.load('discovery', handles: handles)
+    AiRouter.expects(:complete).with(expected_prompt, context: :background).returns(mock_response)
 
     result = Discovery::ProfileClassifier.classify(handles, source_profile: @source_profile)
 
