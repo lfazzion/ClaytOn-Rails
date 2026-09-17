@@ -21,6 +21,11 @@ module Discovery
       private
 
       def parse_classification(raw_response, _source_profile)
+        if raw_response.blank?
+Rails.logger.warn '[ProfileClassifier] Resposta vazia ou nula do LLM'
+return []
+        end
+
         cleaned = raw_response.strip
                               .gsub(/\A```json\s*/, '')
                               .gsub(/\A```\s*/, '')
