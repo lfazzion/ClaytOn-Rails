@@ -32,7 +32,29 @@ module Discovery
                               .gsub(/\s*```\z/, '')
                               .strip
 
-        JSON.parse(cleaned).map(&:symbolize_keys)
+        parsed = JSON.parse(cleaned)
+
+        if parsed.nil?
+          Rails.logger.warn '[ProfileClassifier] Resposta vazia ou nula do LLM'
+          return []
+        end
+
+if parsed.is_a?(Hash)
+list_key =%w[results data items profiles].find { |k| parsed[k].is_a?(Array) }
+          if list_key
+parsed = parsed[list_key]
+          else
+Rails.logger.warn "[ProfileClassifier] Formato inesperado doLLM (objeto sem lista): #{parsed.keys.inspect}"
+            return []
+          end
+        end
+
+        unless parsed.is_a?(Array)
+          Rails.logger.warn "[ProfileClassifier] Formato inesperado do LLM (esperava Array, recebeu #{parsed.class})"
+          return []
+        end
+
+        parsed.map(&:symbolize_keys)
       rescue JSON::ParserError => e
         Rails.logger.error "[ProfileClassifier] JSON inválido do LLM: #{e.message}"
         []
