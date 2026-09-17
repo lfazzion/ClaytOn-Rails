@@ -90,6 +90,8 @@ class SentimentClassifierTest < ActiveSupport::TestCase
     else
       ENV.delete("DISCORD_ADMIN_CHANNEL_ID")
     end
+    Rails.cache.delete("discord:admin_channel_id")
+    Rails.cache.delete("discord:admin_channel_lock")
   end
 
   test "lote de 100 vira 1 requisição e salva labels com sucesso" do

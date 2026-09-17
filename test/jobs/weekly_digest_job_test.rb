@@ -5,8 +5,18 @@ require_relative '../../app/services/discord_api_client'
 require_relative '../../app/services/discord_message_chunker'
 require_relative '../../app/jobs/weekly_digest_job'
 
-class WeeklyDigestJobTest < ActiveSupport::TestCase
-  test 'perform monta mensagem com delta de seguidores, top/bottom por scored_at e alertas' do
+class WeeklyDigestJobTest <ActiveSupport::TestCase
+  setup do
+    Rails.cache.delete('discord:digest_channel_id')
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  teardown do
+Rails.cache.delete('discord:digest_channel_id')
+    ENV.delete('DISCORD_DIGEST_CHANNEL_ID')
+  end
+
+  test 'perform montamensagem comdelta de seguidores, top/bottom porscored_at ealertas' do
     ENV['DISCORD_DIGEST_CHANNEL_ID'] = '123456'
 
     p1 = create(:social_profile, platform: 'youtube', platform_username: 'user1', display_name: 'User One', followers_count: 10_000, last_collected_at: 1.hour.ago)
