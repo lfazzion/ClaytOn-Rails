@@ -20,6 +20,9 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
   setup do
     Fetcher::Channels::XGraphql.clear_remote_state!
+    # Remove o jitter real entre paginações: o sleep é o que pesa na suíte
+    # (~1-2 s por página). Testes específicos de paginação usam expectativa própria.
+    Kernel.stubs(:sleep)
     # Pré-popula o cache do resolver para evitar requisições de rede.
     # O resolver usa Faraday (não SafeHttpClient), então stubs de rede não o capturam.
     @cache = ActiveSupport::Cache::MemoryStore.new
@@ -166,6 +169,104 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     assert_equal [], itens
   end
 
+  test "parser descarta usuario sem legacy e sem core.screen_name" do
+    data = {
+      "data" => {
+        "search_by_raw_query" => {
+          "search_timeline" => {
+            "timeline" => {
+              "instructions" => [
+                {
+                  "type" => "TimelineAddEntries",
+                  "entries" => [
+                    {
+                      "content" => {
+                        "itemContent" => {
+                          "tweet_results" => {
+                            "result" => {
+                              "__typename" => "TweetResult",
+                              "legacy" => {
+                                "full_text" => "sem identificacao de usuario",
+                                "created_at" => "2026-01-01T00:00:00Z",
+                                "id_str" => "111111"
+                              },
+                              "core" => {
+                                "user_results" => {
+                                  "result" => {
+                                    # nem legacy nem core.screen_name
+                                    "core" => { "name" => "Anon" }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+
+    itens = Fetcher::Channels::XGraphql.parse_search_timeline(data)
+    assert_equal [], itens
+  end
+
+  test "parser descarta TweetWithVisibilityResults sem hash tweet (ausente ou string)" do
+    base_entry = {
+      "content" => {
+        "itemContent" => {
+          "tweet_results" => {
+            "result" => {
+              "__typename" => "TweetWithVisibilityResults"
+            }
+          }
+        }
+      }
+    }
+
+    ausente = {
+      "data" => {
+        "search_by_raw_query" => { "search_timeline" => { "timeline" => { "instructions" => [
+          { "type" => "TimelineAddEntries", "entries" => [base_entry] }
+        ] } } }
+      }
+    }
+
+    como_string = {
+      "data" => {
+        "search_by_raw_query" => { "search_timeline" => { "timeline" => { "instructions" => [
+          {
+            "type" => "TimelineAddEntries",
+            "entries" => [
+              {
+                "content" => {
+                  "itemContent" => {
+                    "tweet_results" => {
+                      "result" => {
+                        "__typename" => "TweetWithVisibilityResults",
+                        "tweet" => "uma string, nao um hash"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ] } } }
+      }
+    }
+
+    assert_equal [], Fetcher::Channels::XGraphql.parse_search_timeline(ausente),
+                 "tweet ausente deve devolver []"
+    assert_equal [], Fetcher::Channels::XGraphql.parse_search_timeline(como_string),
+                 "tweet como string deve devolver []"
+  end
+
   # ---------------------------------------------------------------------------
   # Fase 4: Testes do BuildTxid (metodo puro testavel)
   # ---------------------------------------------------------------------------
@@ -204,6 +305,263 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     assert_kind_of String, header
     assert_equal 94, header.length
     assert_equal "e5BncvspyRzsZnZ2vL45buEHlPkSusBk6haOUzdet+Axbws8XQYmoXDwV4AHEMX5VhsyPX3pTXspi1zbIbCw+cNKxUMseA", header
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 14: Generalizacao do XGraphql para operacoes arbitrarias (L2)
+  # ---------------------------------------------------------------------------
+
+  # Prova (mock BuildTxid/evidence_header): build_headers(operation:) repassa o
+  # `operation` como `path_suffix` na assinatura do txid. O fake captura os
+  # kwargs REAIS que build_headers manda para evidence_header e casa o
+  # path_suffix de volta no valor retornado — deterministico (nao depende de
+  # Time.now/rand) e prova a LIGACAO operation->path_suffix, nao a eficacia do
+  # BuildTxid em si (essa ja e coberta pelos vetores canary acima).
+  test "build_headers(operation: TweetDetail) assina com path_suffix: TweetDetail" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth-token" },
+      { "name" => "ct0", "value" => "test-ct0-token" }
+    ]
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
+
+    fake_txid = Class.new do
+      attr_reader :last_kwargs
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil)
+        @last_kwargs = { now_ms: now_ms, mask: mask, query_id: query_id, path_suffix: path_suffix }
+        "SIGN(#{path_suffix})"
+      end
+    end.new
+    Fetcher::Channels::XGraphql::BuildTxid.stubs(:new).returns(fake_txid)
+
+    headers = Fetcher::Channels::XGraphql.build_headers(
+      {}, {},
+      operation: "TweetDetail",
+      query_id: "flaR-PUMshxFWZWPNpq4zA"
+    )
+
+    # A assinatura do txid recebeu path_suffix: TweetDetail (o que o perito exigiu)
+    assert_equal "TweetDetail", fake_txid.last_kwargs[:path_suffix]
+    assert_equal "flaR-PUMshxFWZWPNpq4zA", fake_txid.last_kwargs[:query_id]
+    # O header txid e o echo do path_suffix -> prova a ligacao operation->path_suffix
+    assert_equal "SIGN(TweetDetail)", headers["x-client-transaction-id"]
+  end
+
+  # Controle negativo obrigatorio: SearchTimeline tem de produzir header
+  # DIFERENTE do TweetDetail. Com o mesmo fake (que casa a assinatura por
+  # path_suffix), dois operation distintos nunca podem devolver o mesmo txid.
+  test "controle negativo: SearchTimeline e TweetDetail produzem txid diferentes" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth-token" },
+      { "name" => "ct0", "value" => "test-ct0-token" }
+    ]
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
+
+    fake_txid = Class.new do
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil)
+        "SIGN(#{path_suffix})"
+      end
+    end.new
+    Fetcher::Channels::XGraphql::BuildTxid.stubs(:new).returns(fake_txid)
+
+    qid = "flaR-PUMshxFWZWPNpq4zA"
+    txid_search = Fetcher::Channels::XGraphql.build_headers({}, {}, operation: "SearchTimeline", query_id: qid)["x-client-transaction-id"]
+    txid_tweet  = Fetcher::Channels::XGraphql.build_headers({}, {}, operation: "TweetDetail", query_id: qid)["x-client-transaction-id"]
+
+    assert_equal "SIGN(SearchTimeline)", txid_search
+    assert_equal "SIGN(TweetDetail)", txid_tweet
+    assert_not_equal txid_search, txid_tweet, "path_suffix diferente deve produzir txid diferente"
+  end
+
+  test "build_headers sem query_id levanta ArgumentError para operation TweetDetail" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth-token" },
+      { "name" => "ct0", "value" => "test-ct0-token" }
+    ]
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
+
+    # Sem query_id (e com operation != SearchTimeline) nao pode assinar com o
+    # id padrao (id do SearchTimeline) — que era o bug A0.3.
+    error = assert_raises(ArgumentError) do
+      Fetcher::Channels::XGraphql.build_headers({}, {}, operation: "TweetDetail")
+    end
+    assert_match(/query_id/, error.message)
+  end
+
+  test "build_url com operation: TweetDetail monta path correto" do
+    url = Fetcher::Channels::XGraphql.build_url(
+      "", {}, {},
+      "flaR-PUMshxFWZWPNpq4zA",
+      operation: "TweetDetail"
+    )
+
+    assert_match %r{\/i\/api\/graphql\/flaR-PUMshxFWZWPNpq4zA\/TweetDetail}, url
+    refute_match %r{SearchTimeline}, url, "URL para TweetDetail nao deve conter SearchTimeline"
+  end
+
+  test "build_url com operation: SearchTimeline continua funcionando (retrocompatibilidade)" do
+    url = Fetcher::Channels::XGraphql.build_url(
+      "", {}, {},
+      "flaR-PUMshxFWZWPNpq4zA",
+      operation: "SearchTimeline"
+    )
+
+    assert_match %r{\/i\/api\/graphql\/flaR-PUMshxFWZWPNpq4zA\/SearchTimeline}, url
+  end
+
+  test "parser tolera screen_name em user_result core (nao apenas legacy)" do
+    # Fixture com screen_name em core (nao em legacy)
+    data = {
+      "data" => {
+        "search_by_raw_query" => {
+          "search_timeline" => {
+            "timeline" => {
+              "instructions" => [
+                {
+                  "type" => "TimelineAddEntries",
+                  "entries" => [
+                    {
+                      "content" => {
+                        "itemContent" => {
+                          "tweet_results" => {
+                            "result" => {
+                              "__typename" => "TweetResult",
+                              "legacy" => {
+                                "full_text" => "Teste de screen_name em core",
+                                "created_at" => "2026-01-01T00:00:00Z",
+                                "id_str" => "1234567890"
+                              },
+                              "core" => {
+                                "user_results" => {
+                                  "result" => {
+                                    # Nao ha legacy, so core com screen_name
+                                    "core" => {
+                                      "screen_name" => "coreuser"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+
+    itens = Fetcher::Channels::XGraphql.parse_search_timeline(data)
+    assert_equal 1, itens.size
+    assert_equal "coreuser", itens.first["screen_name"]
+  end
+
+  test "parser nao quebra quando legacy do usuario e String e usa core.screen_name" do
+    # legacy String nao deve levantar NoMethodError; o parser cai no fallback core.
+    data = {
+      "data" => {
+        "search_by_raw_query" => {
+          "search_timeline" => {
+            "timeline" => {
+              "instructions" => [
+                {
+                  "type" => "TimelineAddEntries",
+                  "entries" => [
+                    {
+                      "content" => {
+                        "itemContent" => {
+                          "tweet_results" => {
+                            "result" => {
+                              "__typename" => "TweetResult",
+                              "legacy" => {
+                                "full_text" => "legacy String nao derruba o parser",
+                                "created_at" => "2026-01-01T00:00:00Z",
+                                "id_str" => "1234567891"
+                              },
+                              "core" => {
+                                "user_results" => {
+                                  "result" => {
+                                    "legacy" => "string-malformada",
+                                    "core" => {
+                                      "screen_name" => "stringlegacyuser"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+
+    itens = Fetcher::Channels::XGraphql.parse_search_timeline(data)
+    assert_equal 1, itens.size
+    assert_equal "stringlegacyuser", itens.first["screen_name"]
+  end
+
+  test "parser desembroa TweetWithVisibilityResults para tweet" do
+    # Fixture com __typename TweetWithVisibilityResults
+    data = {
+      "data" => {
+        "search_by_raw_query" => {
+          "search_timeline" => {
+            "timeline" => {
+              "instructions" => [
+                {
+                  "type" => "TimelineAddEntries",
+                  "entries" => [
+                    {
+                      "content" => {
+                        "itemContent" => {
+                          "tweet_results" => {
+                            "result" => {
+                              "__typename" => "TweetWithVisibilityResults",
+                              "tweet" => {
+                                "__typename" => "TweetResult",
+                                "legacy" => {
+                                  "full_text" => "Tweet dentro de visibility wrapper",
+                                  "created_at" => "2026-01-01T00:00:00Z",
+                                  "id_str" => "9876543210"
+                                },
+                                "core" => {
+                                  "user_results" => {
+                                    "result" => {
+                                      "legacy" => {
+                                        "screen_name" => "visibilityuser"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+
+    itens = Fetcher::Channels::XGraphql.parse_search_timeline(data)
+    assert_equal 1, itens.size
+    assert_equal "visibilityuser", itens.first["screen_name"]
+    assert_equal "Tweet dentro de visibility wrapper", itens.first["text"]
   end
 
   test "evidence_header nunca vaza segredo em string" do
@@ -333,6 +691,49 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     # Total unico pos dedupe: 3
     assert_kind_of Array, resultados
     assert_equal 3, resultados.size, "deveria ter 3 itens unicos apos dedupe (page1:2 + page2:1 novo)"
+  end
+
+  test "fetch_search dorme entre paginas mas nao apos a ultima (sleep so quando page_count < max_pages)" do
+    Fetcher::CookieJar.stubs(:valid?).returns(true)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+
+    # 3 paginas TODAS com cursor novo (page1, page2 e page1 de novo): assim o loop
+    # so termina pelo `while page_count < max_pages`, e o guard
+    # `if page_count < max_pages` e o que evita o 3o sleep na ultima pagina.
+    # Nota: page1 como 3a pagina tem cursor (C1) DIFERENTE do cursor da page2 (C2),
+    # entao o loop nao quebra em `break if cursor == prev_cursor`.
+    first_response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_1").to_json,
+      headers: {}
+    )
+    second_response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_2").to_json,
+      headers: {}
+    )
+    third_response = StubTx.new(
+      status: 200,
+      body: fixture("search_timeline_page_1").to_json,
+      headers: {}
+    )
+
+    # 3 leituras: page1 (cursor C1), page2 (cursor C2), page1 de novo (cursor C1,
+    # difere de C2) — todas passam pelo sleep line; so a 3a nao dorme.
+    Fetcher::SafeHttpClient.expects(:get).times(3).returns(first_response, second_response, third_response)
+
+    # Entre a 1a e 2a pagina e entre a 2a e 3a: 2 sleeps (page_count 1 e 2 sao
+    # < max_pages=3). Na 3a iteracao (page_count == 3) o guard impede o sleep —
+    # sem o guard, dormiria tambem apos a ultima pagina.
+    # Desarma o stub relaxado global do setup para que a expectativa estrita
+    # abaixo enxergue QUALQUER chamada extra de sleep (se o guard for removido).
+    # Com o stub do setup ativo, uma 3a chamada seria absorvida por ele e a
+    # suíte ficaria verde nos dois estados — o teste nao distinguiria a correcao.
+    Kernel.unstub(:sleep)
+    Kernel.expects(:sleep).times(2)
+
+    resultados = Fetcher::Channels::XGraphql.search(query: "ruby rails", limit: 10)
+    assert_kind_of Array, resultados
   end
 
   test "fetch_search para no limite de paginas (max 3)" do
