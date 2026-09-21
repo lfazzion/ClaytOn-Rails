@@ -326,8 +326,8 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
     fake_txid = Class.new do
       attr_reader :last_kwargs
-      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil)
-        @last_kwargs = { now_ms: now_ms, mask: mask, query_id: query_id, path_suffix: path_suffix }
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
+        @last_kwargs = { now_ms: now_ms, mask: mask, query_id: query_id, path_suffix: path_suffix, method: method }
         "SIGN(#{path_suffix})"
       end
     end.new
@@ -342,6 +342,8 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     # A assinatura do txid recebeu path_suffix: TweetDetail (o que o perito exigiu)
     assert_equal "TweetDetail", fake_txid.last_kwargs[:path_suffix]
     assert_equal "flaR-PUMshxFWZWPNpq4zA", fake_txid.last_kwargs[:query_id]
+    # A assinatura do txid recebeu ainda o method (default GET aqui)
+    assert_equal "GET", fake_txid.last_kwargs[:method]
     # O header txid e o echo do path_suffix -> prova a ligacao operation->path_suffix
     assert_equal "SIGN(TweetDetail)", headers["x-client-transaction-id"]
   end
@@ -357,7 +359,7 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     Fetcher::CookieJar.stubs(:for).returns(cookies)
 
     fake_txid = Class.new do
-      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil)
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
         "SIGN(#{path_suffix})"
       end
     end.new

@@ -344,10 +344,10 @@ module Fetcher
           @verification_bytes = @pair[:verification]
         end
 
-        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline")
+        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline", method: "GET")
           seconds = (now_ms - 1_682_924_400_000) / 1000
           path = "/i/api/graphql/#{query_id}/#{path_suffix}"
-          @payload = "GET!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
+          @payload = "#{method}!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
 
           digest = Digest::SHA256.digest(@payload)
           current_mask = mask || rand(256)
@@ -370,17 +370,23 @@ module Fetcher
       # Internals
       # ---------------------------------------------------------------------------
 
-      def self.build_url(query, variables, features, query_id = nil, operation: "SearchTimeline")
-        encoded_vars = URI.encode_www_form_component(variables.to_json)
-        encoded_feats = URI.encode_www_form_component(features.to_json)
-
+      # No POST o corpo (variables + features) vai no JSON; pôr os dois como
+      # query string estouraria `SSRF_GUARD::MAX_URL_LENGTH` (contexto TweetDetail:
+      # as 38/39 flags de features sozinhas passam de 2048 chars). Por isso o
+      # GET mantém a query string (retrocompatível) e o POST devolve a URL nua
+      # (só scheme + host + path), mantendo a URL abaixo do teto do SsrfGuard.
+      def self.build_url(query, variables, features, query_id = nil, operation: "SearchTimeline", method: "GET")
         resolved_id = query_id || XQueryIdResolver.new.resolve(operation)
 
-        "https://#{COOKIE_DOMAIN}/i/api/graphql/#{resolved_id}/#{operation}?" \
-          "variables=#{encoded_vars}&features=#{encoded_feats}"
+        base = "https://#{COOKIE_DOMAIN}/i/api/graphql/#{resolved_id}/#{operation}"
+        return base if method.to_s.upcase == "POST"
+
+        encoded_vars = URI.encode_www_form_component(variables.to_json)
+        encoded_feats = URI.encode_www_form_component(features.to_json)
+        "#{base}?variables=#{encoded_vars}&features=#{encoded_feats}"
       end
 
-      def self.build_headers(variables, features, query_id: nil, operation: "SearchTimeline")
+      def self.build_headers(variables, features, query_id: nil, operation: "SearchTimeline", method: "GET")
         # query_id é obrigatório para operações que não SearchTimeline:
         # o default QUERY_ID (id do SearchTimeline) é a mesma classe do bug A0.3.
         unless query_id || operation == "SearchTimeline"
@@ -396,7 +402,7 @@ module Fetcher
         cookie_header = cookies.map { |c| "#{c['name']}=#{c['value']}" }.join("; ")
 
         {
-          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id, path_suffix: operation),
+          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id, path_suffix: operation, method: method),
           "x-twitter-auth-type" => "OAuth2Session",
           "x-twitter-active-user" => "yes",
           "x-twitter-client-language" => "en",
