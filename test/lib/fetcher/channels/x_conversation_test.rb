@@ -95,7 +95,9 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
 
   # Deps do transporte para os testes de `fetch` (sem tocar a API real):
   # sessão no jar + txid fake + gate de rate limit liberado.
-  def stub_transport
+  # `exceeded:` devolve `HostRateLimiter.exceeded?` como o teste quiser
+  # (padrão: livre; `true` exercita o freio local).
+  def stub_transport(exceeded: false)
     cookies = [
       { "name" => "auth_token", "value" => "test-auth" },
       { "name" => "ct0", "value" => "test-ct0" }
@@ -113,12 +115,15 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     end.new
     Fetcher::Channels::XGraphql::BuildTxid.stubs(:new).returns(fake_txid)
 
-    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(exceeded)
   end
 
   setup do
     # Remove o jitter real entre páginas (o que pesa na suíte).
     Kernel.stubs(:sleep)
+    # O freio remoto do 429 é estado de módulo (`@remote_blocked`); isola
+    # cada teste para um 429 num teste não travar o próximo.
+    Fetcher::Channels::XConversation.clear_remote_state!
   end
 
   # ------------------------------------------------------------------
@@ -135,6 +140,10 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     assert_equal 1, expected_root, "fixture deve carregar exatamente 1 raiz"
     assert_equal expected_comments, conv["replies"].size,
       "comentários do parser deviam casar com a contagem direta do arquivo"
+    # Verdade medida na fixture real (21/09, HTTP 200): EXATAMENTE 30
+    # comentários. Fixa o número ao lado do contador espelho — hoje o 30
+    # só existia em comentário; se a fixture mudar, esta linha quebra.
+    assert_equal 30, conv["replies"].size, "a fixture real mede 30 comentários"
     refute conv["replies"].empty?, "conversa real não pode devolver [] calado"
   end
 
@@ -169,10 +178,25 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     refute cursor.empty?
   end
 
-  test "parser propaga o MESMO cursor Bottom que o extractor vê" do
-    expected = Fetcher::Channels::XConversation.extract_bottom_cursor(fixture_data)
+  # Verdade fixa: o cursor Bottom da fixture (extraído da MESMA única fonte
+  # que o parser usa — `collect_entries`). Não é a comparação de duas cópias
+  # da mesma lógica que `extract_bottom_cursor` já era; aqui o valor esperado
+  # é literal e a fonte é única (`parse_conversation`), então o teste ancora
+  # a verdade real em vez de validar um espelho contra ele mesmo.
+  EXPECTED_BOTTOM_CURSOR = "DAAKCgABHSw_qSq__u8LAAIAAAFcRW1QQzZ3QUFBZlEvZ0dKTjB2R3AvQUFBQUI0ZEtFTlF0MXFoeUIwbmk3ZC8yOUJZSFNrTEtHU1dZUjRkSjBYR0ZkdlF2UjBuTlFVMUd3RjNIU2ZsSzFvYm9USWRLSGdEa3hvZ25SMHFkYnRERjBGT0hTYzE5ZjFXVWJZZEowbHI5ZHJ3SEIwbnM1Vmlsc0E5SFNpSGxtK2FvT1VkSnpUVnFKdXdwaDBubHFEc213RDNIU2Y4SldzV3dkWWRKNThTZDFvUml4MG9kQTJ3bTRHVEhTYzJ3QTBiVUo0ZEowR3NaVmN3U3gwbjlpZ1ltcEhLSFNjOThCbmIwSE1kSjl4K2xGZlJrQjBubzZrWFZySG1IU2VvL0FXYkFjRWRKN1ROeFpyUkt4MG4xVVAwbHRHL0hTZkdjcktXNGVJZEovUTRUcGRnRmgwb1p4eGsydkRkSFNnVmUydldjR2s9CAADAAAAAgsABAAAAAZCb3R0b20AAA"
+
+  test "parser propaga o cursor Bottom REAL da fixture (fonte única)" do
     conv = Fetcher::Channels::XConversation.parse_conversation(fixture_data, focal_id: ROOT_ID)
-    assert_equal expected, conv["cursor"]
+    assert_equal EXPECTED_BOTTOM_CURSOR, conv["cursor"],
+      "cursor devolvido pelo parser deve ser o Bottom literal da fixture"
+  end
+
+  test "extract_bottom_cursor devolve o MESMO cursor (delegado, não cópia)" do
+    # Agora o mesmo caminhador (collect_entries); não é mais uma segunda
+    # implementação paralela — o teste só confirma que a delegação entrega o
+    # valor esperado, não que duas cópias casam.
+    assert_equal EXPECTED_BOTTOM_CURSOR,
+                 Fetcher::Channels::XConversation.extract_bottom_cursor(fixture_data)
   end
 
   # ------------------------------------------------------------------
@@ -270,7 +294,7 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     refute_nil result["cursor"], "cursor Bottom da página é propagado no contrato"
   end
 
-  test "fetch para quando o cursor se repete (estopado anti-loop infinito)" do
+  test "fetch para quando o cursor se repete (freio anti-loop infinito)" do
     stub_transport
     # Duas páginas idênticas (mesmo cursor) → a segunda vê cursor == prev e quebra.
     resp = StubResp.new(status: 200, body: fixture_data.to_json, headers: {})
@@ -281,6 +305,176 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     assert_equal comment_count(fixture_data), result["replies"].size
     assert_equal result["replies"].uniq { |r| r["id"] }.size, result["replies"].size,
       "comentário duplicado não entra duas vezes"
+  end
+
+  # ------------------------------------------------------------------
+  # `limit` corta o resultado (item: limit não cortava)
+  # ------------------------------------------------------------------
+
+  def comment_entry(tweet)
+    { "entryId" => "tweet-#{tweet["rest_id"]}",
+      "content" => { "entryType" => "TimelineTimelineModule",
+                     "items" => [ { "item" => { "itemContent" => { "tweet_results" => { "result" => tweet } } } } ] } }
+  end
+
+  test "fetch com limit menor que o total corta replies para o teto (corte determinístico)" do
+    stub_transport
+    # Página com raiz + 8 comentários; limit: 5 deve devolver 5 (os primeiros),
+    # NÃO os 8. E como 5 >= limit, não pede página 2.
+    page = convo([
+      root_entry(minimal_tweet(ROOT_ID, "MonidHQ", "post raiz")),
+      *(1..8).map { |i| comment_entry(minimal_tweet("c#{i}", "user#{i}", "comentário #{i}")) },
+      cursor_entry("CUR-NEXT")
+    ])
+    resp = StubResp.new(status: 200, body: page.to_json, headers: {})
+    Fetcher::SafeHttpClient.expects(:post).once.returns(resp)
+
+    result = Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, limit: 5, max_pages: 3)
+
+    assert_equal 5, result["replies"].size, "limit: 5 deve cortar para 5 (os primeiros)"
+    assert_equal ["c1", "c2", "c3", "c4", "c5"], result["replies"].map { |r| r["id"] },
+      "corte mantém a ordem em que chegaram"
+    assert_equal "CUR-NEXT", result["cursor"], "corte não descarta o cursor de paginação"
+  end
+
+  test "fetch com limit menor que o total em 2 páginas corta no limite global" do
+    stub_transport
+    # Página 1: 3 comentários + cursor p2. Página 2: 6 + cursor repetido p2
+    # (quebra anti-loop). Total disponível: 9; limit: 4 deve devolver 4.
+    # Ordem real: a âncora local (1º tweet lido da página de continuação)
+    # fica NA FRENTE da página — logo os primeiros 4 globais são a,b,c + d1.
+    page1 = convo([
+      root_entry(minimal_tweet(ROOT_ID, "MonidHQ", "post raiz")),
+      *%w[a b c].map { |id| comment_entry(minimal_tweet(id, "author", "texto #{id}")) },
+      cursor_entry("CUR-P2")
+    ])
+    page2 = convo([
+      *(1..6).map { |i| comment_entry(minimal_tweet("d#{i}", "author", "texto d#{i}")) },
+      cursor_entry("CUR-P2") # repetido -> quebra
+    ])
+    Fetcher::SafeHttpClient.expects(:post).times(2)
+      .returns(
+        StubResp.new(status: 200, body: page1.to_json, headers: {}),
+        StubResp.new(status: 200, body: page2.to_json, headers: {})
+      )
+
+    result = Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, limit: 4, max_pages: 3)
+
+    assert_equal 4, result["replies"].size, "limit global corta a soma das páginas"
+    assert_equal ["a", "b", "c", "d1"], result["replies"].map { |r| r["id"] },
+      "corte mantém a ordem de chegada (âncora local fica NA FRENTE da página de continuação)"
+  end
+
+  test "fixture REAL: limit menor que o total da fixture corta replies" do
+    # A fixture traz 30 comentários; limit: 7 (menor que o total) deve
+    # devolver EXATAMENTE 7 — prova que o `limit` corta o resultado, não
+    # apenas estanca a paginação (o bug antigo devolvia os 30).
+    stub_transport
+    resp = StubResp.new(status: 200, body: fixture_data.to_json, headers: {})
+    Fetcher::SafeHttpClient.expects(:post).times(1).returns(resp)
+
+    result = Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, limit: 7, max_pages: 1)
+
+    assert_equal 7, result["replies"].size, "limit: 7 corta os 30 para 7"
+    assert_equal 7, result["replies"].uniq { |r| r["id"] }.size, "corte não duplica"
+    refute result["replies"].any? { |r| r["id"] == ROOT_ID }, "raiz não entra em replies"
+  end
+
+  # ------------------------------------------------------------------
+  # Falhas de transporte / sessão (sem rede real)
+  # ------------------------------------------------------------------
+
+  test "falha de rede (SafeHttpClient::Error) vira ResponseError tipada" do
+    stub_transport
+    Fetcher::SafeHttpClient.expects(:post)
+      .raises(Fetcher::SafeHttpClient::Error, "fiação do transporte caiu")
+
+    err = assert_raises(Fetcher::Channels::XConversation::ResponseError) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/falha de rede/, err.message)
+    assert_match(/SafeHttpClient::Error/, err.message)
+  end
+
+  test "SSRF bloqueado vira ResponseError tipada" do
+    stub_transport
+    Fetcher::SafeHttpClient.expects(:post)
+      .raises(Fetcher::SsrfGuard::Blocked.new("ip interno"))
+
+    assert_raises(Fetcher::Channels::XConversation::ResponseError) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+  end
+
+  test "corpo não-JSON em HTTP 200 levanta ResponseError" do
+    stub_transport
+    Fetcher::SafeHttpClient.expects(:post).returns(
+      StubResp.new(status: 200, body: "<html>não é a API</html>", headers: {})
+    )
+
+    err = assert_raises(Fetcher::Channels::XConversation::ResponseError) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/não é JSON/, err.message)
+  end
+
+  test "teto total de 30 s estoura para TimedOut (tipado)" do
+    stub_transport
+    # Um `Timeout::Error` cru escapando do transporte: o `rescue` do
+    # `post_page!` SÓ pega `SafeHttpClient::Error`/`SsrfGuard::Blocked`,
+    # então o `Timeout::Error` cru sobe até o `rescue Timeout::Error` do
+    # `fetch`, que o tipa para `TimedOut` (mesmo caminho do alarme de
+    # 30 s estourando num sleep real).
+    Fetcher::SafeHttpClient.expects(:post).times(1)
+      .raises(Timeout::Error, "estourou o teto")
+
+    err = assert_raises(Fetcher::Channels::XConversation::TimedOut) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/excedeu/, err.message)
+  end
+
+  test "HTTP 401 (stub) levanta AuthError (txid/csrf/sessão inválidos)" do
+    stub_transport
+    Fetcher::SafeHttpClient.expects(:post).returns(
+      StubResp.new(status: 401, body: "{}", headers: {})
+    )
+
+    assert_raises(Fetcher::Channels::XConversation::AuthError) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+  end
+
+  test "rate limit local (4/min estourado) levanta RateLimited sem gastar rede" do
+    stub_transport(exceeded: true)
+    Fetcher::SafeHttpClient.expects(:post).never
+
+    err = assert_raises(Fetcher::Channels::XConversation::RateLimited) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/rate limit local/, err.message)
+  end
+
+  test "CookieJar::Expired (sessão ausente/expirada) levanta antes de tocar rede" do
+    cookies = [
+      { "name" => "auth_token", "value" => "test-auth" },
+      { "name" => "ct0", "value" => "test-ct0" }
+    ]
+    Fetcher::CookieJar.stubs(:valid?).returns(false) # -> require! levanta Expired
+    Fetcher::CookieJar.stubs(:for).returns(cookies)
+    fake_txid = Class.new do
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
+        "TXID(#{path_suffix})"
+      end
+    end.new
+    Fetcher::Channels::XGraphql::BuildTxid.stubs(:new).returns(fake_txid)
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(false)
+    Fetcher::SafeHttpClient.expects(:post).never
+
+    err = assert_raises(Fetcher::CookieJar::Expired) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_equal "x.com", err.domain
   end
 
   test "HTTP 500 (stub) levanta ResponseError" do
@@ -301,13 +495,62 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     end
   end
 
-  test "HTTP 429 (stub) levanta RateLimitedRemote" do
+  test "HTTP 429 (stub) levanta RateLimitedRemote e arma o freio remoto" do
     stub_transport
-    Fetcher::SafeHttpClient.expects(:post).returns(StubResp.new(status: 429, body: "{}", headers: {}))
+    # `x-rate-limit-reset` plausível (future, <1h) define a janela; sem o
+    # header, o piso de 60 s vale.
+    reset_ts = (Time.now + 120).to_i
+    Fetcher::SafeHttpClient.expects(:post).returns(
+      StubResp.new(status: 429, body: "{}", headers: { "x-rate-limit-reset" => reset_ts.to_s })
+    )
+
+    err = assert_raises(Fetcher::Channels::XConversation::RateLimitedRemote) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/429/, err.message)
+
+    # 429 ARMOU o bloqueio remoto (mesmo padrão do XGraphql):
+    assert Fetcher::Channels::XConversation.remote_blocked?,
+      "429 deve armar o freio remoto para a próxima chamada"
+  end
+
+  test "chamada seguida após 429 não bate na API de novo (freio trava antes da rede)" do
+    stub_transport
+    reset_ts = (Time.now + 120).to_s
+    first = StubResp.new(status: 429, body: "{}", headers: { "x-rate-limit-reset" => reset_ts })
+    # 1 POST exato (o que arma o freio). A chamada SEGUIDA NÃO pode tocar a
+    # API: se tocar, o `post` passa do teto de chamadas e o mocha levanta —
+    # o teste cai na hora certa, sem re-stub (re-stub do mesmo método é
+    # terreno instável no mocha).
+    Fetcher::SafeHttpClient.expects(:post).times(1).returns(first)
 
     assert_raises(Fetcher::Channels::XConversation::RateLimitedRemote) do
       Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
     end
+
+    err = assert_raises(Fetcher::Channels::XConversation::RateLimitedRemote) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/bloqueio remoto/, err.message,
+      "chamada seguida deve ser cortada pelo freio local, não pela API")
+  end
+
+  test "429 sem header de reset usa o piso de 60 s e o freio zera ao esgotar" do
+    stub_transport
+    first = StubResp.new(status: 429, body: "{}", headers: {})
+    Fetcher::SafeHttpClient.expects(:post).times(1).returns(first)
+    assert_raises(Fetcher::Channels::XConversation::RateLimitedRemote) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+
+    mod = Fetcher::Channels::XConversation
+    assert mod.remote_blocked?
+    # Sem header o piso de 60 s vale (mesma regra do XGraphql):
+    assert mod.instance_variable_get(:@remote_block_until) > Time.now,
+      "janela do freio deve estar no futuro (piso de 60 s)"
+    # Esgota a janela (não dá para esperar 60 s na suíte) — o freio solta:
+    mod.instance_variable_set(:@remote_block_until, Time.now - 1)
+    refute mod.remote_blocked?, "após a janela o freio deve soltar sozinho"
   end
 
   test "HTTP 403 (stub) levanta AuthError" do

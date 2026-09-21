@@ -16,8 +16,8 @@ module Fetcher
     # no corpo JSON (as flags de features estouram `SsrfGuard::MAX_URL_LENGTH`
     # se fossem embutidas na query string).
     #
-    # Estrutura REAL da resposta (medida na fixture `tmp/x-replies/tweet_detail.json`,
-    # HTTP 200 de 21/09 — 29 entries: 1 item raiz, 27 modules com 30 comentários,
+    # Estrutura REAL da resposta (medida na fixture versionada
+    # `test/fixtures/files/x/tweet_detail.json`, HTTP 200 de 21/09 — 29 entries: 1 item raiz, 27 modules com 30 comentários,
     # 1 cursor Bottom):
     #
     #   data.threaded_conversation_with_injections_v2.instructions[]
@@ -42,7 +42,7 @@ module Fetcher
     # `core.user_results.result.core.screen_name` — na fixture real o
     # `legacy.screen_name` vem nulo e é o fallback que resolve. O envelope
     # `TweetWithVisibilityResults` (com o tweet cru em `result.tweet`) é
-    # desemburachado quando presente; todos os 31 tweets da fixture vieram
+    # desembalado quando presente; todos os 31 tweets da fixture vieram
     # `Tweet` cru.
     #
     # Contrato de saída (chaves STRING, mesmo tom dos outros canais):
@@ -69,6 +69,10 @@ module Fetcher
       DEFAULT_LIMIT     = 40
       DEFAULT_MAX_PAGES = 3
 
+      # Janela de bloqueio remoto ao estourar sem header `x-rate-limit-reset`
+      # (mesmo piso de 60 s do `XGraphql`).
+      REMOTE_BLOCK_SECONDS = 60
+
       # Jitter entre páginas (mesma banda do transporte do X): espaça as
       # requisições para não martelar a API. Nunca dorme na última página.
       PAGE_JITTER_SECONDS = 0.8..2.0
@@ -88,9 +92,11 @@ module Fetcher
         withV2Timeline
       ].freeze
 
-      # Literal de `features` copiado de `tmp/x-replies/features.json`
-      # (fonte: twscrape, pets `GQL_FEATURES` — a mesma que o maestro usou na
-      # captura da fixture). COPY — não inventar nenhuma flag.
+      # 38 flags literais de `features` (fonte primária: `GQL_FEATURES` do
+      # twscrape — a mesma que o maestro usou na captura da fixture
+      # versionada `test/fixtures/files/x/tweet_detail.json`; os flags vieram
+      # da fonte primária, o `tmp/` era só a área de captura efêmera,
+      # não versionado). COPY — não inventar nenhuma flag.
       FEATURES = {
         "articles_preview_enabled" => false,
         "c9s_tweet_anatomy_moderator_badge_enabled" => true,
@@ -193,7 +199,7 @@ module Fetcher
         # UMA página da resposta do `TweetDetail`.
         #
         # Olha os DOIS caminhos de tweet (item raiz + module comentários)
-        # e desemburila o envelope `TweetWithVisibilityResults`
+        # e desembala o envelope `TweetWithVisibilityResults`
         # (`result.tweet`) quando presente. Devolve chaves STRING:
         #   { "root" => {id, author, text, created_at, likes, replies},
         #     "replies" => [tweet], "cursor" => "Bottom"/nil }
@@ -228,31 +234,41 @@ module Fetcher
           }
         end
 
-        # Cursor Bottom de UMA página (espelho do formato real). Devolve a
-        # string `value` do cursor `Bottom` ou `nil` (conversa exausta /
-        # página final). Puro, sem rede — testável em isolamento.
+        # Cursor Bottom de UMA página. `collect_entries` é a ÚNICA fonte que
+        # caminha o envelope; este método público é só a delegação (mantido
+        # para a API de teste) — a leitura em duplicata foi eliminada: não
+        # existe segundo caminhador que possa divergir do `parse_conversation`.
         def extract_bottom_cursor(data)
-          return nil unless data.is_a?(Hash)
+          envelope = conversation_envelope(data)
+          return nil unless envelope
 
-          instructions = data.dig("data", "threaded_conversation_with_injections_v2", "instructions")
-          return nil unless instructions.is_a?(Array)
+          collect_entries(envelope).last
+        end
 
-          instructions.each do |instruction|
-            next unless instruction.is_a?(Hash)
-            next unless instruction["type"] == "TimelineAddEntries"
-            next unless instruction["entries"].is_a?(Array)
+        # ------------------------------------------------------------------
+        # Freio de rate limit remoto (429) — mesmo padrão do `XGraphql`.
+        # 429 arma `@remote_blocked` + janela; `gate!` consulta ANTES de
+        # gastar rede, então chamadas seguidas não voltam a bater na API
+        # até a janela esgotar. O freio local (4/min) segue valendo para
+        # o volume; o remoto trava o próximo fetch inteiro.
+        # ------------------------------------------------------------------
 
-            instruction["entries"].each do |entry|
-              content = entry.is_a?(Hash) ? entry["content"] : nil
-              next unless content.is_a?(Hash)
-              next unless content["entryType"] == "TimelineTimelineCursor"
-              next unless content["cursorType"] == "Bottom"
-              next unless content.key?("value")
-
-              return content["value"].to_s
-            end
+        # `429` do X armou bloqueio remoto — devolve verdadeiro dentro da
+        # janela; fora dela zera o estado e devolve falso.
+        def remote_blocked?
+          if @remote_blocked && @remote_block_until && @remote_block_until > Time.now
+            true
+          else
+            @remote_blocked = false
+            @remote_block_until = nil
+            false
           end
-          nil
+        end
+
+        # Limpa o freio remoto (uso em teste / reset manual).
+        def clear_remote_state!
+          @remote_blocked = false
+          @remote_block_until = nil
         end
 
         # ------------------------------------------------------------------
@@ -265,6 +281,11 @@ module Fetcher
           # Falha rápida ANTES de gastar rede: sem sessão no jar, o POST
           # sairia com Cookie vazio e viraria 401/403 remoto — melhor
           # devolver o `Expired` local (mesmo tom do `XGraphql.search`).
+          # 429 anterior armou o freio remoto local: chamadas seguidas
+          # NÃO voltam a bater na API até a janela esgotar.
+          raise RateLimitedRemote,
+                "429 anterior em #{COOKIE_DOMAIN} — bloqueio remoto local, aguarde a janela" if remote_blocked?
+
           CookieJar.require!(COOKIE_DOMAIN)
           raise RateLimited.new(COOKIE_DOMAIN, GRAPHQL_BUDGET) if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **GRAPHQL_BUDGET)
         end
@@ -288,19 +309,27 @@ module Fetcher
             root ||= conv["root"]
             root_id = root && root["id"]
 
-            # Todos os tweets da página (comentários + a âncora local) viram
-            # candidatos; a raiz global e os já-vistos são descartados.
-            page_tweets = Array(conv["replies"]) + [conv["root"]].compact
+            # Todos os tweets da página viram candidatos; a âncora local vai
+            # NA FRENTE (é o 1º tweet lido da página de continuação — se fosse
+            # adicionada no fim, o corte de `limit` descartaria o que chegou
+            # primeiro); a raiz global e os já-vistos são descartados.
+            page_tweets = [conv["root"]].compact + Array(conv["replies"])
             new_replies = page_tweets.reject { |t| seen[t["id"]] || (root_id && t["id"] == root_id) }
             new_replies.each { |t| seen[t["id"]] = true }
             replies.concat(new_replies)
+            # Corte determinístico: `limit` é o teto TOTAL de comentários
+            # coletados; mantém os PRIMEIROS `limit` na ordem em que
+            # chegaram (a página é lida íntegra para o log, mas o contrato
+            # devolve no máximo `limit`). Sem isto `replies` passaria de
+            # `limit` quando a API devolve mais comentários do que o teto.
+            replies = replies.first(limit)
 
             # `entries` = tweets LIDOS nesta página (pré-dedupe): a prova de
             # quanto a API devolveu. `status` é o HTTP da página.
             log_page(page: page, query_id: QUERY_ID, status: response.status, entries: page_tweets.size)
 
             # Paginação pelo cursor Bottom: cursor novo = há mais;
-            # repetido/ausente = conversa exausta (estopado anti-loop).
+            # repetido/ausente = conversa exausta (freio anti-loop).
             cursor = conv["cursor"]
             break if cursor.nil? || cursor.empty?
             break if cursor == prev_cursor
@@ -336,7 +365,7 @@ module Fetcher
           [response, parsed]
         rescue Fetcher::SafeHttpClient::Error, Fetcher::SsrfGuard::Blocked => e
           # Falha de rede/transporte (timeout, DNS, redirect, SSRF) vira
-          # exceção TYPADA da casa — o chamador resquece `Channels::Error`.
+          # exceção tipada da casa — o chamador resgata `Channels::Error`.
           raise ResponseError, "falha de rede lendo #{OPERATION} (#{e.class.name}): #{e.message}"
         end
 
@@ -346,12 +375,42 @@ module Fetcher
           when 404
             raise NotFound, "post ou query de #{OPERATION} não encontrado (HTTP 404)"
           when 429
+            arm_remote_block!(response.headers)
             raise RateLimitedRemote, "429 do X — rate limit remoto, tente daqui a pouco"
           when 401, 403
             raise AuthError, "HTTP #{response.status} — txid/csrf/sessão inválidos"
           else
             raise ResponseError, "HTTP #{response.status} ao ler #{OPERATION}"
           end
+        end
+
+        # 429 arma o freio remoto local — mesmo padrão do `XGraphql`: o
+        # bloqueio usa o `x-rate-limit-reset` quando o X manda e ele é
+        # plausível; senão, o piso de `REMOTE_BLOCK_SECONDS`. Estado
+        # LOCAL a este módulo (não toca o `@remote_blocked` do `XGraphql`):
+        # a busca e a conversa têm freios independentes — alinhar o
+        # padrão não significa compartilhar o contador.
+        def arm_remote_block!(headers)
+          @remote_blocked = true
+          @remote_block_until = parse_rate_limit_reset(headers) || Time.now + REMOTE_BLOCK_SECONDS
+        end
+
+        # Janela do freio remoto: lê `x-rate-limit-reset` (mesmo critério
+        # de plausibilidade do `XGraphql` — futuro, <1h). Sem header
+        # válido, nil: quem chama cai no piso de `REMOTE_BLOCK_SECONDS`.
+        def parse_rate_limit_reset(headers)
+          reset_str = headers["x-rate-limit-reset"]
+          return nil if reset_str.nil? || reset_str.empty?
+
+          reset_ts = reset_str.to_i
+          return nil if reset_ts <= 0
+
+          now_ts = Time.now.to_i
+          return Time.at(reset_ts) if reset_ts > now_ts && reset_ts < now_ts + 3600
+
+          Time.now + REMOTE_BLOCK_SECONDS
+        rescue ArgumentError, TypeError
+          nil
         end
 
         def build_variables(tweet_id, limit, cursor = nil)
@@ -439,7 +498,7 @@ module Fetcher
 
         # `legacy.screen_name` primeiro; fallback `core.screen_name` —
         # na fixture real o `legacy.screen_name` vem nulo e é o fallback
-        # que resolve (monstro: `MonidHQ`).
+        # que resolve (o autor medido da raiz da fixture é `MonidHQ`).
         def resolve_author(result)
           user = result.dig("core", "user_results", "result")
           return nil unless user.is_a?(Hash)
