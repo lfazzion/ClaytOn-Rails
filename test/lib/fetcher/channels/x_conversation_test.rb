@@ -420,11 +420,14 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
 
   test "teto total de 30 s estoura para TimedOut (tipado)" do
     stub_transport
-    # Um `Timeout::Error` cru escapando do transporte: o `rescue` do
-    # `post_page!` SÓ pega `SafeHttpClient::Error`/`SsrfGuard::Blocked`,
-    # então o `Timeout::Error` cru sobe até o `rescue Timeout::Error` do
-    # `fetch`, que o tipa para `TimedOut` (mesmo caminho do alarme de
-    # 30 s estourando num sleep real).
+    # Simula um `Timeout::Error` CRU escapando do transporte (ex.: alarme de
+    # 30 s do módulo estourando entre páginas, dentro do `Timeout.timeout` do
+    # `fetch`): o `rescue` do `post_page!` SÓ pega `SafeHttpClient::Error`/
+    # `SsrfGuard::Blocked`, então um `Timeout::Error` cru sobe até o
+    # `rescue Timeout::Error` do `fetch`, que o tipa em `TimedOut`.
+    # Cobre a via de alarme TOTAL de 30 s — não a via do transporte: o teto
+    # de 25 s do próprio `SafeHttpClient` é menor que 30 s, então uma
+    # requisição lenta sozinha morre em `RequestTimeout` (viagem abaixo).
     Fetcher::SafeHttpClient.expects(:post).times(1)
       .raises(Timeout::Error, "estourou o teto")
 
@@ -432,6 +435,24 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
       Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
     end
     assert_match(/excedeu/, err.message)
+  end
+
+  test "timeout do transporte (RequestTimeout, 25 s) vira ResponseError, nunca TimedOut" do
+    # O transporte tem teto próprio de 25 s (`SafeHttpClient::TOTAL_TIMEOUT`),
+    # ABAIXO dos 30 s do módulo: uma requisição lenta sozinha converte o
+    # `Timeout::Error` interno em `RequestTimeout` (classe de
+    # `SafeHttpClient::Error`) antes que o alarme de 30 s dispare — e o
+    # `post_page!` converte `RequestTimeout` em `ResponseError` tipada.
+    # Prova que a via de transporte não se mistura com a via de `TimedOut`.
+    stub_transport
+    Fetcher::SafeHttpClient.expects(:post).once
+      .raises(Fetcher::SafeHttpClient::RequestTimeout, "timeout de 25s")
+
+    err = assert_raises(Fetcher::Channels::XConversation::ResponseError) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+    end
+    assert_match(/falha de rede/, err.message)
+    assert_match(/RequestTimeout/, err.message, "o erro tipado deve nomear a causa")
   end
 
   test "HTTP 401 (stub) levanta AuthError (txid/csrf/sessão inválidos)" do
@@ -567,5 +588,34 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     assert_raises(ArgumentError) do
       Fetcher::Channels::XConversation.fetch(tweet_id: "   ")
     end
+  end
+
+  # ------------------------------------------------------------------
+  # Borda do `limit` (borda: limit 0/negativo não vira calado nem cru)
+  # ------------------------------------------------------------------
+
+  test "limit: 0 levanta InvalidLimit (não devolve [] calado, não toca rede)" do
+    # Antes da borda, `limit: 0` passava reto e `replies.first(0)` devolvia
+    # `[]` — "post sem comentários" disfarçado de falha de contrato. Agora o
+    # `fetch` valida ANTES do `gate!`/rede e devolve erro TÍPADO da família
+    # `Channels::Error` (não `ArgumentError` cru nem silêncio).
+    Fetcher::SafeHttpClient.expects(:post).never
+    err = assert_raises(Fetcher::Channels::XConversation::InvalidLimit) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, limit: 0, max_pages: 1)
+    end
+    assert_match(/limit inválido/, err.message)
+    assert_kind_of Fetcher::Channels::Error, err, "InvalidLimit é da família Channels::Error"
+  end
+
+  test "limit negativo levanta InvalidLimit (não ArgumentError cru de first)" do
+    # Antes da borda, `limit: -5` escapava até `replies.first(-5)` e levantava
+    # `ArgumentError` CRU (fora da família tipada do canal). Agora o `fetch`
+    # valida na entrada e devolve o erro TÍPADO da família `Channels::Error`.
+    Fetcher::SafeHttpClient.expects(:post).never
+    err = assert_raises(Fetcher::Channels::XConversation::InvalidLimit) do
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, limit: -5, max_pages: 1)
+    end
+    assert_match(/limit inválido/, err.message)
+    assert_kind_of Fetcher::Channels::Error, err, "erro tipado, não ArgumentError cru"
   end
 end

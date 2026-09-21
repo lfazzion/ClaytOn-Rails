@@ -163,6 +163,13 @@ module Fetcher
       class ParseError < Error; end
       # Teto total de 30 s estourou.
       class TimedOut < Error; end
+      # `limit` inválido na entrada (não inteiro ou menor que 1) — validado
+      # em `fetch` antes de gastar rede (0 e negativo não cortam "calado").
+      class InvalidLimit < Error
+        def initialize(limit)
+          super("limit inválido: #{limit.inspect} — deve ser inteiro >= 1")
+        end
+      end
 
       # ------------------------------------------------------------------
       # Interface pública
@@ -185,6 +192,11 @@ module Fetcher
         def fetch(tweet_id:, limit: DEFAULT_LIMIT, max_pages: DEFAULT_MAX_PAGES)
           id = tweet_id.to_s.strip
           raise ArgumentError, "tweet_id é obrigatório" if id.empty?
+          # `limit` deve ser inteiro positivo: 0 devolvia `[]` calado e
+          # negativo levanta `ArgumentError` cru em `replies.first` — os dois
+          # viram `InvalidLimit` (erro tipado da família `Channels::Error`),
+          # ANTES de `gate!` gastar estado de rate limit ou rede.
+          raise InvalidLimit, limit unless limit.is_a?(Integer) && limit.positive?
 
           gate!
 
@@ -246,11 +258,15 @@ module Fetcher
         end
 
         # ------------------------------------------------------------------
-        # Freio de rate limit remoto (429) — mesmo padrão do `XGraphql`.
-        # 429 arma `@remote_blocked` + janela; `gate!` consulta ANTES de
-        # gastar rede, então chamadas seguidas não voltam a bater na API
-        # até a janela esgotar. O freio local (4/min) segue valendo para
-        # o volume; o remoto trava o próximo fetch inteiro.
+        # Freio de rate limit remoto (429). Padrão do `XGraphql` ao armar e
+        # consultar: 429 arma `@remote_blocked` + janela; `gate!`
+        # consulta ANTES de gastar rede, então chamadas seguidas não
+        # voltam a bater na API até a janela esgotar. O freio local (4/min)
+        # segue valendo para o volume; o remoto trava o próximo fetch inteiro.
+        # Diferença real (não confundir): no `XGraphql` a 429 trava 60 s
+        # FIXOS — o `x-rate-limit-reset` entra só no TEXTO da exceção
+        # (`x_graphql.rb:422-425`); AQUI a janela vem do reset quando ele é
+        # plausível, senão o piso de `REMOTE_BLOCK_SECONDS`.
         # ------------------------------------------------------------------
 
         # `429` do X armou bloqueio remoto — devolve verdadeiro dentro da
@@ -384,33 +400,19 @@ module Fetcher
           end
         end
 
-        # 429 arma o freio remoto local — mesmo padrão do `XGraphql`: o
-        # bloqueio usa o `x-rate-limit-reset` quando o X manda e ele é
-        # plausível; senão, o piso de `REMOTE_BLOCK_SECONDS`. Estado
-        # LOCAL a este módulo (não toca o `@remote_blocked` do `XGraphql`):
-        # a busca e a conversa têm freios independentes — alinhar o
-        # padrão não significa compartilhar o contador.
+        # 429 arma o freio remoto local: `@remote_blocked` + janela. A janela
+        # vem do reset lido pelo PÚBLICO `XGraphql.parse_rate_limit_reset`
+        # (futuro, <1h): header plausível devolve `Time.at(reset)`; fora da
+        # faixa plausível o próprio método devolve `now + 60`; ausente, vazio
+        # ou ≤ 0 devolve nil e o piso de `REMOTE_BLOCK_SECONDS` entra.
+        # Estado LOCAL a este módulo (não toca o `@remote_blocked` do
+        # `XGraphql`): a busca e a conversa têm freios independentes — por
+        # isso `remote_blocked?`/`clear_remote_state!` seguem locais
+        # (leem/escrevem o estado DESTE módulo); só a leitura pura do reset,
+        # que não tem estado próprio, foi delegada.
         def arm_remote_block!(headers)
           @remote_blocked = true
-          @remote_block_until = parse_rate_limit_reset(headers) || Time.now + REMOTE_BLOCK_SECONDS
-        end
-
-        # Janela do freio remoto: lê `x-rate-limit-reset` (mesmo critério
-        # de plausibilidade do `XGraphql` — futuro, <1h). Sem header
-        # válido, nil: quem chama cai no piso de `REMOTE_BLOCK_SECONDS`.
-        def parse_rate_limit_reset(headers)
-          reset_str = headers["x-rate-limit-reset"]
-          return nil if reset_str.nil? || reset_str.empty?
-
-          reset_ts = reset_str.to_i
-          return nil if reset_ts <= 0
-
-          now_ts = Time.now.to_i
-          return Time.at(reset_ts) if reset_ts > now_ts && reset_ts < now_ts + 3600
-
-          Time.now + REMOTE_BLOCK_SECONDS
-        rescue ArgumentError, TypeError
-          nil
+          @remote_block_until = XGraphql.parse_rate_limit_reset(headers) || Time.now + REMOTE_BLOCK_SECONDS
         end
 
         def build_variables(tweet_id, limit, cursor = nil)
