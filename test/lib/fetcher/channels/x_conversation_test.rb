@@ -418,23 +418,30 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     assert_match(/não é JSON/, err.message)
   end
 
-  test "teto total de 30 s estoura para TimedOut (tipado)" do
+  test "teto total injetável (total_timeout) estoura o alarme do módulo para TimedOut (tipado)" do
+    # Prova o alarme DO MÓDULO (não o do transporte): `total_timeout: 0.05`
+    # faz o `Timeout.timeout(total_timeout)` do `fetch` (x_conversation.rb:209)
+    # disparar no relógio real; o stub consome 0,3 s via busy-wait (`Kernel.sleep`
+    # está stubado no `setup` e não anda o alarme do `Timeout`). O `rescue
+    # Timeout::Error` (x_conversation.rb:212-213) tipa em `TimedOut` com o
+    # orçamento INJETADO — o transporte real converte seu timeout interno em
+    # `RequestTimeout` antes, então é o alarme do módulo que dispara aqui.
     stub_transport
-    # Simula um `Timeout::Error` CRU escapando do transporte (ex.: alarme de
-    # 30 s do módulo estourando entre páginas, dentro do `Timeout.timeout` do
-    # `fetch`): o `rescue` do `post_page!` SÓ pega `SafeHttpClient::Error`/
-    # `SsrfGuard::Blocked`, então um `Timeout::Error` cru sobe até o
-    # `rescue Timeout::Error` do `fetch`, que o tipa em `TimedOut`.
-    # Cobre a via de alarme TOTAL de 30 s — não a via do transporte: o teto
-    # de 25 s do próprio `SafeHttpClient` é menor que 30 s, então uma
-    # requisição lenta sozinha morre em `RequestTimeout` (viagem abaixo).
-    Fetcher::SafeHttpClient.expects(:post).times(1)
-      .raises(Timeout::Error, "estourou o teto")
+    resp = StubResp.new(status: 200, body: fixture_data.to_json, headers: {})
+    Fetcher::SafeHttpClient.stubs(:post).with do |*_|
+      # busy-wait real de ~0.3 s (>> 0.05 s) DENTRO do bloco do `Timeout`:
+      # o monitor do `Timeout` interrompe esta thread no meio da chamada, e o
+      # `rescue Timeout::Error` do `fetch` (x_conversation.rb:212-213) tipa.
+      deadline = Time.now + 0.3
+      Time.now while Time.now < deadline
+      true
+    end.returns(resp)
 
     err = assert_raises(Fetcher::Channels::XConversation::TimedOut) do
-      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
+      Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1, total_timeout: 0.05)
     end
-    assert_match(/excedeu/, err.message)
+    assert_match(/excedeu 0.05/, err.message,
+      "a mensagem deve nomear o orçamento INJETADO (0.05 s), não o default de 30")
   end
 
   test "timeout do transporte (RequestTimeout, 25 s) vira ResponseError, nunca TimedOut" do

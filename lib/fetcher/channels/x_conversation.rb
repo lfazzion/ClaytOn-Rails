@@ -161,7 +161,7 @@ module Fetcher
       # Resposta HTTP 200 que NÃO é uma conversa de TweetDetail válida
       # (focal ausente, envelope inexistente, conversa sem tweets).
       class ParseError < Error; end
-      # Teto total de 30 s estourou.
+      # Teto total (`total_timeout`) estourou.
       class TimedOut < Error; end
       # `limit` inválido na entrada (não inteiro ou menor que 1) — validado
       # em `fetch` antes de gastar rede (0 e negativo não cortam "calado").
@@ -189,7 +189,8 @@ module Fetcher
         # Falha de transporte, status não-2xx (mapeado para
         # `NotFound`/`RateLimitedRemote`/`AuthError`/`ResponseError`) ou
         # resposta inválida (`ParseError`) levantam exceção tipada.
-        def fetch(tweet_id:, limit: DEFAULT_LIMIT, max_pages: DEFAULT_MAX_PAGES)
+        def fetch(tweet_id:, limit: DEFAULT_LIMIT, max_pages: DEFAULT_MAX_PAGES,
+                  total_timeout: TOTAL_TIMEOUT)
           id = tweet_id.to_s.strip
           raise ArgumentError, "tweet_id é obrigatório" if id.empty?
           # `limit` deve ser inteiro positivo: 0 devolvia `[]` calado e
@@ -200,11 +201,16 @@ module Fetcher
 
           gate!
 
-          Timeout.timeout(TOTAL_TIMEOUT) do
+          # O teto TOTAL é INJETÁVEL (`total_timeout`, default `TOTAL_TIMEOUT`)
+          # para permitir teste causal do alarme com orçamento minúsculo —
+          # relógio real (thread de monitor do `Timeout`), então 30 s de
+          # espera é inaceitável na suíte. O MESMO alarme/verificação de
+          # sempre; só o valor do teto varia.
+          Timeout.timeout(total_timeout) do
             collect(tweet_id: id, limit: limit, max_pages: max_pages)
           end
         rescue Timeout::Error
-          raise TimedOut, "fetch da conversa excedeu #{TOTAL_TIMEOUT}s"
+          raise TimedOut, "fetch da conversa excedeu #{total_timeout}s"
         end
 
         # Parser puro, sem rede. Entra com o corpo JSON já decodificado de
