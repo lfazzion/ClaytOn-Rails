@@ -306,11 +306,11 @@ module Fetcher
             user_result = core.dig("user_results", "result")
             next nil unless user_result.is_a?(Hash)
 
-            user_legacy = user_result.dig("legacy")
-            next nil unless user_legacy.is_a?(Hash)
-
-            screen_name = user_legacy["screen_name"]
-            next nil if screen_name.nil? || screen_name.empty?
+            # O X passou a mandar o autor em core.screen_name (legacy sem screen_name);
+            # mesma regra do XConversation: legacy primeiro, core como fallback.
+            screen_name = user_result.dig("legacy", "screen_name").presence ||
+                          user_result.dig("core", "screen_name").presence
+            next nil if screen_name.nil?
 
             full_text = legacy["full_text"] || ""
             created_at = legacy["created_at"]

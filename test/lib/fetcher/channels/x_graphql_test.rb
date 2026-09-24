@@ -108,6 +108,30 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     assert_match /Ruby on Rails/, primeiro['text']
   end
 
+  # Formato atual do X (medido 24/09/2026): o autor mora em user_results.result.core.screen_name
+  # e user_results.result.legacy nao traz screen_name. Exigir o legacy descartava TODOS os posts
+  # e a busca devolvia [] sem erro.
+  test 'parser le o autor de user.core quando o legacy nao traz screen_name' do
+    pagina = fixture('search_timeline_page_1')
+    mover_autor_para_core = lambda do |no|
+      case no
+      when Hash
+        if no['__typename'] == 'User' && no['legacy'].is_a?(Hash) && no['legacy']['screen_name']
+          no['core'] = { 'screen_name' => no['legacy'].delete('screen_name'), 'name' => no['legacy']['name'] }
+        end
+        no.each_value { |v| mover_autor_para_core.call(v) }
+      when Array then no.each { |v| mover_autor_para_core.call(v) }
+      end
+    end
+    mover_autor_para_core.call(pagina)
+
+    itens = Fetcher::Channels::XGraphql.parse_search_timeline(pagina)
+
+    assert_equal 2, itens.size
+    assert_equal 'railsdev', itens.first['screen_name']
+    assert_includes itens.first['url'], 'x.com/railsdev/status/'
+  end
+
   test "parser de pagina vazia legitima devolve array vazio sem erro" do
     pagina = fixture("search_timeline_empty")
 
