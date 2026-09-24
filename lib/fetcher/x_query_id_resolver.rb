@@ -210,12 +210,7 @@ module Fetcher
 
       # Se não tem cache, descobre e retorna PIN se falhar
       if envelope.nil?
-        # Desfecho NOMEADO (main, PR #203): o desfecho nomeado já carrega o
-        # `pin_for` — `discover_with_outcome!` devolve `pin_for(operation_name)`
-        # (nil para operações que o PIN não cobre) em vez do `PIN` cru. Não se
-        # reintroduz aqui o `|| pin_for(...)`: ele mascararia `:lock_busy` e
-        # `:fetching_in_progress` num retorno que não distingue "descobri" de
-        # "perdi a corrida".
+        # `pin_for` (frente X) em vez do `PIN` cru.
         return discover_with_outcome!(operation_name)
       end
 
@@ -378,6 +373,7 @@ module Fetcher
         end
 
         query_id = query_ids[operation_name]
+<<<<<<< HEAD
         # PIN de última instância, ESCOPADO por operação (frente X): o PIN só
         # vale para a SearchTimeline (medido no TweetDetail em 24/09/2026: outra
         # operação com este id leva HTTP 422). Para as demais, `fallback` é nil
@@ -430,7 +426,7 @@ module Fetcher
     # Envelope de cache do query id, com a janela de validade de 24h e o TTL
     # de 25h. Extraído porque o caminho agora grava em DOIS pontos
     # (`:not_found` com o PIN e `:discovered` com o id real) e os dois têm de
-    # usar a MESMA aritmética — divergent aí seria a janela de TTL fingindo
+    # usar a MESMA aritmética — divergir aí seria a janela de TTL fingindo
     # ser uma.
     def envelope_for(query_id)
       {
