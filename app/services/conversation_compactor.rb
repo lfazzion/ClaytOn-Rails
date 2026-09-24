@@ -3,7 +3,7 @@
 # Compacta uma conversa para caber na janela do modelo.
 #
 # Mecanismos portados do compactador do hermes
-# (/home/hermes/.hermes/hermes-agent/agent/context_compressor.py):
+# (/home/ubuntu/.hermes/hermes-agent/agent/context_compressor.py):
 #   * a fala do usuário é preservada literalmente — lá, medido: 11 compactações
 #     transformaram 16 perguntas humanas em 92 entradas de "usuário";
 #   * o resumo tem orçamento fixo (razão/piso/teto) e é sempre regerado das
