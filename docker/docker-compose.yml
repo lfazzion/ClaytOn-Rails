@@ -149,7 +149,16 @@ services:
 
   # ── Chrome Headless Shell ─────────────────────────────────────────────────
   chrome:
-    image: chromedp/headless-shell:stable
+    # Tag VERSIONADA, não `:stable` (tag móvel). Medido em 25/09/2026: a imagem local
+    # ainda era a de abril enquanto o registro já servia a 151 — o container rodava
+    # meses atrás do upstream sem ninguém notar. Fixar a versão dá determinismo.
+    # 147.0.7727.102 é o MESMO digest que o container já usava (sha256:aac539266027…).
+    # NÃO subir para 151 ainda: medido em 25/09/2026 que o DevTools novo REJEITA o
+    # `Host` com nome de container ("Host header is specified and is not an IP address
+    # or localhost" / HTTP 500) e o app (Ferrum → ws://chrome:9222) morre com
+    # Ferrum::DeadBrowserError. Subir de versão exige antes resolver o Host
+    # (IP estático do serviço, ou cliente falando por IP) — card próprio.
+    image: chromedp/headless-shell:147.0.7727.102
     # Limites explícitos de recursos: o navegador processa páginas externas e
     # roda na mesma VM que app e workers (24 GB / 4 OCPUs). Consumo descontrolado
     # pode causar OOM global. Valores compatíveis com a VM documentada:
@@ -174,7 +183,19 @@ services:
     # companhia. O armazém durável de sessão continua sendo o jar no banco
     # (`Fetcher::CookieJar`); o Chrome guarda a sessão apenas enquanto o processo
     # vive. Trocar para um Chromium completo é o que mudaria isso.
-    command: ["--user-data-dir=/data"]
+    # Flags do conserto do episódio de 25/09/2026 (Chrome pendurado: CDP respondia e
+    # NENHUMA requisição completava — nem para IP literal). Pesquisa com fontes
+    # primárias aponta o *network-service crash/restart loop* do Chromium como causa
+    # documentada desse estado:
+    #   - `--disable-dev-shm-usage`: o `/dev/shm` da imagem é pequeno por padrão e o
+    #     crash do processo de rede costuma vir daí (já havia `shm_size: 2gb`; a flag
+    #     evita que o Chrome escreva no `/dev/shm` do container).
+    #   - `--disable-features=NetworkService`: tira o componente que crasha, voltando a
+    #     rede para o processo principal. A flag é ACEITA e o navegador funciona com
+    #     ela (medido: CDP + navegação real em example.com, sem aviso de flag
+    #     desconhecida) — mas o BENEFÍCIO não está provado: só o próximo episódio
+    #     dirá. Se não ajudar, é a primeira coisa a remover.
+    command: ["--user-data-dir=/data", "--disable-dev-shm-usage", "--disable-features=NetworkService"]
     volumes:
       - chrome-profile:/data
     networks:
