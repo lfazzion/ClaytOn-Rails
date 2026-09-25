@@ -64,9 +64,23 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     end
   end
 
-  # Comentários = todos os tweets menos a(s) raiz(es).
+  # Comentários orgânicos = todos os tweets menos a(s) raiz(es) e anúncios.
   def comment_count(data)
-    all_tweet_results(data).size - root_count(data)
+    all_tweet_results(data).size - root_count(data) - promoted_count(data)
+  end
+
+  def promoted_count(data)
+    data.dig("data", "threaded_conversation_with_injections_v2", "instructions")
+        .select { |i| i.is_a?(Hash) && i["type"] == "TimelineAddEntries" }
+        .flat_map { |i| Array(i["entries"]) }
+        .sum do |entry|
+      c = entry.is_a?(Hash) ? entry["content"] : nil
+      next 0 unless c.is_a?(Hash) && c["entryType"] == "TimelineTimelineModule"
+
+      Array(c["items"]).count do |item|
+        item.is_a?(Hash) && item.dig("item", "itemContent", "promotedMetadata")
+      end
+    end
   end
 
   def minimal_tweet(id, author, text)
@@ -140,10 +154,9 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     assert_equal 1, expected_root, "fixture deve carregar exatamente 1 raiz"
     assert_equal expected_comments, conv["replies"].size,
       "comentários do parser deviam casar com a contagem direta do arquivo"
-    # Verdade medida na fixture real (21/09, HTTP 200): EXATAMENTE 30
-    # comentários. Fixa o número ao lado do contador espelho — hoje o 30
-    # só existia em comentário; se a fixture mudar, esta linha quebra.
-    assert_equal 30, conv["replies"].size, "a fixture real mede 30 comentários"
+    # Verdade medida na fixture real (21/09, HTTP 200): 30 entradas no
+    # envelope, das quais uma é promovida; o contrato orgânico são 29.
+    assert_equal 29, conv["replies"].size, "a fixture real mede 29 comentários orgânicos"
     refute conv["replies"].empty?, "conversa real não pode devolver [] calado"
   end
 
@@ -166,6 +179,20 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
       assert_kind_of Integer, r["replies"], "replies = legacy.reply_count (int)"
       refute_nil r["author"], "todo comentário da fixture resolve autor (fallback core)"
     end
+  end
+
+  test "promotedMetadata no itemContent exclui o anúncio e preserva comentários reais" do
+    conv = Fetcher::Channels::XConversation.parse_conversation(fixture_data, focal_id: ROOT_ID)
+    entries = fixture_data.dig("data", "threaded_conversation_with_injections_v2", "instructions")
+                   .flat_map { |instruction| Array(instruction["entries"]) }
+    promoted_id = entries.find { |entry| entry.dig("content", "items", 0, "item", "itemContent", "promotedMetadata") }
+                   .dig("content", "items", 0, "item", "itemContent", "tweet_results", "result", "rest_id")
+
+    refute_nil promoted_id, "a fixture precisa conter o Shape controlado de propaganda"
+    refute conv["replies"].any? { |reply| reply["id"] == promoted_id }, "anúncio promovido não pode entrar"
+    assert conv["replies"].any?, "comentários reais continuam entrando"
+    assert_equal comment_count(fixture_data), conv["replies"].size,
+      "o contador orgânico deve incluir todos os comentários reais e excluir o anúncio"
   end
 
   # ------------------------------------------------------------------
@@ -444,21 +471,17 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
       "a mensagem deve nomear o orçamento INJETADO (0.05 s), não o default de 30")
   end
 
-  test "timeout do transporte (RequestTimeout, 25 s) vira ResponseError, nunca TimedOut" do
-    # O transporte tem teto próprio de 25 s (`SafeHttpClient::TOTAL_TIMEOUT`),
-    # ABAIXO dos 30 s do módulo: uma requisição lenta sozinha converte o
-    # `Timeout::Error` interno em `RequestTimeout` (classe de
-    # `SafeHttpClient::Error`) antes que o alarme de 30 s dispare — e o
-    # `post_page!` converte `RequestTimeout` em `ResponseError` tipada.
-    # Prova que a via de transporte não se mistura com a via de `TimedOut`.
+  test "timeout do transporte vira TimedOut tipado e não devolve resultado parcial" do
+    # `SafeHttpClient::RequestTimeout` é um timeout de transporte nomeado. O
+    # contrato do canal deve preservar essa causa em `TimedOut`; como o erro
+    # sobe de `fetch`, não existe resultado parcial silencioso para devolver.
     stub_transport
     Fetcher::SafeHttpClient.expects(:post).once
       .raises(Fetcher::SafeHttpClient::RequestTimeout, "timeout de 25s")
 
-    err = assert_raises(Fetcher::Channels::XConversation::ResponseError) do
+    err = assert_raises(Fetcher::Channels::XConversation::TimedOut) do
       Fetcher::Channels::XConversation.fetch(tweet_id: ROOT_ID, max_pages: 1)
     end
-    assert_match(/falha de rede/, err.message)
     assert_match(/RequestTimeout/, err.message, "o erro tipado deve nomear a causa")
   end
 

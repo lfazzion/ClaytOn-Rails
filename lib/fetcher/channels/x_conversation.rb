@@ -385,8 +385,13 @@ module Fetcher
               raise ResponseError, "corpo de #{OPERATION} não é JSON"
             end
           [response, parsed]
+        rescue Fetcher::SafeHttpClient::RequestTimeout => e
+          # O transporte já classificou sua causa como timeout. Preservamos a
+          # tipagem pública de `XConversation`; como a exceção sobe de
+          # `fetch`, o caller não recebe resultado parcial silencioso.
+          raise TimedOut, "timeout do transporte lendo #{OPERATION} (#{e.class.name}): #{e.message}"
         rescue Fetcher::SafeHttpClient::Error, Fetcher::SsrfGuard::Blocked => e
-          # Falha de rede/transporte (timeout, DNS, redirect, SSRF) vira
+          # Demais falhas de rede/protocolo (DNS, redirect, SSRF) viram
           # exceção tipada da casa — o chamador resgata `Channels::Error`.
           raise ResponseError, "falha de rede lendo #{OPERATION} (#{e.class.name}): #{e.message}"
         end
@@ -478,16 +483,23 @@ module Fetcher
         # `tweet_results` (itens-cursor `ShowMore`).
         def extract_tweet(hash, sink)
           return unless hash.is_a?(Hash)
+          return if promoted?(hash.dig("itemContent"))
 
           result = hash.dig("itemContent", "tweet_results", "result")
           return unless result.is_a?(Hash)
+          return if promoted?(result)
 
           # Envelope de visibilidade: o tweet cru vive em `result.tweet`.
           result = result["tweet"] if result["__typename"] == "TweetWithVisibilityResults"
           return unless result.is_a?(Hash)
+          return if promoted?(result)
 
           shaped = shape_tweet(result)
           sink << shaped if shaped
+        end
+
+        def promoted?(node)
+          node.is_a?(Hash) && node.key?("promotedMetadata")
         end
 
         def shape_tweet(result)
