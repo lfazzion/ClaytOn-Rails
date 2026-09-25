@@ -153,11 +153,21 @@ services:
     # ainda era a de abril enquanto o registro já servia a 151 — o container rodava
     # meses atrás do upstream sem ninguém notar. Fixar a versão dá determinismo.
     # 147.0.7727.102 é o MESMO digest que o container já usava (sha256:aac539266027…).
-    # NÃO subir para 151 ainda: medido em 25/09/2026 que o DevTools novo REJEITA o
-    # `Host` com nome de container ("Host header is specified and is not an IP address
-    # or localhost" / HTTP 500) e o app (Ferrum → ws://chrome:9222) morre com
-    # Ferrum::DeadBrowserError. Subir de versão exige antes resolver o Host
-    # (IP estático do serviço, ou cliente falando por IP) — card próprio.
+    # Upgrade para 151 SUSPENSO (decisão separada; ver RELATORIO-CHROME-151.md).
+    # Medido em 25/09/2026 em réplica isolada, o bloqueio NÃO é do 151 ser "novo":
+    # o 147 TAMBÉM rejeita `Host` por nome no CAMINHO HTTP (/json/version → 500,
+    # "Host header is specified and is not an IP address or localhost"). O que o
+    # 151 mudou foi o HANDSHAKE WEBSOCKET — passou a aplicar a mesma checagem no
+    # upgrade, e é por aí que o Ferrum caía com Ferrum::DeadBrowserError.
+    #   - WS com Host por NOME: 147 => 101 (aceita) | 151 => 500 (rejeita)
+    #   - WS com Host por IP:    147 => 101          | 151 => 101 (aceita)
+    # Via adotada (b), só código, sem mudar este compose: o cliente mantém
+    # `Host: localhost` no HTTP e monta o ws_url com o IPv4 resolvido do serviço
+    # (config/initializers/ferrum.rb e lib/chrome_ws_connector.rb). A via (a), IP
+    # estático na rede `browser`, afetaria 4 consumidores (app, jobs, discord-bot
+    # — este via .env — e test) e NÃO foi adotada.
+    # Nenhuma flag relaxa a checagem: --remote-allow-origins=* trata de `Origin`,
+    # não de `Host` (medido — WS por nome continua 500).
     image: chromedp/headless-shell:147.0.7727.102
     # Limites explícitos de recursos: o navegador processa páginas externas e
     # roda na mesma VM que app e workers (24 GB / 4 OCPUs). Consumo descontrolado
