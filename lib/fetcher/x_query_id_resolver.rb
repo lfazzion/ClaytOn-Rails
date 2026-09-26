@@ -113,12 +113,30 @@ module Fetcher
     # com a thread viva.
     #
     # 3s por requisição: folgado para a latência normal do X, apertado o
-    # bastante para que o pior caso da descoberta (3 requisições no fixture
-    # medido = 9s) caiba dentro dos dois tetos. A aritmética é travada por
-    # teste em test/lib/fetcher/x_query_id_resolver_timeout_test.rb — mudar
-    # este número sem mudar a descoberta quebra o teste, que é o ponto.
+    # bastante para que o pior caso da descoberta caiba dentro dos dois tetos.
+    # A aritmética é travada por teste em
+    # test/lib/fetcher/x_query_id_resolver_timeout_test.rb — mudar este número
+    # sem mudar a descoberta quebra o teste, que é o ponto.
+    #
+    # ── POR QUE HÁ UM TETO TOTAL, E NÃO SÓ open + read (ressalva do #205) ────
+    # `read_timeout` NÃO é teto da RESPOSTA: é teto de CADA TENTATIVA de leitura.
+    # `net/protocol.rb:229` chama `wait_readable(@read_timeout)` dentro do laço
+    # `do ... end while true` de `rbuf_fill`, então um servidor que pinga bytes
+    # devagar NUNCA estoura o read — cada leitura individual fica abaixo do
+    # teto, e a requisição vive por N leituras. MEDIDO neste container em
+    # 26/09/2026 (ruby 4.0.7, net-http 0.9.1, card t_cbfa9f27): com
+    # `read_timeout` de 1,0s, um servidor que envia 1 byte a cada 0,5s manteve a
+    # requisição viva por 21,02s, e a cada 0,9s por 37,01s. A soma
+    # `open + read` era, portanto, uma estimativa que o cliente não garante.
+    #
+    # `HTTP_TOTAL_TIMEOUT` é o teto que fecha a conta: ele envolve a requisição
+    # INTEIRA (connect + escrita + leitura) e é o número que o pior caso por
+    # requisição realmente respeita. 8s: acima do pior caso de home (~1s) e de
+    # um bundle servido de uma vez, e bem acima do `open + read` de 6s, para
+    # que o drip lento seja cortado antes de o teto valer.
     HTTP_OPEN_TIMEOUT = 3
     HTTP_READ_TIMEOUT = 3
+    HTTP_TOTAL_TIMEOUT = 8
 
     # TTL do lock que ESTA execução usa. Existe como método (e não só a
     # constante) para que a MEDIÇÃO da garantia possa usar um TTL curto e
@@ -441,7 +459,7 @@ module Fetcher
     def fetch_home_html
       cookies = Fetcher::CookieJar.for('x.com').map { |c| "#{c['name']}=#{c['value']}" }
       headers = cookies.empty? ? {} : { 'Cookie' => cookies.join('; ') }
-      req = http_client(HOME_URL, headers: headers).get
+      req = http_get(HOME_URL, headers: headers)
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
@@ -459,7 +477,7 @@ module Fetcher
     end
 
     def fetch_bundle(url)
-      req = http_client(url).get
+      req = http_get(url)
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
@@ -484,6 +502,22 @@ module Fetcher
         conn.options.timeout = HTTP_READ_TIMEOUT
         conn.options.open_timeout = HTTP_OPEN_TIMEOUT
       end
+    end
+
+    # Executa UMA requisição sob o teto TOTAL. `open_timeout` e `read_timeout`
+    # são relógios por FASE, e o de read é POR LEITURA: um servidor que pinga
+    # bytes devagar sobrevive a ambos (medido: 37,01s com read de 1,0s, card
+    # t_cbfa9f27). O `Timeout.timeout` é o que fecha a conta — ele envolve a
+    # requisição inteira, connect + escrita + leitura.
+    #
+    # O `Timeout::Error` é traduzido para a MESMA classe de erro que o cliente
+    # já usava, para que quem chama (`fetch_home_html`/`fetch_bundle`) continue
+    # tratando timeout como timeout — e para que o `break` do laço de bundles
+    # não confunda "estourou o teto" com "veio resposta".
+    def http_get(url, headers: {})
+      Timeout.timeout(HTTP_TOTAL_TIMEOUT) { http_client(url, headers: headers).get }
+    rescue Timeout::Error => e
+      raise Faraday::TimeoutError, "teto total de #{HTTP_TOTAL_TIMEOUT}s: #{e.message}"
     end
   end
 end
