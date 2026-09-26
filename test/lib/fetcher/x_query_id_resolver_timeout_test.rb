@@ -46,6 +46,92 @@ module Fetcher
   # fecha a conta é `HTTP_TOTAL_TIMEOUT`, que envolve a requisição inteira — e
   # é esse o número que este arquivo usa na aritmética.
   class XQueryIdResolverTimeoutTest < ActiveSupport::TestCase
+    # ── OS PADRÕES DO GUARD, EM UM LUGAR SÓ ────────────────────────────────
+    #
+    # Eles vivem aqui como constantes porque o teste abaixo (`o guard do
+    # LOCK_TTL nao tem furo`) precisa casar contra eles — um regex escrito
+    # dentro do `refute_match` não pode ser testado por mutação sem ser
+    # duplicado, e um guard duplicado é um guard que diverge.
+    #
+    # Os refutes são NEGAÇÕES do que o bloco não pode AFIRMAR, e "afirmar" é a
+    # palavra que manda: uma frase que cita a promessa antiga para NEGÁ-la é o
+    # que a casa quer (é assim que o bloco se contradiz e fecha a conta), então
+    # um refute que casa com a citação-negada acusaria o texto HONESTO.
+    #
+    # Por isso os dois refutes de promessa estruturam a NEGAÇÃO à volta da
+    # frase, e é isso que fecha os furos da revisão r2 sem abrir outro:
+    #
+    #   (1) A promessa que o achado 2 mediu como FALSA: "a descoberta inteira
+    #       cabe no TTL". O refute antigo casava `... cabe em LOCK_TTL` — o nome
+    #       da constante — e deixava passar "a garantia é que a descoberta
+    #       inteira cabe no tempo do lock" (medido por mutação). Aqui o padrão
+    #       casa a frase INTEIRA, e a tolerância é de até 24 caracteres entre
+    #       ela e a negação: a promessa escrita perto do "não" é a promessa
+    #       que o bloco fecha, não a que ele faz.
+    #
+    #   (2) O nome do total: "pior caso real" sobre uma CONTAGEM de padrões, que
+    #       é PISO e não teto (achado 1). O refute antigo era largo demais
+    #       aqui também: pegava a frase que o bloco usa para EXPLICAR que o
+    #       número não é teto, e acusava o texto honesto.
+    #
+    #   (3) O NÚMERO. 248s vem de 31 x 8s, e 31 é piso. O refute antigo casava
+    #       a grafia (`31 x 8s = 248s`) e deixava passar "31 vezes 8 segundos =
+    #       248 segundos". O número não pode aparecer no bloco por NENHUMA
+    #       grafia — nem na frase que explica por que ele é falso, que é a
+    #       parte que mais tentaria citá-lo para se justificar.
+    REFUTE_DESCOBERTA_CABE = /(?:a\s+garantia\s+)?(?:que\s+)?a\s+descoberta\s+inteira\s+cabe/i.freeze
+    REFUTE_PIOR_CASO_REAL = /pior\s+caso\s+real/i.freeze
+    REFUTE_248 = /248/.freeze
+
+    # ── COMO O GUARD JULGA: AFIRMAÇÃO, NÃO OCORRÊNCIA ───────────────────────
+    #
+    # O refute é sobre AFIRMAR a promessa, não sobre ela aparecer: o bloco
+    # honesto CITA a garantia velha para descartá-la, e é essa citação que dá a
+    # informação para quem lê. Três tentativas de guard falharam antes desta,
+    # e as três estão medidas nos casos do teste de furo:
+    #
+    #   (a) Casar a grafia com o nome da constante: a mesma promessa em prosa
+    #       ("a garantia é que a descoberta inteira cabe no tempo do lock")
+    #       passava — o furo 1 da revisão r2.
+    #   (b) Casar a frase com uma JANELA de caracteres: o "não" do parágrafo de
+    #       CIMA validava a promessa do parágrafo de baixo.
+    #   (c) Ancorar a janela na fronteira (`\s*\z`): a citação honesta do 248s
+    #       — "é uma CONTAGEM, NÃO um limite", com a negação a mais de 80
+    #       caracteres e atravessando linhas — continuava sendo accusada.
+    #
+    # A regra que fecha os três é sobre a ORAÇÃO — o trecho até o ponto final,
+    # com as quebras de linha IRRELEVANTES (o bloco quebra as frases no meio) —
+    # e tem duas metades porque cada uma sozinha deixa um caso passar:
+    #
+    #   ADVERSATIVA: a construção ", NÃO …" ("é uma contagem, NÃO um limite").
+    #     Vale a QUALQUER distância dentro da oração, porque por construção ela
+    #     se liga ao que veio ANTES: o "não" e o predicado dela. É o que
+    #     absolve a citação do 248s, cuja negação está a mais de 80 caracteres.
+    #
+    #   COLADA: o verbo de negação ("NÃO é", "NUNCA", "NEM"). Só nega a
+    #     promessa se estiver COLADO a ela — até `JANELA_NEGACAO` caracteres,
+    #     sem cruzar o ponto final. É o que absolve "a garantia NÃO é 'a
+    #     descoberta inteira cabe…'".
+    #
+    # Por que o verbo precisa ser colado, e a adversativa não: "ela NÃO é
+    # repetida aqui" — de outra oração, falando de outra coisa — aparecia na
+    # FRAÇÃO seguinte da mutação em prosa e absolvia a promessa de cima. Uma
+    # regra de predicado solto no texto inteiro não fecha nada; o que decide é
+    # se a negação APONTA para a promessa, e a adversativa aponta por construção
+    # enquanto o verbo precisa de proximidade.
+    NEGACAO_ADVERSATIVA = /,\s*nao\s+/i.freeze
+    NEGACAO = /(?:nao|nunca|jamais|negando|nega|nem)\b/i.freeze
+    JANELA_NEGACAO = 20
+    NEGACAO_COLADA_ANTES = /#{NEGACAO.source}[^.]{0,#{JANELA_NEGACAO}}\s*\z/i.freeze
+    NEGACAO_COLADA_DEPOIS = /\A[^.]{0,#{JANELA_NEGACAO}}\b#{NEGACAO.source}/i.freeze
+
+    # O que o bloco TEM de dizer, para a garantia ser a que o código respeita.
+    GARANTIA_EXIGIDA = [
+      /por\s+requisicao/i,
+      /janela\s+de\s+reabertura/i,
+      /nao\s+.{0,24}(garantia|cabe)/i
+    ].freeze
+
     def setup
       @cache = ActiveSupport::Cache::MemoryStore.new
       @resolver = XQueryIdResolver.new(cache: @cache)
@@ -331,21 +417,35 @@ module Fetcher
       # (1) A promessa que o achado mediu como falsa, na ordem invertida: o
       # bloco abria dizendo que a garantia era a descoberta inteira caber no
       # TTL, e aclos no fim que NÃO era. As duas nao podem sobreviver.
-      refute_match(/a descoberta inteira cabe em lock_ttl/i, bloco,
-                   'o comentario de LOCK_TTL nao pode afirmar que a descoberta inteira cabe no TTL: ' \
-                   'o proprio bloco nega isso mais adiante, e o numero medido diz que nao cabe (achado 2)')
+      #
+      # O padrão e' a FRASE, nao o nome que ela da ao TTL: o `refute` antigo
+      # casava `a descoberta inteira cabe em LOCK_TTL`, entao a mesma promessa
+      # escrita em prosa — "a garantia e' que a descoberta inteira cabe no
+      # tempo do lock" — passava por ele (medido por mutacao, revisao r2).
+      refute afirma_promessa?(bloco, REFUTE_DESCOBERTA_CABE),
+                   'o comentario de LOCK_TTL nao pode AFIRMAR que a descoberta inteira cabe no ' \
+                   'TTL: o proprio bloco nega isso mais adiante, e o numero medido diz que nao ' \
+                   'cabe (achado 2). Citar a promessa para nega-la pode; afirma-la, nao.'
 
       # (2) A mesma garantia pelo nome do total: "pior caso real" sobre uma
       # CONTAGEM de padroes, que e' piso e nao teto (achado 1).
-      refute_match(/pior caso real/i, bloco,
-                   'o comentario de LOCK_TTL nao pode chamar a contagem de padroes de "pior caso real": ' \
-                   'a contagem nao limita o numero de requisicoes (achado 1, medido: 50 URLs de um ' \
-                   'padrao ja\' dao 51 requisicoes e 408s)')
+      refute afirma_promessa?(bloco, REFUTE_PIOR_CASO_REAL),
+                   'o comentario de LOCK_TTL nao pode chamar a contagem de padroes de "pior caso ' \
+                   'real": a contagem nao limita o numero de requisicoes (achado 1, medido: 50 ' \
+                   'URLs de um padrao ja\' dao 51 requisicoes e 408s)'
 
-      # Nem pelo numero que ela produz: 248s vem de 31 x 8s, e 31 e' piso.
-      refute_match(/31\s*x\s*8s\s*=\s*248s/, bloco,
-                   'o comentario de LOCK_TTL nao pode apresentar 248s como se fosse o pior caso: ' \
-                   'ele vem de uma CONTAGEM (padroes), e a contagem nao limita as requisicoes (achado 1)')
+      # Nem pelo numero que ela produz: 248s vem de 31 x 8s, e 31 e' piso. O
+      # refute antigo casava a GRAFIA (`31 x 8s = 248s`), entao "31 vezes 8
+      # segundos = 248 segundos" passava (medido por mutacao, revisao r2). O
+      # numero nao pode ser APRESENTADO como o pior caso, por nenhuma grafia.
+      #
+      # Passa pelo mesmo `afirma_promessa?` dos outros dois, pela mesma razão:
+      # o bloco pode CITAR o número para dizer que ele não é teto — é isso que
+      # fecha a conta — mas não pode AFIRMAR que ele é.
+      refute afirma_promessa?(bloco, REFUTE_248),
+                   'o comentario de LOCK_TTL nao pode APRESENTAR 248s como se fosse o pior caso: ' \
+                   'ele vem de uma CONTAGEM (padroes), e a contagem nao limita as requisicoes ' \
+                   '(achado 1). Citar o numero para nega-lo pode; apresenta-lo, nao'
 
       # (3) A garantia que FICA tem de estar escrita, e tem de ser a que o
       # codigo respeita de verdade: o teto POR REQUISICAO. O regex tolera a
@@ -365,7 +465,140 @@ module Fetcher
                    'o que o TTL nao e\' faz parte da garantia, nao um detalhe esquecido')
     end
 
+    # ── O GUARD NÃO TEM FURO (furo 1 e furo 2 da revisão r2) ─────────────────
+    #
+    # O teste acima afirma sobre o bloco REAL. Este afirma sobre os PRÓPRIOS
+    # refutes: cada um precisa pegar a promessa falsa em PROSA, e não só
+    # quando ela é escrita da maneira que o regex usou na primeira vez. Sem
+    # isto, o guard é exato enquanto a formulação calhar — que é a situação
+    # em que a revisão r2 o mediu: `a garantia é que a descoberta inteira cabe
+    # no tempo do lock` passava, e `31 vezes 8 segundos = 248 segundos` também.
+    #
+    # É a diferença entre "o guard passa" e "o guard segura": o primeiro é
+    # fato sobre uma redação; o segundo é fato sobre a classe de redações.
+    test 'o guard do LOCK_TTL pega a promessa falsa em PROSA, e nao so na grafia' do
+      # (1) A promessa do achado 2, em prosa — a grafia que o refute antigo
+      # pegava (a do `main`) e as que ele deixavam passar.
+      ['a garantia e que a descoberta inteira cabe no tempo do lock',
+       'a descoberta inteira cabe no TTL, logo o TTL e a garantia',
+       'a garantia que este numero carrega e que a descoberta inteira cabe no ttl',
+       'a descoberta inteira cabe em LOCK_TTL segundos'].each do |frase|
+        assert afirma_promessa?(normalizar(frase), REFUTE_DESCOBERTA_CABE),
+               "o guard tem de pegar a promessa antiga AFIRMADA assim: #{frase}"
+      end
+
+      # (2) O mesmo numero por prosa: o refute antigo so pegava `31 x 8s =
+      #     248s`, e o furo era a mesma conta escrita por extenso.
+      ['31 vezes 8 segundos = 248 segundos',
+       'o pior caso e\' de 248s',
+       'sao 248 segundos de pior caso'].each do |frase|
+        assert_match REFUTE_248, normalizar(frase),
+                     "o guard tem de pegar o 248s escrito assim: #{frase}"
+      end
+
+      # (3) E o "pior caso real", que precisa pegar a promessa afirmada e
+      #     largar a citação que o bloco nega.
+      ['o pior caso real e 31 requisicoes x 8s',
+       'pior caso real: 31 x 8s = 248s'].each do |frase|
+        assert afirma_promessa?(normalizar(frase), REFUTE_PIOR_CASO_REAL),
+               "o guard tem de pegar o 'pior caso real' AFIRMADO assim: #{frase}"
+      end
+
+      # (4) O CONTROLE NEGATIVO: um refute largo demais é um guard que não
+      #     segura nada, e accuse o texto HONESTO. Citar a promessa para
+      #     NEGÁ-la é o que o bloco faz — e tem de continuar passando.
+      honesto = normalizar(<<~TEXTO)
+        a garantia NAO e' a descoberta inteira cabe no TTL, e o 248s nao e' o
+        pior caso real. o TTL e' a janela de reabertura, e o que fecha a conta
+        e' o teto por requisicao
+      TEXTO
+      refute afirma_promessa?(honesto, REFUTE_DESCOBERTA_CABE),
+                   'o refute do item (1) esta largo demais: a frase NAO promete nada e ainda ' \
+                   'casou — citar a promessa para nega-la tem de ser permitido'
+      refute afirma_promessa?(honesto, REFUTE_PIOR_CASO_REAL),
+                   'o refute do "pior caso real" esta largo demais: a frase o nega e ainda casou'
+      refute afirma_promessa?(honesto, REFUTE_248),
+                   'o refute do 248s esta largo demais: a frase nega o numero e ainda casou'
+      GARANTIA_EXIGIDA.each_with_index do |padrao, i|
+        assert_match padrao, honesto,
+                     "a garantia exigida #{i} tem de casar com o texto honesto: #{padrao.inspect}"
+      end
+
+      # (5) O furo que as DUAS primeiras tentativas de conserto deixaram, ambos
+      #     medidos: o "não" de uma frase vizinha validava a promessa quando a
+      #     janela era por distância. O primeiro texto é a mutação da revisão
+      #     r2 com a frase seguinte do bloco em volta; o segundo é a citação
+      #     honesta do 248s, cuja negação ("não um limite") está longe e
+      #     separada por quebras de linha.
+      #
+      #     Sem estes casos, o guard volta a passar pela promessa em prosa — e
+      #     ele passa, porque a suíte verde não é o mesmo que o guard seguro.
+      com_promessa_devolta = normalizar(<<~TEXTO)
+        este numero e a janela de reabertura, e nao a garantia de exclusividade
+        a garantia do TTL nao e a garantia da casa. a garantia e' que a
+        descoberta inteira cabe no tempo do lock. ela nao e repetida aqui
+      TEXTO
+      assert afirma_promessa?(com_promessa_devolta, REFUTE_DESCOBERTA_CABE),
+             'o guard nao pode deixar o "nao" de uma frase vizinha validar a promessa da ' \
+             'frase seguinte: a negacao tem de ser da FRASE da promessa'
+
+      citacao_honesta = normalizar(<<~TEXTO)
+        o 248s que a casa mediu (31 x 8s) e uma contagem, nao um limite: o X
+        serve o que servir, e o codigo faz uma requisicao por bundle servido
+      TEXTO
+      refute afirma_promessa?(citacao_honesta, REFUTE_248),
+             'o guard nao pode accusar a citacao que o proprio bloco nega: a negacao vale ' \
+             'mesmo a mais de 80 caracteres e atravessando linhas'
+    end
+
     private
+
+    # ── AFIRMA OU SÓ CITA? ──────────────────────────────────────────────────
+    #
+    # O guard do `main` e o da rodada anterior acusavam QUALQUER ocorrência da
+    # promessa antiga, inclusive a ocorrência que a NEGA — e o bloco de
+    # `LOCK_TTL` faz exatamente isso: ele abre nomeando a garantia velha e a
+    # fecha negando, e é essa negação que é a informação para quem lê.
+    #
+    # Então o refute passa a ser sobre a AFIRMAÇÃO, e a diferença entre as duas
+    # é a negação à volta da frase, dentro da janela de `JANELA_NEGACAO`
+    # caracteres e sem cruzar ponto final (que fecha a frase).
+    #
+    # Sem a janela, `NEGACAO_ANTES` viraria `nao.*` e qualquer "não" do texto
+    # validaria qualquer promessa depois dele — que é não segurar nada. Com a
+    # janela, o que fica de fora é a MEIA-frase em prosa, que é o caso que o
+    # refute antigo não pegava.
+    def afirma_promessa?(texto, padrao)
+      return false if texto.nil? || texto !~ padrao
+
+      # Unidade de julgamento: a ORAÇÃO (até o ponto final), com as quebras de
+      # linha achatadas — o bloco quebra as frases no meio, e a quebra não é
+      # fronteira de sentido. A promessa é AFIRMADA quando a sua oração não tem
+      # negação que a APONTE. Basta UMA oração afirmada, daí o `any?`.
+      oracoes_do_texto(texto).any? do |oracao|
+        oracao.match?(padrao) && !negacao_aponta_para?(oracao, padrao)
+      end
+    end
+
+    # A oração nega a promessa? Duas respostas, e nenhuma sozinha fecha:
+    # a ADVERSATIVA (", não …"), que se liga ao que veio antes por construção e
+    # vale a qualquer distância dentro da oração, e a negação COLADA (o verbo
+    # "não é", "nunca", "nem"), que só nega a promessa se estiver perto dela.
+    def negacao_aponta_para?(oracao, padrao)
+      return true if oracao.match?(NEGACAO_ADVERSATIVA)
+
+      achado = oracao.match(padrao)
+      antes = oracao[0...achado.begin(0)].gsub(/\s+/, " ")
+      depois = oracao[achado.end(0)..].to_s.gsub(/\s+/, " ")
+      NEGACAO_COLADA_ANTES.match?(antes) || NEGACAO_COLADA_DEPOIS.match?(depois)
+    end
+
+    # As orações do texto. O ponto final é o separador; a quebra de linha NÃO
+    # é, porque o bloco quebra as frases no meio e a negação pode estar na
+    # linha de cima da promessa.
+    def oracoes_do_texto(texto)
+      texto.split(/(?<=\.)\s*/).map { |oracao| oracao.gsub(/\s+/, " ").strip }.reject(&:empty?)
+    end
 
     # Minúsculas, sem acento e SEM a marca de comentário. O bloco lido do
     # arquivo tem um `# ` no começo de cada linha, então uma frase quebrada

@@ -92,8 +92,14 @@ module Fetcher
     # A exclusão funciona por aritmética, não por primitiva: `discover!` grava o
     # lock com este TTL e não o renova nem o apaga ao terminar (decisão
     # deliberada, ver o `ensure` de `discover_with_outcome!`). A exclusão vale
-    # enquanto o TTL não expira, então a garantia que este número carrega seria
-    # "a descoberta inteira cabe no TTL".
+    # enquanto o TTL não expira.
+    #
+    # A garantia antiga está NEGADA logo abaixo, com os dois motivos medidos.
+    # Ela não é repetida aqui em voz alta: uma fonte que promete e se corrige no
+    # mesmo parágrafo deixa quem lê no meio da página sem saber qual das duas
+    # vale (medido por mutação, revisão r2 do #205: o guard que impedia a volta
+    # pegava a forma com o nome da constante e deixava passar a mesma promessa
+    # em prosa).
     #
     # MEDIDO em 26/09/2026 (test/lib/fetcher/x_query_id_lock_ttl_test.rb, store
     # REAL SolidCache, não dublê):
