@@ -296,5 +296,108 @@ module Fetcher
       assert_nil @resolver.resolve('TweetDetail', force: true)
       assert_nil @cache.read('fetcher:x_query_id:TweetDetail')
     end
+
+    # ── RESPOSTA TRUNCADA PELO TETO TOTAL NÃO VIRA PIN DE 25h (achado 3) ─────
+    #
+    # O `HTTP_TOTAL_TIMEOUT` de 8s corta a requisição INTEIRA, e o corte chega
+    # ao laço de bundles como `Faraday::TimeoutError`, que cai no
+    # `rescue StandardError; next` do `discover_with_outcome!`. O laço termina,
+    # `query_id` fica nil, e o desfecho era `:not_found` — que GRAVA O PIN por
+    # 25h (`expires_in: 25 * 3600`).
+    #
+    # Ou seja: um bundle lento do X (ou um drip que sobrevive ao read, medido em
+    # 37,01s) produzia um PIN cacheado por 25 horas com `reason: :not_found`,
+    # e o log dizia "nao encontrada nos bundles apos a busca" — quando a busca
+    # nem terminou. O timeout era reportado como ausência do query id, que é a
+    # MESMA classe de bug que o #203 fechou: um desfecho nomeado apontando para
+    # a causa errada, com um valor de 25h em cima.
+    #
+    # O teste é END-TO-END de verdade, com o `http_get` real: o bundle sai de um
+    # servidor local que faz drip de 1 byte a cada 50ms (cada leitura fica
+    # abaixo do `read_timeout` de 3s, então só o teto TOTAL corta), e o
+    # `BUNDLE_BASE_URL` é apontado para ele durante o teste. Extrair, filtrar,
+    # buscar, cortar e decidir o que vai para o cache são todos o código real.
+    test 'bundle cortado pelo teto total nao vira PIN cacheado por 25h' do
+      porta = drip_server(intervalo: 0.05, total_aprox: XQueryIdResolver::HTTP_TOTAL_TIMEOUT * 20)
+      base_local = "http://127.0.0.1:#{porta}/"
+
+      # `home` responde com UM preload link para o bundle em drip. O padrão
+      # "main" casa com "main.drip.js", então o filtro real deixa passar.
+      home = %(<html><head><link rel="preload" as="script" href="#{base_local}main.drip.js">) \
+             "</head><body></body></html>"
+
+      inicio = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      desfecho, erro = descobrir_com_base_local(base_local, home)
+      decorrido = Process.clock_gettime(Process::CLOCK_MONOTONIC) - inicio
+
+      puts "  MEDIDO: bundle em drip cortado pelo teto total de " \
+           "#{XQueryIdResolver::HTTP_TOTAL_TIMEOUT}s em #{format('%.2f', decorrido)}s -> " \
+           "desfecho=#{desfecho&.reason.inspect} erro=#{erro&.class}"
+
+      # O corte aconteceu de verdade: o teto total, e não uma leitura.
+      assert_operator decorrido, :>=, XQueryIdResolver::HTTP_TOTAL_TIMEOUT * 0.9,
+                      'a requisicao do bundle deveria ter morrido no teto total, nao antes'
+      assert_operator decorrido, :<, XQueryIdResolver::HTTP_TOTAL_TIMEOUT + 2.0,
+                      'a requisicao do bundle deveria ter morrido no teto total, nao depois'
+
+      # E o desfecho NÃO pode ser o do PIN: `:not_found` grava 25h de PIN
+      #GERADO POR UMA RESPOSTA QUE NÃO CHEGOU AO FIM.
+      refute_equal :not_found, desfecho&.reason,
+                   'resposta CORTADA pelo teto total nao pode virar :not_found — ' \
+                   ':not_found grava o PIN por 25h, e a busca nem terminou'
+
+      cacheado = @cache.read('fetcher:x_query_id:SearchTimeline')
+      if cacheado
+        refute_equal XQueryIdResolver::PIN, cacheado[:query_id],
+                     'o PIN nao pode ser cacheado a partir de uma resposta TRUNCADA: ' \
+                     '25h de um id de ultima instancia para um id que existe nos bundles'
+      end
+    ensure
+      @drip_thread&.kill
+    end
+
+    # Roda a descoberta real com `BUNDLE_BASE_URL` apontado para o servidor
+    # local, e devolve `[desfecho, erro]`. A constante é trocada no lugar e
+    # restaurada no `ensure` — o filtro resolve a constante lexicalmente, então
+    # uma subclasse com a sua própria NÃO mudaria o que o `allowed_bundle?` do
+    # pai lê.
+    def descobrir_com_base_local(base_local, home)
+      klass = Fetcher::XQueryIdResolver
+      original = klass::BUNDLE_BASE_URL
+      klass.send(:remove_const, :BUNDLE_BASE_URL)
+      klass.const_set(:BUNDLE_BASE_URL, base_local)
+      @resolver.stubs(:fetch_home_html).returns(home)
+      begin
+        [@resolver.send(:discover_with_outcome!, 'SearchTimeline'), nil]
+      rescue StandardError => e
+        [nil, e]
+      end
+    ensure
+      klass.send(:remove_const, :BUNDLE_BASE_URL)
+      klass.const_set(:BUNDLE_BASE_URL, original)
+    end
+
+    private
+
+    # Servidor que envia a CABEÇA e depois 1 byte a cada `intervalo` segundos:
+    # o drip que sobrevive a qualquer `read_timeout` e que só o teto TOTAL corta.
+    def drip_server(intervalo:, total_aprox:)
+      require "socket"
+      srv = Socket.new(:INET, :STREAM)
+      srv.setsockopt(:SOCKET, :REUSEADDR, true)
+      srv.bind(Addrinfo.tcp("127.0.0.1", 0))
+      srv.listen(4)
+      porta = srv.local_address.ip_port
+      corpo = (total_aprox / intervalo).ceil
+      @drip_thread = Thread.new do
+        c, = srv.accept
+        c.gets
+        c.print "HTTP/1.1 200 OK\r\nContent-Length: #{corpo}\r\nConnection: close\r\n\r\n"
+        c.flush
+        corpo.times { c.print("."); c.flush; sleep intervalo }
+        c.close
+      end
+      porta
+    end
   end
 end

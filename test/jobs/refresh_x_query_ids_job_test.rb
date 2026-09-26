@@ -138,6 +138,36 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
            "o log tem de carregar a causa da falha; veio: #{@logger.entries.map(&:message).inspect}"
   end
 
+  # ── BUSCA CORTADA ≠ ID INEXISTENTE (achado 3 da revisão A do #205) ────────
+  #
+  # Um bundle cortado pelo `HTTP_TOTAL_TIMEOUT` é uma resposta que NÃO CHEGOU
+  # AO FIM, e isso é diferente de o X não ter o id. O desfecho
+  # `:discovery_truncated` existe para essa diferença aparecer no log: sem ele,
+  # o job anunciava "nao encontrada nos bundles" — e o PIN ficava 25h no cache
+  # como se fosse um id verificado.
+  #
+  # Este teste amarra o mapeamento do desfecho: um motivo novo que o job não
+  # mapeia cai no `else` ("desfecho nao mapeado"), que é o sinal de que
+  # ninguém olhou para ele.
+  test "busca CORTADA pelo teto: diz que foi cortada, e nao que o id nao existe" do
+    write_stale_envelope("id-em-cache")
+    any = Fetcher::XQueryIdResolver.any_instance
+    any.stubs(:fetch_home_html).returns(@home_html)
+    any.stubs(:fetch_bundle).raises(Faraday::TimeoutError, "teto total de 8s: execution expired")
+
+    RefreshXQueryIdsJob.perform_now
+
+    refute @logger.messages(:info).any? { |m| m.include?("conclu") },
+           "busca cortada nao pode ser logada como sucesso"
+    warn = @logger.messages(:warn)
+    assert warn.any? { |m| m.include?("CORTADA") || m.include?("cortada") },
+           "o log tem de dizer que a busca foi CORTADA; veio: #{@logger.entries.map(&:message).inspect}"
+    refute warn.any? { |m| m.include?("gravado PIN") },
+           "nada foi gravado: o log nao pode anunciar PIN de ultima instancia numa busca cortada"
+    refute warn.any? { |m| m.include?("desfecho nao mapeado") },
+           "o desfecho :discovery_truncated precisa estar mapeado no job"
+  end
+
   test "sem cache e com a rede caída: PIN com warn, nunca sucesso silencioso" do
     stub_network(extract: true, home: "HTTP 500")
 

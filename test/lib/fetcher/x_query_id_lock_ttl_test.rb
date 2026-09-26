@@ -5,14 +5,24 @@ require "solid_cache"
 require "fetcher/x_query_id_resolver"
 
 module Fetcher
-  # ── RESSALVA R3 do PR #203: o TTL de 60s É a garantia, e ela não foi medida ──
+  # ── O TTL DO LOCK NÃO É A GARANTIA, E ESTE ARQUIVO MEDE POR QUE ───────────
   #
   # A exclusão do lock de descoberta não é mantida por nenhuma primitiva durante
   # o trabalho: `discover!` grava o lock com `expires_in: lock_ttl` e NÃO o
   # renova, NÃO o apaga ao terminar (decisão deliberada e bem explicada em
-  # x_query_id_resolver.rb). A exclusão vale enquanto o TTL não expira — logo a
-  # garantia é literalmente "a descoberta inteira cabe em LOCK_TTL segundos", e
-  # essa aritmética nunca foi medida. Este arquivo mede.
+  # x_query_id_resolver.rb). A exclusão vale enquanto o TTL não expira.
+  #
+  # A garantia ANTIGA era "a descoberta inteira cabe em LOCK_TTL segundos", e
+  # ela é FALSA — e o motivo estava neste arquivo desde o começo, escrito ao
+  # contrário. A aritmética que provava que ela não cabe vivia sobre a
+  # suposição de que cada requisição podia durar 60s do Net::HTTP, o que
+  # deixou de ser verdade: o resolver agora tem teto TOTAL por requisição
+  # (`HTTP_TOTAL_TIMEOUT`, 8s, medido em
+  # test/lib/fetcher/x_query_id_resolver_timeout_test.rb). Este arquivo foi
+  # corrigido em 26/09/2026 (revisão r2 do #205) para não ser a segunda fonte
+  # da garantia velha: o único contrato do TTL é o bloco de `LOCK_TTL` em
+  # lib/fetcher/x_query_id_resolver.rb, e o guard que o protege é o teste
+  # `a garantia do LOCK_TTL tem UMA fonte…`.
   #
   # Os testes usam o store REAL de produção (`SolidCache::Store`, gem 1.0.10 — o
   # mesmo de config/environments/production.rb:14), não um dublê: a pergunta é
@@ -118,7 +128,21 @@ module Fetcher
     end
 
     # ── A DIMENSÃO DO PROBLEMA: quantas requisições uma descoberta faz ───────
-    test 'a descoberta faz no maximo (home + bundles) requisicoes, e o pior caso excede o TTL' do
+    #
+    # Esta aritmética mudou em 26/09/2026 (revisão r2 do #205) e a mudança é o
+    # ponto: ela provava que a garantia velha era FALSA usando o pior caso de
+    # 60s POR requisição do Net::HTTP sem timeout explícito — suposição que
+    # deixou de valer quando o resolver ganhou o `HTTP_TOTAL_TIMEOUT` de 8s.
+    #
+    # Com o teto de hoje, a conta é a do ÚNICO número com garantia (o teto POR
+    # requisição, medido pelo drip), e ela DÁ CABER no TTL do fixture: 3
+    # requisições x 8s = 24s contra 60s. Ou seja: a aritmética que refutava a
+    # garantia velha pelo motivo errado agora mede o motivo CERTO — o número de
+    # requisições NÃO TEM TETO (é um `select` por nome, não um contador: medido
+    # em x_query_id_resolver_timeout_test.rb, 50 URLs de um padrão já dão 51
+    # requisições e 408s), e é por isso que o TTL não pode ser a garantia.
+    test 'o TTL nao e a garantia: o numero de requisicoes nao tem teto, e o teto e' \
+         ' por requisicao' do
       resolver = XQueryIdResolver.new(cache: @store)
       html = File.read(Rails.root.join('test/fixtures/x/home_with_manifest.html'))
       urls = resolver.send(:extract_bundle_urls, html)
@@ -126,20 +150,40 @@ module Fetcher
 
       assert_operator allowed.size, :>=, 1
 
-      # PIOR CASO EM CÓDIGO: nenhuma requisição do resolver tem timeout. Faraday
-      # sem `request.options.timeout` herda o padrão do Net::HTTP, que é 60s de
-      # open e 60s de read POR REQUISIÇÃO (medido neste repo em 26/09/2026).
-      net_http_default = 60
+      # O ÚNICO teto garantido é o POR REQUISIÇÃO (o `HTTP_TOTAL_TIMEOUT`), e ele
+      # é medido de verdade em x_query_id_resolver_timeout_test.rb (drip de 1
+      # byte a cada 50ms, cortado em 8,00s exatos). Nenhuma requisição do
+      # resolver pode passar dele — a suposição antiga ("nenhuma tem timeout")
+      # é a que este commit remove.
+      por_requisicao = XQueryIdResolver::HTTP_TOTAL_TIMEOUT
       requisicoes = allowed.size + 1
-      worst_case = requisicoes * net_http_default
+      pior_case_do_fixture = requisicoes * por_requisicao
+
+      # E o número de requisições NÃO TEM TETO: o filtro é um `select` por NOME
+      # de arquivo. 50 URLs de UM ÚNICO padrão passam todas — é a mesma
+      # medição do achado 1 da revisão A, aqui pelo caminho real do filtro.
+      base = Fetcher::XQueryIdResolver::BUNDLE_BASE_URL
+      sem_teto = 50.times.map { |i| "#{base}main.p#{i}.js" }
+      permitidas = resolver.send(:filter_allowed_bundle_urls, sem_teto).size
+      pior_case_sem_teto = (permitidas + 1) * por_requisicao
+
       puts "  MEDIDO no fixture: #{urls.size} preload links, #{allowed.size} bundles permitidos, " \
            "#{requisicoes} requisicoes por descoberta."
-      puts "  MEDIDO: Net::HTTP sem timeout explicito = #{net_http_default}s por requisicao; " \
-           "pior caso = #{worst_case}s, contra LOCK_TTL=#{XQueryIdResolver::LOCK_TTL}s " \
-           "(#{XQueryIdResolver::LOCK_TTL / worst_case.to_f} do pior caso)."
+      puts "  MEDIDO: teto TOTAL por requisicao = #{por_requisicao}s; " \
+           "fixture = #{pior_case_do_fixture}s contra LOCK_TTL=#{XQueryIdResolver::LOCK_TTL}s."
+      puts "  MEDIDO sem teto de requisicoes: #{permitidas} bundles de UM padrao -> " \
+           "#{permitidas + 1} requisicoes = #{pior_case_sem_teto}s, " \
+           "contra LOCK_TTL=#{XQueryIdResolver::LOCK_TTL}s."
 
-      assert_operator worst_case, :>, XQueryIdResolver::LOCK_TTL,
-                     'o pior caso sem timeout excede o TTL: e por isso que o TTL sozinho nao e garantia'
+      # O fixture CABE, e é por isso que a aritmética do fixture não pode ser
+      # vendida como garantia do TTL: o que estoura é o número de requisições.
+      assert_operator pior_case_do_fixture, :<, XQueryIdResolver::LOCK_TTL,
+                     'o fixture cabe no TTL: por isso que o TTL medido pelo fixture nao e garantia'
+
+      # E o que o código PERMITE estoura — sem nenhuma requisição sem timeout.
+      assert_operator pior_case_sem_teto, :>, XQueryIdResolver::LOCK_TTL,
+                     'o que o codigo permite ja estoura o TTL SEM nenhuma requisicao sem timeout: ' \
+                     'e por isso que o TTL nao e a garantia (o numero de requisicoes nao tem teto)'
     end
   end
 end

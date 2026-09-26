@@ -60,6 +60,14 @@ class RefreshXQueryIdsJob < ApplicationJob
       # como "concluído" esconderia que o X mudou o formato dos bundles.
       Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} nao encontrada nos bundles apos a busca: " \
                        "gravado PIN de ultima instancia #{result.value}"
+    when :discovery_truncated
+      # A busca foi CORTADA pelo teto de requisição, o que é diferente de o X
+      # não ter o id: o que se sabe é o que deu, não que o id não existe. Nada
+      # foi gravado, e dizer isso é o que impede 25h de PIN em silêncio
+      # (achado 3 da revisão A do #205).
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} busca CORTADA pelo teto de requisicao: " \
+                       "a resposta nao chegou ao fim, entao NAO da para afirmar que o id nao existe; " \
+                       "nada gravado no cache"
     when :stale_cache
       Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} servida de cache stale; " \
                        "refresh disparado em background; valor #{result.value}"

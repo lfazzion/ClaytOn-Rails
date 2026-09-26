@@ -64,6 +64,15 @@ module Fetcher
     #   :not_found          — buscou agora, NÃO achou; gravou o PIN de última instância
     #   :not_found_uncached — buscou agora, NÃO achou, e a operação não tem PIN
     #                         (o PIN é do SearchTimeline): NÃO grava nada
+    #   :discovery_truncated— buscou agora e alguma requisição MORREU NO TETO
+    #                         (`HTTP_TOTAL_TIMEOUT`): a busca é incompleta, o
+    #                         que se sabe é o que deu, NÃO que o id não existe.
+    #                         Não GRAVA nada (achado 3, revisão A), mas DEVOLVE
+    #                         ao chamador o que se sabe: o id real visto nesta
+    #                         busca ou, se não houve, o PIN de última instância
+    #                         — o comportamento da `main`. Devolver `nil` aqui
+    #                         quebrava o chamador de produção
+    #                         (x_graphql.rb:90/379 montava a URL com id vazio).
     #   :lock_busy          — outro PROCESSO está descobrindo (perdeu a corrida do lock)
     #   :fetching_in_progress— outra THREAD desta instância está buscando
     #   :fresh_cache        — cache fresco, nem saiu para a rede (force: false)
@@ -77,30 +86,93 @@ module Fetcher
       end
     end
 
-    # TTL do lock de descoberta. ESTE É A GARANTIA de exclusividade, e ela
-    # funciona por aritmética, não por primitiva: `discover!` grava o lock com
-    # este TTL e não o renova nem o apaga ao terminar (decisão deliberada, ver o
-    # `ensure` de `discover_with_outcome!`). A exclusão vale enquanto o TTL não
-    # expira, logo a garantia é "a descoberta inteira cabe em LOCK_TTL".
+    # TTL do lock de descoberta. Este número é a JANELA DE REABERTURA, e não
+    # a garantia de exclusividade — a garantia do TTL não é a garantia da casa.
+    #
+    # A exclusão funciona por aritmética, não por primitiva: `discover!` grava o
+    # lock com este TTL e não o renova nem o apaga ao terminar (decisão
+    # deliberada, ver o `ensure` de `discover_with_outcome!`). A exclusão vale
+    # enquanto o TTL não expira.
+    #
+    # A garantia antiga está NEGADA logo abaixo, com os dois motivos medidos.
+    # Ela não é repetida aqui em voz alta: uma fonte que promete e se corrige no
+    # mesmo parágrafo deixa quem lê no meio da página sem saber qual das duas
+    # vale (medido por mutação, revisão r2 do #205: o guard que impedia a volta
+    # pegava a forma com o nome da constante e deixava passar a mesma promessa
+    # em prosa).
     #
     # MEDIDO em 26/09/2026 (test/lib/fetcher/x_query_id_lock_ttl_test.rb, store
     # REAL SolidCache, não dublê):
     #   - com TTL menor que o fetch, o lock EXPIRA NO MEIO e um segundo
     #     processo entra e busca — a exclusão se perde de verdade, sem erro.
-    #   - pior caso por descoberta = `bundles + 1` requisições. No fixture
-    #     real são 3; com `HTTP_OPEN_TIMEOUT` de 3s, 9s de pior caso.
-    #   - 9s cabe folgadamente nos 60s deste TTL (folga de 6,7x). Antes do
-    #     timeout explícito, cada requisição tinha os 60s do Net::HTTP e o
-    #     pior caso era de 180s — 3x o TTL, ou seja a garantia era FALSA.
     #
-    # Mesmo valor (60s) que o lock usava antes do conserto de 26/09/2026; o que
-    # mudou foi ele deixar de ser uma afirmação sem lastro.
+    # ── O QUE ESTE NÚMERO NÃO É (achados 1 e 2 da revisão A do #205) ──────────
+    #
+    # A garantia NÃO é "a descoberta inteira cabe no TTL", por DOIS motivos
+    # medidos, e nenhum dos dois é a contagem de padrões:
+    #
+    #   (a) O NÚMERO DE REQUISIÇÕES NÃO TEM TETO. `filter_allowed_bundle_urls`
+    #       é um `select` por NOME de arquivo, não um contador: ele aceita
+    #       toda URL que case com QUALQUER um dos 30 padrões de
+    #       `CORE_CHUNK_PATTERNS`, e o X pode servir N bundles com o MESMO
+    #       padrão. MEDIDO por execução do método real: 50 URLs `main.<hash>.js`
+    #       distintas, todas casando com UM ÚNICO padrão ("main"), dão
+    #       `allowed.size = 50` — ou seja 51 requisições e 408s. Com 2 padrões,
+    #       200 URLs dão 200 requisições. Logo `CORE_CHUNK_PATTERNS.size + 1`
+    #       (31) é o PISO do pior caso — o `home` que traz um bundle por
+    #       padrão — e NUNCA o teto. O 248s que a casa mediu (31 x 8s) é uma
+    #       contagem, não um limite: o X serve o que servir, e o código faz
+    #       uma requisição por bundle servido.
+    #
+    #   (b) O QUE TEM TETO É A REQUISIÇÃO, não a descoberta. O pior caso de
+    #       UMA requisição é o `HTTP_TOTAL_TIMEOUT` (8s), e esse é o único
+    #       número desta casa que é teto DE VERDADE: ele envolve a requisição
+    #       inteira (connect + escrita + leitura) e nenhuma resposta que passa
+    #       dos 8s sobrevive (medido: um drip de 1 byte a cada 50ms sobrevive a
+    #       qualquer `read_timeout` e morre em 8,00s, em
+    #       test/lib/fetcher/x_query_id_resolver_timeout_test.rb).
+    #
+    # ENTÃO A GARANTIA, COMO ELA É: o único teto garantido é o teto POR
+    # REQUISIÇÃO (o `HTTP_TOTAL_TIMEOUT`), e não há teto de descoberta. A
+    # exclusão SERIALIZA quem descobre (o `@mutex` dentro da instância e o
+    # `write(unless_exist: true)` entre instâncias), e o TTL é só a janela de
+    # reabertura depois dela. Um segundo processo entrando durante uma
+    # descoberta longa é o comportamento ACEITO, e o que o código faz é
+    # devolver o valor em cache (`:lock_busy`), não buscar em paralelo. Já o
+    # `BACKGROUND_JOIN_TIMEOUT` limita quanto o CHAMADOR espera pela thread de
+    # refresh, e ele cobre a descoberta do FIXTURE (3 bundles x 8s = 24s
+    # contra 25,0s, folga de 1,04x) — e NÃO toda descoberta que o código
+    # permite: com 4 bundles permitidos já são 40s, acima do join. É por isso
+    # que subir o join não compra garantia nenhuma.
+    #
+    # Antes do timeout explícito, cada requisição tinha os 60s do Net::HTTP e o
+    # pior caso de 3 requisições era de 180s — 3x o TTL, ou seja a garantia era
+    # FALSA mesmo no caso curto.
     LOCK_TTL = 60
 
-    # Teto do join em `wait_for_background_refresh`. Acima do fetch de home
-    # (~1s) e da varredura de bundles (~dezenas de requisições), folgado o
-    # bastante para o refresh normal terminar e curto o bastante para um
-    # chamador não depender de rede lenta do X.
+    # Teto do join em `wait_for_background_refresh`: quanto o CHAMADOR espera
+    # pela thread de refresh. Se ela passar deste número, o chamador para de
+    # esperar e a thread segue sozinha.
+    #
+    # ── O QUE ESTE NÚMERO COBRE, E O QUE NÃO COBRE (achado 4) ───────────────
+    #
+    # Ele cobre a descoberta do FIXTURE: 3 bundles x 8s de teto total = 24s
+    # contra 25,0s, ou seja uma folga de 1,04x. Essa folga é estreita e é
+    # dita de propósito — a revisão mediu que ela estoura com 4 bundles
+    # permitidos (5 x 8s = 40s > 25,0s), que é permitido pelo código.
+    #
+    # Ele NÃO é a garantia da exclusão, e NÃO é um teto de descoberta: a
+    # exclusão vem do `@mutex` e do `write(unless_exist: true)`, e o número de
+    # requisições de uma descoberta não tem teto (ver o bloco de `LOCK_TTL`:
+    # a contagem de padrões é PISO, não teto). Por isso subir este número NÃO
+    # compra garantia nenhuma — só faz o chamador esperar mais por uma thread
+    # que, em qualquer caso, será entregue ao lock quando terminar.
+    #
+    # MEDIDO (card t_cbfa9f27): o 25,0s foi escolhido acima dos 18s medidos da
+    # aritmética da descoberta. Com o teto total por requisição de 8s, o número
+    # que a revisão deste card mede é o do fixture (24s) — ver o teste
+    # `o join cobre a descoberta do fixture, e o que o codigo permite nao cabe
+    # nele`, que afirma as DUAS metades em vez de vender o fixture como teto.
     BACKGROUND_JOIN_TIMEOUT = 25.0
 
     # ── Timeout do cliente HTTP (ressalva R1 do PR #203, medido) ────────────
@@ -113,12 +185,33 @@ module Fetcher
     # com a thread viva.
     #
     # 3s por requisição: folgado para a latência normal do X, apertado o
-    # bastante para que o pior caso da descoberta (3 requisições no fixture
-    # medido = 9s) caiba dentro dos dois tetos. A aritmética é travada por
-    # teste em test/lib/fetcher/x_query_id_resolver_timeout_test.rb — mudar
-    # este número sem mudar a descoberta quebra o teste, que é o ponto.
+    # bastante para que a REQUISIÇÃO seja barata. O que este número NÃO faz é
+    # fechar a conta da descoberta — nenhuma soma de relógios por fase fecha,
+    # e o número de requisições não tem teto (ver o bloco de `LOCK_TTL`). O
+    # que fecha a conta por requisição é o `HTTP_TOTAL_TIMEOUT` abaixo, e o
+    # teto por REQUISIÇÃO é a única garantia que sobra: testada em
+    # test/lib/fetcher/x_query_id_resolver_timeout_test.rb, que executa o
+    # `http_get` de verdade contra um drip.
+    #
+    # ── POR QUE HÁ UM TETO TOTAL, E NÃO SÓ open + read (ressalva do #205) ────
+    # `read_timeout` NÃO é teto da RESPOSTA: é teto de CADA TENTATIVA de leitura.
+    # `net/protocol.rb:229` chama `wait_readable(@read_timeout)` dentro do laço
+    # `do ... end while true` de `rbuf_fill`, então um servidor que pinga bytes
+    # devagar NUNCA estoura o read — cada leitura individual fica abaixo do
+    # teto, e a requisição vive por N leituras. MEDIDO neste container em
+    # 26/09/2026 (ruby 4.0.7, net-http 0.9.1, card t_cbfa9f27): com
+    # `read_timeout` de 1,0s, um servidor que envia 1 byte a cada 0,5s manteve a
+    # requisição viva por 21,02s, e a cada 0,9s por 37,01s. A soma
+    # `open + read` era, portanto, uma estimativa que o cliente não garante.
+    #
+    # `HTTP_TOTAL_TIMEOUT` é o teto que fecha a conta: ele envolve a requisição
+    # INTEIRA (connect + escrita + leitura) e é o número que o pior caso por
+    # requisição realmente respeita. 8s: acima do pior caso de home (~1s) e de
+    # um bundle servido de uma vez, e bem acima do `open + read` de 6s, para
+    # que o drip lento seja cortado antes de o teto valer.
     HTTP_OPEN_TIMEOUT = 3
     HTTP_READ_TIMEOUT = 3
+    HTTP_TOTAL_TIMEOUT = 8
 
     # TTL do lock que ESTA execução usa. Existe como método (e não só a
     # constante) para que a MEDIÇÃO da garantia possa usar um TTL curto e
@@ -362,11 +455,43 @@ module Fetcher
         allowed_urls = filter_allowed_bundle_urls(bundle_urls)
 
         query_ids = {}
+        # RESPOSTAS INCOMPLETAS, e não só "não achei" (achado 3 do card
+        # t_ab1dd082, revisão A do #205). Um bundle cortado pelo
+        # `HTTP_TOTAL_TIMEOUT` chega aqui como `Faraday::TimeoutError` e cai no
+        # `rescue StandardError; next`: o laço terminava, `query_id` ficava
+        # nil, e o desfecho era `:not_found` — que GRAVA O PIN por 25h.
+        #
+        # Ou seja: uma resposta que não chegou ao fim virava um id de última
+        # instância cacheado por um dia, e o log dizia "nao encontrada nos
+        # bundles apos a busca" — quando a busca nem terminou. O timeout era
+        # reportado como ausência do query id, que é a MESMA classe de bug que
+        # o #203 fechou: um desfecho nomeado apontando para a causa errada,
+        # com 25h de valor em cima do erro.
+        #
+        # A distinção que fecha é esta: HOUVE alguma requisição cortada? Então
+        # a busca é INCOMPLETA e o PIN (um id que existe de verdade no X, mas
+        # que NÃO foi visto nesta busca) não pode ser servido como se tivesse
+        # sido. Sem nenhuma requisição cortada, a ausência é uma ausência de
+        # verdade e o PIN continua honesto.
+        #
+        # `urls_cortadas` carrega o NOME do que não chegou ao fim, e não só a
+        # contagem: o `warn` tem de dizer QUAL requisição foi cortada, senão
+        # quem lê o log não tem como ligar o corte a uma URL.
+        respostas_truncadas = 0
+        urls_cortadas = []
+
         allowed_urls.each do |url|
           begin
             bundle_js = fetch_bundle(url)
             query_ids.merge!(extract_query_ids(bundle_js))
             break if query_ids.key?(operation_name)
+          rescue Faraday::TimeoutError, Net::ReadTimeout, Net::OpenTimeout, Timeout::Error
+            # A URL do que NÃO chegou ao fim: o log de `warn` nomeia estes
+            # bundles, porque "1 de 3 bundles cortados" sem dizer quais não
+            # deixa quem lê o log sem saber que requisição foi a cortada.
+            urls_cortadas << url
+            respostas_truncadas += 1
+            next
           rescue StandardError
             next
           end
@@ -379,13 +504,41 @@ module Fetcher
         # e nada inventado pode entrar no cache.
         fallback = pin_for(operation_name)
 
+        # Busca INCOMPLETA: alguma requisição morreu no teto.
+        #
+        # O que o defeito do #205 era, e o que este ramo NÃO é: o defeito era
+        # o SILÊNCIO, não o cache. Por isso o corte não muda a SEMÂNTICA para o
+        # chamador — o `value` volta a ser entregue, que é o que a `main` fazia.
+        #
+        # Devolver `nil` media (medido por execução, revisão r2) duas coisas:
+        # `x_graphql.rb:90` e `:379` montavam
+        # `https://x.com/i/api/graphql//SearchTimeline`, com id VAZIO no path, e
+        # como o chamador usa `resolve` (que devolve só a String), o
+        # `:discovery_truncated` não chegava a log nenhum. O silêncio trocava
+        # de roupa em vez de acabar. A saída é o aviso ALTO, não o `nil`.
+        #
+        # O corte NÃO interrompe a busca: um id REAL visto num bundle posterior
+        # segue o caminho de sempre (:discovered, gravado), porque o id foi visto
+        # de verdade e o corte de outro bundle não o invalida. Na rodada anterior
+        # o `return` do truncado vinha ANTES, e esse id era jogado fora.
+        if respostas_truncadas.positive?
+          origem = query_id ? "o id REAL visto nesta busca" : "o PIN de ultima instancia"
+          Rails.logger.warn "[XQueryIdResolver] resposta TRUNCADA de #{operation_name}: " \
+                           "#{respostas_truncadas} de #{allowed_urls.size} bundles cortados pelo " \
+                           "teto de #{HTTP_TOTAL_TIMEOUT}s (#{urls_cortadas.join(', ')}); " \
+                           "a busca nao terminou, entao NAO da para afirmar que o id nao existe. " \
+                           "Servindo #{origem} #{query_id || fallback.inspect}, vindo de resposta " \
+                           "truncada, e NAO gravando o pin de ultima instancia no cache: " \
+                           "o valor nao foi verificado nesta busca"
+        end
+
         if query_id.nil? && fallback
-          # Desfecho nomeado (main, PR #203) preservado: o PIN é um id REAL e
-          # testado desta operação, então cachear é honesto — o `reason` diz
-          # que foi PIN e o job anuncia isso no log em vez de chamar de
-          # sucesso. 25h de valor conhecido > redescoberta a cada chamada.
-          @cache.write(cache_key, envelope_for(fallback), expires_in: 25 * 3600)
-          return outcome(:not_found, fallback, discovered: false)
+          # Com a busca CORTADA, o PIN é servido ao chamador mas NÃO vai para o
+          # cache: 25h de um id que nenhuma requisição completa viu seria o
+          # defeito original do achado 3. O `reason` continua nomeado, para o
+          # log do job dizer "a busca foi cortada" em vez de "o X não tem o id".
+          return outcome(respostas_truncadas.positive? ? :discovery_truncated : :not_found,
+                         fallback, discovered: false)
         end
 
         # Não achou nos bundles e o PIN não cobre esta operação: NADA vai para o
@@ -393,7 +546,8 @@ module Fetcher
         # continua NOMEADO (main) — a diferença para o `:not_found` acima é o
         # que ficou gravado, e `discovered?` é false nos dois.
         if query_id.nil?
-          return outcome(:not_found_uncached, nil, discovered: false)
+          return outcome(respostas_truncadas.positive? ? :discovery_truncated : :not_found_uncached,
+                         nil, discovered: false)
         end
 
         @cache.write(cache_key, envelope_for(query_id), expires_in: 25 * 3600)
@@ -441,7 +595,7 @@ module Fetcher
     def fetch_home_html
       cookies = Fetcher::CookieJar.for('x.com').map { |c| "#{c['name']}=#{c['value']}" }
       headers = cookies.empty? ? {} : { 'Cookie' => cookies.join('; ') }
-      req = http_client(HOME_URL, headers: headers).get
+      req = http_get(HOME_URL, headers: headers)
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
@@ -459,7 +613,7 @@ module Fetcher
     end
 
     def fetch_bundle(url)
-      req = http_client(url).get
+      req = http_get(url)
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
@@ -484,6 +638,22 @@ module Fetcher
         conn.options.timeout = HTTP_READ_TIMEOUT
         conn.options.open_timeout = HTTP_OPEN_TIMEOUT
       end
+    end
+
+    # Executa UMA requisição sob o teto TOTAL. `open_timeout` e `read_timeout`
+    # são relógios por FASE, e o de read é POR LEITURA: um servidor que pinga
+    # bytes devagar sobrevive a ambos (medido: 37,01s com read de 1,0s, card
+    # t_cbfa9f27). O `Timeout.timeout` é o que fecha a conta — ele envolve a
+    # requisição inteira, connect + escrita + leitura.
+    #
+    # O `Timeout::Error` é traduzido para a MESMA classe de erro que o cliente
+    # já usava, para que quem chama (`fetch_home_html`/`fetch_bundle`) continue
+    # tratando timeout como timeout — e para que o `break` do laço de bundles
+    # não confunda "estourou o teto" com "veio resposta".
+    def http_get(url, headers: {})
+      Timeout.timeout(HTTP_TOTAL_TIMEOUT) { http_client(url, headers: headers).get }
+    rescue Timeout::Error => e
+      raise Faraday::TimeoutError, "teto total de #{HTTP_TOTAL_TIMEOUT}s: #{e.message}"
     end
   end
 end
