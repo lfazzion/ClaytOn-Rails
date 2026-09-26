@@ -35,10 +35,20 @@ module Fetcher
   # (test/lib/fetcher/lock_release_dependency_test.rb):
   #
   #   - o caminho genérico DEVOLVE o que aconteceu (`:released`,
-  #     `:not_owner`, `:no_store_support`). Quem llama tem como saber que a
-  #     garantia veio do store, e não da leitura. Um `:no_store_support`
-  #     silencioso seria a mesma classe de bug que estamos fechando: uma
+  #     `:released_non_atomic`, `:not_owner`). Quem llama tem como saber que a
+  #     garantia veio do store, e não da leitura. Um desfecho mudo no caminho
+  #     genérico seria a mesma classe de bug que estamos fechando: uma
   #     limitação que ninguém vê.
+  #
+  #   - NÃO existe um desfecho "sem suporte do store" (`:no_store_support` foi
+  #     documentado até 26/09/2026 e nunca foi produzido — ressalva Minor do
+  #     #204, corrigida aqui). O store sem CAS não é um caso sem saída: ele cai
+  #     no caminho GENÉRICO e recebe `:released_non_atomic`, que diz ao chamador
+  #     exatamente o que aconteceu (apagou, com a janela read→delete). Um
+  #     `:no_store_support` seria MENOS informativo: só diria "não deu", sem
+  #     dizer que o lock saiu. O teste
+  #     (test/lib/fetcher/lock_release_dependency_test.rb) amarra a doc ao
+  #     código: um desfecho documentado que o método não emite quebra a suíte.
   #   - o teste falha se este helper deixar de tratar o caso sem suporte, e
   #     prova que a janela read→delete existe no caminho genérico (medida com
   #     um store que a troca de token no meio do read prova).
