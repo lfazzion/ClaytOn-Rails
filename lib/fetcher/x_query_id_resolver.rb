@@ -67,7 +67,12 @@ module Fetcher
     #   :discovery_truncated— buscou agora e alguma requisição MORREU NO TETO
     #                         (`HTTP_TOTAL_TIMEOUT`): a busca é incompleta, o
     #                         que se sabe é o que deu, NÃO que o id não existe.
-    #                         Não grava nada, nem PIN (achado 3, revisão A)
+    #                         Não GRAVA nada (achado 3, revisão A), mas DEVOLVE
+    #                         ao chamador o que se sabe: o id real visto nesta
+    #                         busca ou, se não houve, o PIN de última instância
+    #                         — o comportamento da `main`. Devolver `nil` aqui
+    #                         quebrava o chamador de produção
+    #                         (x_graphql.rb:90/379 montava a URL com id vazio).
     #   :lock_busy          — outro PROCESSO está descobrindo (perdeu a corrida do lock)
     #   :fetching_in_progress— outra THREAD desta instância está buscando
     #   :fresh_cache        — cache fresco, nem saiu para a rede (force: false)
@@ -462,7 +467,12 @@ module Fetcher
         # que NÃO foi visto nesta busca) não pode ser servido como se tivesse
         # sido. Sem nenhuma requisição cortada, a ausência é uma ausência de
         # verdade e o PIN continua honesto.
+        #
+        # `urls_cortadas` carrega o NOME do que não chegou ao fim, e não só a
+        # contagem: o `warn` tem de dizer QUAL requisição foi cortada, senão
+        # quem lê o log não tem como ligar o corte a uma URL.
         respostas_truncadas = 0
+        urls_cortadas = []
 
         allowed_urls.each do |url|
           begin
@@ -470,6 +480,10 @@ module Fetcher
             query_ids.merge!(extract_query_ids(bundle_js))
             break if query_ids.key?(operation_name)
           rescue Faraday::TimeoutError, Net::ReadTimeout, Net::OpenTimeout, Timeout::Error
+            # A URL do que NÃO chegou ao fim: o log de `warn` nomeia estes
+            # bundles, porque "1 de 3 bundles cortados" sem dizer quais não
+            # deixa quem lê o log sem saber que requisição foi a cortada.
+            urls_cortadas << url
             respostas_truncadas += 1
             next
           rescue StandardError
@@ -484,25 +498,41 @@ module Fetcher
         # e nada inventado pode entrar no cache.
         fallback = pin_for(operation_name)
 
-        # Busca INCOMPLETA: alguma requisição morreu no teto. O PIN não entra no
-        # cache (25h de valor não verificado seria pior que não ter nada) e o
-        # desfecho é nomeado à parte, para que o log diga que a busca foi
-        # CORTADA em vez de dizer que o X não tem o id. O chamador com valor
-        # antigo em cache ainda o recebe pelo `resolve_with_outcome`.
+        # Busca INCOMPLETA: alguma requisição morreu no teto.
+        #
+        # O que o defeito do #205 era, e o que este ramo NÃO é: o defeito era
+        # o SILÊNCIO, não o cache. Por isso o corte não muda a SEMÂNTICA para o
+        # chamador — o `value` volta a ser entregue, que é o que a `main` fazia.
+        #
+        # Devolver `nil` media (medido por execução, revisão r2) duas coisas:
+        # `x_graphql.rb:90` e `:379` montavam
+        # `https://x.com/i/api/graphql//SearchTimeline`, com id VAZIO no path, e
+        # como o chamador usa `resolve` (que devolve só a String), o
+        # `:discovery_truncated` não chegava a log nenhum. O silêncio trocava
+        # de roupa em vez de acabar. A saída é o aviso ALTO, não o `nil`.
+        #
+        # O corte NÃO interrompe a busca: um id REAL visto num bundle posterior
+        # segue o caminho de sempre (:discovered, gravado), porque o id foi visto
+        # de verdade e o corte de outro bundle não o invalida. Na rodada anterior
+        # o `return` do truncado vinha ANTES, e esse id era jogado fora.
         if respostas_truncadas.positive?
-          Rails.logger.warn "[XQueryIdResolver] descoberta INCOMPLETA de #{operation_name}: " \
-                           "#{respostas_truncadas} de #{allowed_urls.size} bundles cortados pelo teto " \
-                           "de #{HTTP_TOTAL_TIMEOUT}s; nada gravado"
-          return outcome(:discovery_truncated, nil, discovered: false)
+          origem = query_id ? "o id REAL visto nesta busca" : "o PIN de ultima instancia"
+          Rails.logger.warn "[XQueryIdResolver] resposta TRUNCADA de #{operation_name}: " \
+                           "#{respostas_truncadas} de #{allowed_urls.size} bundles cortados pelo " \
+                           "teto de #{HTTP_TOTAL_TIMEOUT}s (#{urls_cortadas.join(', ')}); " \
+                           "a busca nao terminou, entao NAO da para afirmar que o id nao existe. " \
+                           "Servindo #{origem} #{query_id || fallback.inspect}, vindo de resposta " \
+                           "truncada, e NAO gravando o pin de ultima instancia no cache: " \
+                           "o valor nao foi verificado nesta busca"
         end
 
         if query_id.nil? && fallback
-          # Desfecho nomeado (main, PR #203) preservado: o PIN é um id REAL e
-          # testado desta operação, então cachear é honesto — o `reason` diz
-          # que foi PIN e o job anuncia isso no log em vez de chamar de
-          # sucesso. 25h de valor conhecido > redescoberta a cada chamada.
-          @cache.write(cache_key, envelope_for(fallback), expires_in: 25 * 3600)
-          return outcome(:not_found, fallback, discovered: false)
+          # Com a busca CORTADA, o PIN é servido ao chamador mas NÃO vai para o
+          # cache: 25h de um id que nenhuma requisição completa viu seria o
+          # defeito original do achado 3. O `reason` continua nomeado, para o
+          # log do job dizer "a busca foi cortada" em vez de "o X não tem o id".
+          return outcome(respostas_truncadas.positive? ? :discovery_truncated : :not_found,
+                         fallback, discovered: false)
         end
 
         # Não achou nos bundles e o PIN não cobre esta operação: NADA vai para o
@@ -510,7 +540,8 @@ module Fetcher
         # continua NOMEADO (main) — a diferença para o `:not_found` acima é o
         # que ficou gravado, e `discovered?` é false nos dois.
         if query_id.nil?
-          return outcome(:not_found_uncached, nil, discovered: false)
+          return outcome(respostas_truncadas.positive? ? :discovery_truncated : :not_found_uncached,
+                         nil, discovered: false)
         end
 
         @cache.write(cache_key, envelope_for(query_id), expires_in: 25 * 3600)
