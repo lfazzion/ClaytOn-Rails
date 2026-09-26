@@ -38,6 +38,11 @@ module Fetcher
     LOCK_KEY = "lock:test"
     TOKEN = "meu-token"
 
+    # Desfechos que `release_lock_atomically` tem de prometer na doc E emitir no
+    # código. Declarado aqui para que o teste de coerência tenha uma lista
+    # explícita: desfecho novo no código sem atualizar esta lista quebra a suíte.
+    DESFECHOS_CONTRATADOS = %i[released released_non_atomic not_owner].freeze
+
     # Store COMO QUALQUER ActiveSupport::Cache: `read` e `delete` são operações
     # separadas. Representa o FileStore do ambiente de teste e qualquer store
     # futuro que não implemente CAS.
@@ -116,6 +121,95 @@ module Fetcher
       assert_match(/janela/i, source, 'a dependencia tem de nomear a janela que o store atomico evita')
       assert_match(/release_lock_atomically/, source,
                    'a dependencia tem de apontar o ponto unico onde os quatro chamam')
+    end
+
+    # ── A DOC PROMETE O QUE O CÓDIGO NÃO FAZ? (ressalva Minor do #204) ──────
+    #
+    # A doc de `release_lock_atomically` listava `:no_store_support` como
+    # desfecho possível, e o método nunca o produzia. Doc que promete um desfecho
+    # inexistente é a MESMA classe de bug que este arquivo existe para fechar: uma
+    # limitação (ou capacidade) que ninguém vê.
+    #
+    # Este teste amarra a doc ao código: os desfechos que a DOCUMENTAÇÃO do
+    # método lista têm de ser exatamente os que o método EMITE. Sem ele, voltar
+    # a prometer um desfecho fantasma é uma linha de comentário e a suíte fica
+    # verde.
+    def test_a_doc_nao_promete_desfecho_que_o_codigo_nao_emite
+      documentados = desfechos_documentados
+      emitidos = desfechos_emitidos
+
+      # (1) A DOC do método tem de listar exatamente o que o código emite.
+      # Comparação por VALOR: a doc escreve `:released` e o código devolve
+      # `:released`; comparar symbol contra string acusaria um defeito que não
+      # existe.
+      assert_equal emitidos.map(&:to_s).sort, documentados.map(&:to_s).uniq.sort,
+                   "a doc do metodo lista #{documentados.inspect}, mas o codigo emite " \
+                   "#{emitidos.inspect}: a documentacao nao pode prometer desfecho que o metodo nao produz"
+
+      # (2) E a lista de contrato deste teste tem de acompanhar o código — se
+      # alguém ADICIONAR um desfecho novo, este arquivo é o lugar de saber.
+      assert_equal DESFECHOS_CONTRATADOS.sort, emitidos.map { |d| d.to_s.to_sym }.sort,
+                   'o contrato deste teste desatualizou em relacao aos desfechos emitidos'
+    end
+
+    private
+
+    # Desfechos nomeados no doc do método, lidos do arquivo.
+    def desfechos_documentados
+      doc_do_metodo
+        .scan(/:(released_non_atomic|no_store_support|store_unsupported|released|not_owner)\b/)
+        .flatten
+        .uniq
+    end
+
+    # Desfechos que a DOC do método `release_lock_atomically` promete: o bloco de
+    # comentário imediatamente acima do `def`, lido do ARQUIVO (não do que
+    # lembro). É o CONTRATO do método — o que o chamador é entitled a esperar.
+    #
+    # Só o doc do método, e não o cabeçalho do módulo: o cabeçalho é narrativa
+    # sobre a dependência e cita o `:no_store_support` fantasma justamente para
+    # registrar que ele NÃO existe. Varrer o arquivo inteiro acusaria a prova
+    # do conserto como se fosse a promessa.
+    def doc_do_metodo
+      arquivo = Fetcher.method(:release_lock_atomically).source_location&.first
+      return +"" if arquivo.nil?
+
+      linhas = File.readlines(arquivo)
+      indice_def = linhas.index { |l| l =~ /^\s*def self\.release_lock_atomically/ }
+      return +"" if indice_def.nil?
+
+      # Sobe do `def` enquanto forem linhas de comentário.
+      bloco = []
+      cursor = indice_def - 1
+      while cursor >= 0 && linhas[cursor].strip.start_with?('#')
+        bloco.unshift(linhas[cursor])
+        cursor -= 1
+      end
+      bloco.join
+    end
+
+    # Desfechos que o método REALMENTE pode devolver, medidos nos dois caminhos
+    # (store com CAS e store genérico) e com token vazio.
+    def desfechos_emitidos
+      emitidos = []
+
+      solido = SolidCache::Store.new(local_cache: false)
+      solido.clear
+      solido.write(LOCK_KEY, TOKEN, expires_in: 60)
+      emitidos << Fetcher.release_lock_atomically(LOCK_KEY, TOKEN, cache: solido)      # dono, com CAS
+      solido.write(LOCK_KEY, 'outro', expires_in: 60)
+      emitidos << Fetcher.release_lock_atomically(LOCK_KEY, TOKEN, cache: solido)      # nao dono, com CAS
+      solido.clear
+
+      emitido_gen = PlainReadDeleteStore.new
+      emitido_gen.write(LOCK_KEY, TOKEN, expires_in: 60)
+      emitidos << Fetcher.release_lock_atomically(LOCK_KEY, TOKEN, cache: emitido_gen) # dono, generico
+      emitido_gen.write(LOCK_KEY, 'outro', expires_in: 60)
+      emitidos << Fetcher.release_lock_atomically(LOCK_KEY, TOKEN, cache: emitido_gen) # nao dono, generico
+
+      emitidos << Fetcher.release_lock_atomically(LOCK_KEY, nil, cache: PlainReadDeleteStore.new) # token vazio
+
+      emitidos.uniq
     end
   end
 end

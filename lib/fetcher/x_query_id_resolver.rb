@@ -101,7 +101,7 @@ module Fetcher
     # (~1s) e da varredura de bundles (~dezenas de requisições), folgado o
     # bastante para o refresh normal terminar e curto o bastante para um
     # chamador não depender de rede lenta do X.
-    BACKGROUND_JOIN_TIMEOUT = 10.0
+    BACKGROUND_JOIN_TIMEOUT = 25.0
 
     # ── Timeout do cliente HTTP (ressalva R1 do PR #203, medido) ────────────
     # Antes este número não existia: `Faraday.new(url:).get` sem
