@@ -87,20 +87,36 @@ module Fetcher
     # REAL SolidCache, não dublê):
     #   - com TTL menor que o fetch, o lock EXPIRA NO MEIO e um segundo
     #     processo entra e busca — a exclusão se perde de verdade, sem erro.
-    #   - pior caso por descoberta = `bundles + 1` requisições. No fixture
-    #     real são 3; com `HTTP_OPEN_TIMEOUT` de 3s, 9s de pior caso.
-    #   - 9s cabe folgadamente nos 60s deste TTL (folga de 6,7x). Antes do
-    #     timeout explícito, cada requisição tinha os 60s do Net::HTTP e o
-    #     pior caso era de 180s — 3x o TTL, ou seja a garantia era FALSA.
+    #   - pior caso por descoberta = `bundles + 1` requisições, com `bundles`
+    #     no TETO DE `CORE_CHUNK_PATTERNS` (30 padrões, linhas 15-46). O pior
+    #     caso de UMA requisição é `HTTP_TOTAL_TIMEOUT` (8s), não
+    #     `open + read`: ver a nota do teto total abaixo.
+    #   - 31 x 8s = 248s de pior caso, que NÃO cabe nos 60s deste TTL. Por isso
+    #     a garantia NÃO é "a descoberta inteira cabe no TTL": é "a descoberta
+    #     normal cabe, e uma descoberta de bundles NUNCA cabe". A exclusão
+    #     existe para serializar quem descobre; o TTL é a janela de reabertura.
+    #     Um segundo processo entrando durante uma descoberta longa é o
+    #     comportamento ACEITO, e o que o código faz é devolver o valor em
+    #     cache (`:lock_busy`), não buscar em paralelo.
     #
-    # Mesmo valor (60s) que o lock usava antes do conserto de 26/09/2026; o que
-    # mudou foi ele deixar de ser uma afirmação sem lastro.
+    # Antes do timeout explícito, cada requisição tinha os 60s do Net::HTTP e o
+    # pior caso de 3 requisições era de 180s — 3x o TTL, ou seja a garantia era
+    # FALSA mesmo no caso curto.
     LOCK_TTL = 60
 
     # Teto do join em `wait_for_background_refresh`. Acima do fetch de home
     # (~1s) e da varredura de bundles (~dezenas de requisições), folgado o
     # bastante para o refresh normal terminar e curto o bastante para um
     # chamador não depender de rede lenta do X.
+    #
+    # MEDIDO (card t_cbfa9f27): este teto NÃO é a garantia da exclusão — quem
+    # garante exclusão é `LOCK_TTL`, e a aritmética do TTL acima é maior. Este
+    # número limita quanto o CHAMADOR espera pela thread de refresh; se ela
+    # passar dele, o chamador para de esperar e a thread segue sozinha (com o
+    # TTL do lock segurando a exclusão). Subir este número NÃO compra garantia
+    # nenhuma, e é por isso que ele não veio sozinho: subir o join sem subir o
+    # TTL só faz o chamador esperar mais por uma thread que vai ser abandonada
+    # pelo lock de qualquer jeito.
     BACKGROUND_JOIN_TIMEOUT = 25.0
 
     # ── Timeout do cliente HTTP (ressalva R1 do PR #203, medido) ────────────

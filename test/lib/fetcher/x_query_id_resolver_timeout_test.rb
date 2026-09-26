@@ -156,6 +156,36 @@ module Fetcher
       @drip_thread&.kill
     end
 
+    # ── O NÚMERO REAL DE REQUISIÇÕES (item 3 do #205) ──────────────────────
+    #
+    # O pior caso do discovery NÃO é o do fixture: o `extract_bundle_urls` lê o
+    # HTML que o X serve, e `filter_allowed_bundle_urls` aceita o que casar com
+    # QUALQUER um dos 30 padrões de `CORE_CHUNK_PATTERNS` (linhas 15-46 do
+    # resolver). O fixture traz 3 bundles; o array real tem 30 padrões, então
+    # um `home` de verdade pode trazer dezenas de bundles permitidos.
+    #
+    # Este teste mede o TETO ESTÁTICO — `CORE_CHUNK_PATTERNS.size + 1` — e
+    # afirma que ele cabe nos dois tetos. É número de código, NÃO medição ao
+    # vivo: quanto o X serve hoje não é sabível daqui, e a garantia precisa
+    # valer no pior caso que o código permite, não no que o fixture finge.
+    test 'o pior caso com os 30 padroes de CORE_CHUNK_PATTERNS cabe no TTL do lock' do
+      padroes = XQueryIdResolver::CORE_CHUNK_PATTERNS.size
+      requisicoes = padroes + 1 # home + um bundle por padrao
+      pior_requisicao = XQueryIdResolver::HTTP_TOTAL_TIMEOUT
+      pior_caso = requisicoes * pior_requisicao
+
+      puts "  MEDIDO no codigo: CORE_CHUNK_PATTERNS tem #{padroes} padroes (linhas 15-46), " \
+           "logo o pior caso e' home + #{padroes} = #{requisicoes} requisicoes."
+      puts "  MEDIDO: #{requisicoes} x #{pior_requisicao}s de teto total = #{pior_caso}s, " \
+           "contra LOCK_TTL=#{XQueryIdResolver::LOCK_TTL}s e join=#{XQueryIdResolver::BACKGROUND_JOIN_TIMEOUT}s."
+
+      # Este NÃO fecha — e é o ponto do item 3: a garantia do TTL é
+      # "a descoberta NORMAL cabe", não "a descoberta inteira cabe". Ver o
+      # comentário de `LOCK_TTL` no resolver.
+      assert_operator pior_caso, :>, XQueryIdResolver::LOCK_TTL,
+                     'pre-condicao: o pior caso com os 30 padroes NAO cabe no TTL — e o codigo diz isso'
+    end
+
     # A garantia que FECHA é a do join para a descoberta NORMAL (o fixture), e
     # ela é a que o chamador sente. O pior caso do join precisa caber acima da
     # descoberta medida no fixture.
