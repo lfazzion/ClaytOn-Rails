@@ -1,15 +1,20 @@
 require "test_helper"
 require "webmock"
+require_relative "../support/fake_chrome_dns"
 
 class ChromeWsConnectorLibTest < ActiveSupport::TestCase
+  CHROME_V4 = "172.26.0.9"
+
   setup do
     @chrome_host = "chrome"
     @chrome_port = 9222
     ENV["CHROME_HOST"] = @chrome_host
     ENV["CHROME_PORT"] = @chrome_port.to_s
+    FakeChromeDns.install(@chrome_host => ["fd00::c", CHROME_V4])
   end
 
   teardown do
+    FakeChromeDns.uninstall
     ENV.delete("CHROME_HOST")
     ENV.delete("CHROME_PORT")
   end
@@ -42,16 +47,16 @@ class ChromeWsConnectorLibTest < ActiveSupport::TestCase
     assert_includes ws_url, "/devtools/browser/"
   end
 
-  test "replace_host should substitute localhost with chrome host" do
+  test "replace_host should substitute localhost with the chrome IPv4" do
     url = "ws://localhost:9222/devtools/browser/abc"
     result = ChromeWsConnector.replace_host(url)
-    assert_equal "ws://chrome:9222/devtools/browser/abc", result
+    assert_equal "ws://#{CHROME_V4}:9222/devtools/browser/abc", result
   end
 
-  test "replace_host should substitute 127.0.0.1 with chrome host" do
+  test "replace_host should substitute 127.0.0.1 with the chrome IPv4" do
     url = "ws://127.0.0.1:9222/devtools/browser/abc"
     result = ChromeWsConnector.replace_host(url)
-    assert_equal "ws://chrome:9222/devtools/browser/abc", result
+    assert_equal "ws://#{CHROME_V4}:9222/devtools/browser/abc", result
   end
 
   test "fetch_ws_url should raise Error on non-200 response" do

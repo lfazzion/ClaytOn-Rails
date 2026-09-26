@@ -2,15 +2,20 @@
 
 # config/initializers/ferrum.rb
 #
-# Resolve o problema de Host-header rejection no Chrome 120+ quando acessado
-# via Docker network bridge. O Chrome expõe o debugger em 0.0.0.0:9222
-# mas valida o header `Host:` — se ele não for "localhost", rejeita o WS handshake.
+# Resolve o problema de Host-header rejection do DevTools quando acessado via
+# Docker network bridge. O Chrome só aceita `Host` = IP ou "localhost"
+# ("Host header is specified and is not an IP address or localhost"):
+#   - HTTP /json/version: rejeita nome de container no 147 E no 151 → injetamos
+#     `Host: localhost`;
+#   - handshake WebSocket: o 147 aceitava nome, o 151 rejeita → o ws_url sai
+#     com o IPv4 do serviço (medido em 25/09/2026, RELATORIO-CHROME-151.md).
 #
 # Este initializer expõe o helper `FerumConfig.browser_options` que todos os
 # scrapers devem usar ao instanciar `Ferrum::Browser`.
 
 require 'net/http'
 require 'json'
+require 'socket'
 require 'uri'
 
 module FerumConfig
@@ -39,14 +44,24 @@ module FerumConfig
 
     raise 'webSocketDebuggerUrl ausente na resposta do Chrome' if raw_ws_url.nil?
 
-    # Substitui o hostname retornado pelo Chrome (pode ser o nome interno do
-    # container ou 127.0.0.1) pelo CHROME_HOST configurado — necessário porque
-    # em rede Docker o Ruby não resolve "localhost" para o container correto.
+    # O Chrome devolve `ws://localhost/...` (ou 127.0.0.1). O handshake WebSocket
+    # tem de sair com o IPv4 do serviço, NUNCA com o nome do container: medido em
+    # 25/09/2026 (RELATORIO-CHROME-151.md) — o 151 recusa `Host` por nome no
+    # handshake (500 → Ferrum::DeadBrowserError); IP é aceito no 147 e no 151.
     ws_uri          = URI(raw_ws_url)
-    ws_uri.host     = CHROME_HOST
+    ws_uri.host     = chrome_ipv4
     ws_uri.port     = CHROME_PORT
 
     ws_uri.to_s
+  end
+
+  # IPv4 do CHROME_HOST, pedido explicitamente como AF_INET: `getaddrinfo` sem
+  # família pode devolver IPv6 primeiro, e esse não é o caminho medido.
+  # Sem IPv4 levanta (o chamador cai no fallback) em vez de voltar ao nome.
+  def self.chrome_ipv4
+    Addrinfo.getaddrinfo(CHROME_HOST, nil, Socket::AF_INET, :STREAM).first.ip_address
+  rescue SocketError => e
+    raise "Sem IPv4 para o Chrome (#{CHROME_HOST}): #{e.message}"
   end
 
   # Opções padrão para instanciar Ferrum::Browser.
