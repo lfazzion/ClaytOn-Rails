@@ -115,13 +115,14 @@ engines:
   # para reforco. `weight` só reordena relevancia entre engines que respondem
   # ambos — nao substitui nem desliga nenhum.
   - name: duckduckgo
-    disabled: true
+    disabled: false
+    language: en
     weight: 1.4
   - name: duckduckgo web
     disabled: false
     weight: 1.4
   - name: google cse
-    disabled: true
+    disabled: false
     weight: 1.0
   # SCRAPING desligado por decisao do dono (02/09/2026): so a API oficial
   # (braveapi, abaixo) fala com a Brave daqui em diante.
@@ -161,6 +162,8 @@ server:
   method: "GET"
 
 search:
+  suspended_times:
+    SearxEngineCaptcha: 300   # default 3600: engine volta em 5 min, nao em 1h
   formats:
     - html
     - json
