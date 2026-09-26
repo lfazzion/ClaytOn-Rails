@@ -115,11 +115,13 @@ engines:
   # para reforco. `weight` só reordena relevancia entre engines que respondem
   # ambos — nao substitui nem desliga nenhum.
   - name: duckduckgo
+    disabled: true
     weight: 1.4
   - name: duckduckgo web
     disabled: true
     weight: 1.4
   - name: google cse
+    disabled: true
     weight: 1.0
   # SCRAPING desligado por decisao do dono (02/09/2026): so a API oficial
   # (braveapi, abaixo) fala com a Brave daqui em diante.
