@@ -4,12 +4,49 @@ require 'test_helper'
 require 'fetcher/x_query_id_resolver'
 
 module Fetcher
+  # Cache remoto para o teste do lock: read e write custam IO. É o SolidCache
+  # (config/environments/production.rb:14) em produção, onde cada operação é
+  # uma transação separada — modelar esse custo é o que torna visível a janela
+  # entre o teste e a escrita do lock, sem dormir dentro do código de produção.
+  #
+  # Classe COM nome de propósito: o `LocalCache` que o MemoryStore faz prepend
+  # deriva a chave local de `self.class.name`, e uma classe anônima daria
+  # `nil.underscore` (erro medido ao montar o teste com Class.new).
+  class SlowRemoteCacheStore < ActiveSupport::Cache::MemoryStore
+    def read(key, options = nil)
+      sleep 0.05
+      super
+    end
+
+    def write(key, value, **options)
+      sleep 0.05
+      super
+    end
+  end
+
   class XQueryIdResolverTest < ActiveSupport::TestCase
     def setup
       @cache = ActiveSupport::Cache::MemoryStore.new
       @resolver = XQueryIdResolver.new(cache: @cache)
       @home_html = File.read(Rails.root.join('test/fixtures/x/home_with_manifest.html'))
       @bundle_js = File.read(Rails.root.join('test/fixtures/x/main_bundle_with_search_timeline.js'))
+    end
+
+    # O teste do lock (e o de refresh) contam fetches de descoberta num contador
+    # que pertence ao seu próprio stub. `resolve` com cache stale dispara um
+    # refresh em BACKGROUND (x_query_id_resolver.rb, `resolve`); essa thread não
+    # era joinada e sobrevivia ao teste que a criou, fazendo o GET de home
+    # dentro do teste SEGUINTE — cujo stub da mesma URL (o WebMock indexa por
+    # URL, não por teste) somava o fetch alheio no contador daqui. Era o
+    # "esperado 1, veio 2" do CI (run 36203673307), reproduzido em 1 de 20
+    # rodadas sob carga.
+    #
+    # Esvaziar o que sobrou da thread de fundo no fim de CADA teste fecha a
+    # janela sem afrouxar a asserção: o teste do lock continua exigindo
+    # exatamente 1 fetch, agora medindo só o seu.
+    def teardown
+      @resolver&.wait_for_background_refresh
+      super
     end
 
     test 'PIN inicial padrao e flaR-PUMshxFWZWPNpq4zA' do
@@ -110,6 +147,68 @@ module Fetcher
       threads.each(&:join)
 
       assert_equal 1, called_count, 'Apenas 1 processo/thread deve executar o fetch de descoberta sob lock'
+    end
+
+    # Regressão do flake do CI (26/09/2026, run 36203673307). O lock acima
+    # protege a INSTÂNCIA (um só `Thread.new` por `fetch_fresh`), mas ele não
+    # prova a garantia que a produção precisa: o job roda no processo `jobs` e o
+    # scraper no `app`, cada um com sua própria instância e seu próprio
+    # `@mutex`. O lock antigo era read (:143) seguido de write (:147) — duas
+    # operações separadas sobre o cache compartilhado, com uma janela real
+    # entre elas em que o lock ainda não existia.
+    test 'lock de descoberta exclui entre instancias diferentes (cenario de producao: jobs e app)' do
+      slow_cache = SlowRemoteCacheStore.new
+
+      calls = 0
+      calls_lock = Mutex.new
+      dentro = Queue.new
+      liberar = Queue.new
+
+      # Duas instâncias = dois processos, cada uma com seu mutex.
+      resolvers = Array.new(2) do
+        r = XQueryIdResolver.new(cache: slow_cache)
+        r.define_singleton_method(:fetch_home_html) do
+          calls_lock.synchronize { calls += 1 }
+          dentro << :in
+          liberar.pop # segura o fetch dentro da janela do lock
+          ''
+        end
+        r.define_singleton_method(:fetch_bundle) { |_url| '' }
+        r
+      end
+
+      threads = resolvers.map { |r| Thread.new { r.fetch_fresh('SearchTimeline') } }
+      dentro.pop # o primeiro comprou o lock e entrou no fetch
+      sleep 0.2  # tempo do segundo percorrer read+write sem bloqueio
+      3.times { liberar << :liberar }
+      threads.each(&:join)
+
+      assert_equal 1, calls,
+                   'Duas instancias executaram o fetch de descoberta ao mesmo tempo — ' \
+                   'read e write do lock sao operacoes separadas sobre o cache compartilhado. ' \
+                   'Em producao isso sao dois fetches contra o X.'
+    end
+
+    test 'refresh em background nao atravessa a fronteira do teste seguinte' do
+      # O `teardown` desta classe espera a thread de refresh. Sem ele, o
+      # "soft-stale" acima dispara uma thread solta que faz o GET /home dentro
+      # do TESTE SEGUINTE, cujo stub da mesma URL (WebMock indexa por URL)
+      # contaria o fetch alheio. Este teste trava esse comportamento.
+      stub_request(:get, 'https://x.com/home')
+        .to_return(status: 200, body: @home_html, headers: { 'Content-Type' => 'text/html' })
+      stub_request(:get, 'https://abs.twimg.com/responsive-web/client-web/main.132b4bba.js')
+        .to_return(status: 200, body: @bundle_js, headers: { 'Content-Type' => 'application/javascript' })
+
+      @cache.write(
+        'fetcher:x_query_id:SearchTimeline',
+        { query_id: 'stale-id-456', fetched_at: Time.now.to_i - 90_000, stale_at: Time.now.to_i - 3_600 }
+      )
+
+      assert_equal 'stale-id-456', @resolver.resolve('SearchTimeline')
+
+      # Drenar deve incorporar a thread: o que o teardown vai esperar.
+      assert_equal 0, @resolver.wait_for_background_refresh,
+                   'O refresh em background deveria estar concluido ao fim do teste'
     end
 
     test 'refresh unico em 404 (force: true) atualiza cache com novo ID descoberto' do
