@@ -373,7 +373,6 @@ module Fetcher
         end
 
         query_id = query_ids[operation_name]
-<<<<<<< HEAD
         # PIN de última instância, ESCOPADO por operação (frente X): o PIN só
         # vale para a SearchTimeline (medido no TweetDetail em 24/09/2026: outra
         # operação com este id leva HTTP 422). Para as demais, `fallback` é nil
