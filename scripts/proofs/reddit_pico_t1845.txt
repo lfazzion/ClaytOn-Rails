@@ -1,0 +1,13 @@
+     44 "https://ast
+     16 "https://github.com
+     10 "https://www.reddit.com
+     10 "https://arxiv.org
+      8 "https://x.com
+      8 "https://docs.graphify.com
+      4 "https://www.microsoft.com
+      2 "https://ripgrep.dev
+      2 "https://raw.githubusercontent.com
+      2 "https://graphify.net
+      2 "https://comby.dev
+      2 "https://aider.chat
+      2 "http://export.arxiv.org

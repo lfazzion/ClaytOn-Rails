@@ -115,11 +115,14 @@ engines:
   # para reforco. `weight` só reordena relevancia entre engines que respondem
   # ambos — nao substitui nem desliga nenhum.
   - name: duckduckgo
+    disabled: false
+    language: en
     weight: 1.4
   - name: duckduckgo web
     disabled: false
     weight: 1.4
   - name: google cse
+    disabled: false
     weight: 1.0
   # SCRAPING desligado por decisao do dono (02/09/2026): so a API oficial
   # (braveapi, abaixo) fala com a Brave daqui em diante.
@@ -142,7 +145,7 @@ engines:
   - name: seznam
     disabled: false
     weight: 0.5
-    timeout: 10.0
+    timeout: 3.0
   # weight: 0.4 — reforco (decisao do dono, 02/09/2026). `display_type` lista
   # resultados normais alem do infobox: sem isto a factory so mostra infobox
   # e a busca "vira" zero resultados de lista para a maioria das queries.
@@ -159,6 +162,8 @@ server:
   method: "GET"
 
 search:
+  suspended_times:
+    SearxEngineCaptcha: 300   # default 3600: engine volta em 5 min, nao em 1h
   formats:
     - html
     - json
