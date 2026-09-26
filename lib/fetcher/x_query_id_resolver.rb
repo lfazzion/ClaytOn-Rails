@@ -73,11 +73,24 @@ module Fetcher
       end
     end
 
-    # TTL do lock de descoberta. Cobre a descoberta com folga (o fetch de
-    # home + a varredura dos bundles) para o lock não expirar no meio do
-    # trabalho; passados 60s, o lock é considerado órfão e outra instância
-    # pode tentar de novo. Mesmo valor (60s) que o lock usava antes do
-    # conserto de 26/09/2026.
+    # TTL do lock de descoberta. ESTE É A GARANTIA de exclusividade, e ela
+    # funciona por aritmética, não por primitiva: `discover!` grava o lock com
+    # este TTL e não o renova nem o apaga ao terminar (decisão deliberada, ver o
+    # `ensure` de `discover_with_outcome!`). A exclusão vale enquanto o TTL não
+    # expira, logo a garantia é "a descoberta inteira cabe em LOCK_TTL".
+    #
+    # MEDIDO em 26/09/2026 (test/lib/fetcher/x_query_id_lock_ttl_test.rb, store
+    # REAL SolidCache, não dublê):
+    #   - com TTL menor que o fetch, o lock EXPIRA NO MEIO e um segundo
+    #     processo entra e busca — a exclusão se perde de verdade, sem erro.
+    #   - pior caso por descoberta = `bundles + 1` requisições. No fixture
+    #     real são 3; com `HTTP_OPEN_TIMEOUT` de 3s, 9s de pior caso.
+    #   - 9s cabe folgadamente nos 60s deste TTL (folga de 6,7x). Antes do
+    #     timeout explícito, cada requisição tinha os 60s do Net::HTTP e o
+    #     pior caso era de 180s — 3x o TTL, ou seja a garantia era FALSA.
+    #
+    # Mesmo valor (60s) que o lock usava antes do conserto de 26/09/2026; o que
+    # mudou foi ele deixar de ser uma afirmação sem lastro.
     LOCK_TTL = 60
 
     # Teto do join em `wait_for_background_refresh`. Acima do fetch de home
@@ -85,6 +98,31 @@ module Fetcher
     # bastante para o refresh normal terminar e curto o bastante para um
     # chamador não depender de rede lenta do X.
     BACKGROUND_JOIN_TIMEOUT = 10.0
+
+    # ── Timeout do cliente HTTP (ressalva R1 do PR #203, medido) ────────────
+    # Antes este número não existia: `Faraday.new(url:).get` sem
+    # `request.options.timeout` deixa o Net::HTTP no padrão — 60s de open e 60s
+    # de read POR requisição (medido neste repo em 26/09/2026). A descoberta faz
+    # `bundles + 1` requisições, logo o pior caso era de MINUTOS: o lock de 60s
+    # expirava com o dono ainda trabalhando (medido em
+    # test/lib/fetcher/x_query_id_lock_ttl_test.rb) e o join de 10s expirava
+    # com a thread viva.
+    #
+    # 3s por requisição: folgado para a latência normal do X, apertado o
+    # bastante para que o pior caso da descoberta (3 requisições no fixture
+    # medido = 9s) caiba dentro dos dois tetos. A aritmética é travada por
+    # teste em test/lib/fetcher/x_query_id_resolver_timeout_test.rb — mudar
+    # este número sem mudar a descoberta quebra o teste, que é o ponto.
+    HTTP_OPEN_TIMEOUT = 3
+    HTTP_READ_TIMEOUT = 3
+
+    # TTL do lock que ESTA execução usa. Existe como método (e não só a
+    # constante) para que a MEDIÇÃO da garantia possa usar um TTL curto e
+    # terminar em segundos — ver test/lib/fetcher/x_query_id_lock_ttl_test.rb.
+    # O valor padrão é o de produção; sobrescrever é para teste.
+    def lock_ttl
+      LOCK_TTL
+    end
 
     attr_reader :cache
 
@@ -295,7 +333,7 @@ module Fetcher
         # existia e outro processo o adquiria — dois fetches contra o X.
         # Padrão já usado na casa em lib/scraping/fetch_pacer.rb:23 e
         # app/jobs/sentiment_analysis_job.rb:144.
-        unless @cache.write(lock_key, token, unless_exist: true, expires_in: LOCK_TTL)
+        unless @cache.write(lock_key, token, unless_exist: true, expires_in: lock_ttl)
           # Lock ocupado: NÃO busca. Este desfecho é o que o conserto do
           # lock tornou possível nomear — `discovered: false` diz ao chamador
           # que o valor abaixo é o que JÁ estava em cache, não uma descoberta.
@@ -360,7 +398,7 @@ module Fetcher
     end
 
     def fetch_home_html
-      req = Faraday.new(url: HOME_URL).get
+      req = http_client(HOME_URL).get
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
@@ -378,10 +416,26 @@ module Fetcher
     end
 
     def fetch_bundle(url)
-      req = Faraday.new(url: url).get
+      req = http_client(url).get
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
+    end
+
+    # Cliente HTTP do resolver, com timeout EXPLICITO.
+    #
+    # O detalhe que faz este método existir: em Faraday, `connection.options`
+    # e `request.options` não são o mesmo objeto. É `request.options.timeout` que
+    # o faraday-net_http lê para aplicar `read_timeout` no Net::HTTP, e é
+    # `request.options.open_timeout` que vira `open_timeout`
+    # (faraday-net_http-3.4.4/lib/faraday/adapter/net_http.rb:153-163). Setar
+    # só `connection.options` produz um cliente que PARECE ter timeout e
+    # continua com os 60s do Net::HTTP — por isso os dois lados são explícitos.
+    def http_client(url)
+      Faraday.new(url: url) do |conn|
+        conn.options.timeout = HTTP_READ_TIMEOUT
+        conn.options.open_timeout = HTTP_OPEN_TIMEOUT
+      end
     end
   end
 end
