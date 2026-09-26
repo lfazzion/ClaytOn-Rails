@@ -8,6 +8,8 @@ module Fetcher
   # Uso:
   #   query_id = Fetcher::XQueryIdResolver.new.resolve('SearchTimeline')
   class XQueryIdResolver
+    # queryId conhecido da SearchTimeline. So vale para ela: outra operacao com este id
+    # recebe HTTP 422 do X (medido no TweetDetail em 24/09/2026).
     PIN = 'flaR-PUMshxFWZWPNpq4zA'.freeze
 
     CORE_CHUNK_PATTERNS = %w[
@@ -60,6 +62,8 @@ module Fetcher
     # Motivos possíveis:
     #   :discovered         — buscou agora e achou o query id nos bundles
     #   :not_found          — buscou agora, NÃO achou; gravou o PIN de última instância
+    #   :not_found_uncached — buscou agora, NÃO achou, e a operação não tem PIN
+    #                         (o PIN é do SearchTimeline): NÃO grava nada
     #   :lock_busy          — outro PROCESSO está descobrindo (perdeu a corrida do lock)
     #   :fetching_in_progress— outra THREAD desta instância está buscando
     #   :fresh_cache        — cache fresco, nem saiu para a rede (force: false)
@@ -128,6 +132,10 @@ module Fetcher
 
     def current_pin
       PIN
+    end
+
+    def pin_for(operation_name)
+      PIN if operation_name == 'SearchTimeline'
     end
 
     def initialize(cache: nil)
@@ -202,6 +210,7 @@ module Fetcher
 
       # Se não tem cache, descobre e retorna PIN se falhar
       if envelope.nil?
+        # `pin_for` (frente X) em vez do `PIN` cru.
         return discover_with_outcome!(operation_name)
       end
 
@@ -224,8 +233,11 @@ module Fetcher
       # Falha inesperada: retorna último valor
       outcome(:failed, envelope[:query_id])
     rescue StandardError => e
-      # Em qualquer falha, preserva último valor conhecido
-      outcome(:failed, envelope&.dig(:query_id) || PIN, error: e)
+      # Em qualquer falha, preserva último valor conhecido.
+      # Desfecho nomeado (main) + PIN escopado por operação (frente X): o PIN
+      # só vale para a SearchTimeline, então uma operação que ele não cobre
+      # recebe nil em vez do id que o X rejeita com 422.
+      outcome(:failed, envelope&.dig(:query_id) || pin_for(operation_name), error: e)
     end
 
     def extract_query_ids(bundle_content)
@@ -314,7 +326,7 @@ module Fetcher
         # vencedor terminar.
         if @fetching
           cached = @cache.read(cache_key)&.dig(:query_id)
-          return outcome(:fetching_in_progress, cached || PIN, discovered: false)
+          return outcome(:fetching_in_progress, cached || pin_for(operation_name), discovered: false)
         end
 
         # ADQUIRIÇÃO ATÔMICA do lock (bug do CI, 26/09/2026): o par
@@ -338,7 +350,7 @@ module Fetcher
           # lock tornou possível nomear — `discovered: false` diz ao chamador
           # que o valor abaixo é o que JÁ estava em cache, não uma descoberta.
           cached = @cache.read(cache_key)&.dig(:query_id)
-          return outcome(:lock_busy, cached || PIN, discovered: false)
+          return outcome(:lock_busy, cached || pin_for(operation_name), discovered: false)
         end
 
         @fetching = true
@@ -361,22 +373,35 @@ module Fetcher
         end
 
         query_id = query_ids[operation_name]
+        # PIN de última instância, ESCOPADO por operação (frente X): o PIN só
+        # vale para a SearchTimeline (medido no TweetDetail em 24/09/2026: outra
+        # operação com este id leva HTTP 422). Para as demais, `fallback` é nil
+        # e nada inventado pode entrar no cache.
+        fallback = pin_for(operation_name)
 
-        envelope = {
-          query_id: query_id || PIN,
-          fetched_at: Time.now.to_i,
-          stale_at: Time.now.to_i + 24 * 3600
-        }
-        @cache.write(cache_key, envelope, expires_in: 25 * 3600)
-
-        # Buscou agora e achou (`discovered: true`) vs buscou agora e NÃO achou,
-        # caindo no PIN de última instância (`discovered: false`). Os dois
-        # gravam no cache — só um é uma descoberta.
-        if query_id
-          outcome(:discovered, query_id, discovered: true)
-        else
-          outcome(:not_found, PIN, discovered: false)
+        if query_id.nil? && fallback
+          # Desfecho nomeado (main, PR #203) preservado: o PIN é um id REAL e
+          # testado desta operação, então cachear é honesto — o `reason` diz
+          # que foi PIN e o job anuncia isso no log em vez de chamar de
+          # sucesso. 25h de valor conhecido > redescoberta a cada chamada.
+          @cache.write(cache_key, envelope_for(fallback), expires_in: 25 * 3600)
+          return outcome(:not_found, fallback, discovered: false)
         end
+
+        # Não achou nos bundles e o PIN não cobre esta operação: NADA vai para o
+        # cache, para não servir 25h de valor inventado (frente X). O desfecho
+        # continua NOMEADO (main) — a diferença para o `:not_found` acima é o
+        # que ficou gravado, e `discovered?` é false nos dois.
+        if query_id.nil?
+          return outcome(:not_found_uncached, nil, discovered: false)
+        end
+
+        @cache.write(cache_key, envelope_for(query_id), expires_in: 25 * 3600)
+
+        # Buscou agora e achou: `discovered: true`. O ramo `:not_found` que citava
+        # PIN saiu daqui para os dois `if` acima — o PIN escopado por operação
+        # (frente X) tem de ser decidido ANTES de gravar.
+        outcome(:discovered, query_id, discovered: true)
       ensure
         @mutex.synchronize { @fetching = false }
         # O lock NÃO é apagado aqui, e essa é a diferença deliberada em
@@ -397,8 +422,26 @@ module Fetcher
       Discovery.new(reason: reason, value: value, discovered: discovered, error: error)
     end
 
+    # Envelope de cache do query id, com a janela de validade de 24h e o TTL
+    # de 25h. Extraído porque o caminho agora grava em DOIS pontos
+    # (`:not_found` com o PIN e `:discovered` com o id real) e os dois têm de
+    # usar a MESMA aritmética — divergir aí seria a janela de TTL fingindo
+    # ser uma.
+    def envelope_for(query_id)
+      {
+        query_id: query_id,
+        fetched_at: Time.now.to_i,
+        stale_at: Time.now.to_i + 24 * 3600
+      }
+    end
+
+    # Sem sessao, x.com/home alterna 200 e 307 para a tela de login; com a sessao do jar, 200.
+    # E o cliente é o de timeout EXPLICITO (main, PR #203): os dois lados
+    # vivem juntos — a sessão é o HEADER e o teto é o do `http_client`.
     def fetch_home_html
-      req = http_client(HOME_URL).get
+      cookies = Fetcher::CookieJar.for('x.com').map { |c| "#{c['name']}=#{c['value']}" }
+      headers = cookies.empty? ? {} : { 'Cookie' => cookies.join('; ') }
+      req = http_client(HOME_URL, headers: headers).get
       raise "HTTP #{req.status}" unless req.success?
 
       req.body
@@ -431,8 +474,13 @@ module Fetcher
     # (faraday-net_http-3.4.4/lib/faraday/adapter/net_http.rb:153-163). Setar
     # só `connection.options` produz um cliente que PARECE ter timeout e
     # continua com os 60s do Net::HTTP — por isso os dois lados são explícitos.
-    def http_client(url)
-      Faraday.new(url: url) do |conn|
+    #
+    # O `headers:` é opcional e existe para a frente X: a descoberta de
+    # `x.com/home` precisa da sessão do jar no cabeçalho, e passar header pelo
+    # construtor do Faraday (e não pelo `.get`) é o que garante que ele não
+    # substitui nem as opções de timeout.
+    def http_client(url, headers: {})
+      Faraday.new(url: url, headers: headers) do |conn|
         conn.options.timeout = HTTP_READ_TIMEOUT
         conn.options.open_timeout = HTTP_OPEN_TIMEOUT
       end

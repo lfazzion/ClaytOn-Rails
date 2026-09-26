@@ -77,7 +77,7 @@ module Fetcher
 
       # Envia requisicao GET para o endpoint GraphQL e parseia a resposta.
       # Suporta paginacao via cursor (maximo 3 paginas) e rate limit remoto.
-      def self.fetch_search(query:, limit: 10)
+      def self.fetch_search(query:, operation: "SearchTimeline", limit: 10)
         all_items = []
         seen_urls = Set.new
         cursor = nil
@@ -87,48 +87,28 @@ module Fetcher
 
         features = build_features
         query_id_resolver = XQueryIdResolver.new
-        last_query_id = query_id_resolver.resolve("SearchTimeline")
+        last_query_id = query_id_resolver.resolve(operation)
         @refreshed_404 = false
 
         while page_count < max_pages
           page_count += 1
           variables = build_variables(query, limit, cursor)
-          url = build_url(query, variables, features, last_query_id)
-          headers = build_headers(variables, features, query_id: last_query_id)
+          url = build_url(query, variables, features, last_query_id, operation: operation)
+          headers = build_headers(variables, features, query_id: last_query_id, operation: operation)
 
-          response = SafeHttpClient.get(url, headers: headers)
-
-          # Tratamento de status especiais ANTES do raise generico
-          case response.status
-          when 429
-            # Rate limit remoto: marca bloqueio e retorna erro imediato
-            @remote_blocked = true
-            @remote_block_until = Time.now + 60
-            reset_at = parse_rate_limit_reset(response.headers)
-            reset_info = reset_at ? " reset em #{reset_at.strftime('%H:%M:%S')}" : ""
-            raise RateLimitedRemote.new("429 Too Many Requests#{reset_info}")
-          when 401
-            # Erro de autenticacao: unica chance de reativacao
-            raise GraphQLError, "HTTP #{response.status} (nao autorizado)"
-          when 403
-            # Proibido sem retry
-            raise GraphQLError, "HTTP #{response.status} (proibido)"
-          when 404
-            # Query-ID possivelmente invalido: tenta refresh unico
-            unless @refreshed_404
+          begin
+            response = perform_get(url: url, headers: headers)
+          rescue GraphQLError => e
+            if e.message.include?("404") && !@refreshed_404
               @refreshed_404 = true
-              new_id = query_id_resolver.resolve("SearchTimeline", force: true)
+              new_id = query_id_resolver.resolve(operation, force: true)
               if new_id && new_id != last_query_id
                 last_query_id = new_id
-                # Desconta a pagina atual pois vamos refazer com o mesmo cursor
                 page_count -= 1
                 next
               end
             end
-            raise GraphQLError, "HTTP #{response.status} (query nao encontrada)"
-          else
-            # Demais erros de HTTP
-            raise GraphQLError, "HTTP #{response.status}" unless response.success?
+            raise
           end
 
           # Atualiza budget local com base nos headers da resposta
@@ -150,6 +130,11 @@ module Fetcher
           break if cursor.nil? || cursor.empty?
           break if cursor == prev_cursor  # Evita loop infinito se cursor se repetir
           prev_cursor = cursor
+
+          # Jitter entre paginas para nao sobrecarregar o servidor.
+          # So dorme se ainda existe pagina a buscar — na ultima iteracao
+          # (page_count == max_pages) o loop termina, entao nao ha o que esperar.
+          Kernel.sleep(rand(0.8..2.0)) if page_count < max_pages
         end
 
         all_items
@@ -299,6 +284,12 @@ module Fetcher
             # Descarta Tweets indisponiveis (protegidos, removidos, etc.)
             next nil if tweet_result["__typename"] == "TweetUnavailable"
 
+            # Desembrula TweetWithVisibilityResults -> tweet
+            if tweet_result["__typename"] == "TweetWithVisibilityResults"
+              tweet_result = tweet_result["tweet"]
+              next nil unless tweet_result.is_a?(Hash)
+            end
+
             legacy = tweet_result["legacy"]
             core = tweet_result["core"]
             next nil unless legacy.is_a?(Hash) && core.is_a?(Hash)
@@ -306,10 +297,20 @@ module Fetcher
             user_result = core.dig("user_results", "result")
             next nil unless user_result.is_a?(Hash)
 
+            # Tenta screen_name em legacy primeiro, depois em core (tolerante).
+            # O X passou a mandar o autor em core.screen_name (legacy sem
+            # screen_name): mesma regra do XConversation, legacy primeiro e core
+            # como fallback. As guardas de tipo valem para OS DOIS caminhos —
+            # sem elas, `legacy` String vira NoMethodError e Array vira
+            # TypeError numa resposta malformada. A guarda da main (legacy
+            # precisa ser Hash) fica COBERTA aqui: um legacy que não é Hash
+            # simplesmente não produz screen_name e o fallback entra.
             user_legacy = user_result.dig("legacy")
-            next nil unless user_legacy.is_a?(Hash)
-
-            screen_name = user_legacy["screen_name"]
+            screen_name = user_legacy.is_a?(Hash) ? user_legacy["screen_name"] : nil
+            if screen_name.nil? || screen_name.empty?
+              user_core = user_result.dig("core")
+              screen_name = user_core["screen_name"] if user_core.is_a?(Hash)
+            end
             next nil if screen_name.nil? || screen_name.empty?
 
             full_text = legacy["full_text"] || ""
@@ -343,10 +344,10 @@ module Fetcher
           @verification_bytes = @pair[:verification]
         end
 
-        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline")
+        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline", method: "GET")
           seconds = (now_ms - 1_682_924_400_000) / 1000
           path = "/i/api/graphql/#{query_id}/#{path_suffix}"
-          @payload = "GET!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
+          @payload = "#{method}!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
 
           digest = Digest::SHA256.digest(@payload)
           current_mask = mask || rand(256)
@@ -369,17 +370,28 @@ module Fetcher
       # Internals
       # ---------------------------------------------------------------------------
 
-      def self.build_url(query, variables, features, query_id = nil)
+      # No POST o corpo (variables + features) vai no JSON; pôr os dois como
+      # query string estouraria `SSRF_GUARD::MAX_URL_LENGTH` (contexto TweetDetail:
+      # as 38/39 flags de features sozinhas passam de 2048 chars). Por isso o
+      # GET mantém a query string (retrocompatível) e o POST devolve a URL nua
+      # (só scheme + host + path), mantendo a URL abaixo do teto do SsrfGuard.
+      def self.build_url(query, variables, features, query_id = nil, operation: "SearchTimeline", method: "GET")
+        resolved_id = query_id || XQueryIdResolver.new.resolve(operation)
+
+        base = "https://#{COOKIE_DOMAIN}/i/api/graphql/#{resolved_id}/#{operation}"
+        return base if method.to_s.upcase == "POST"
+
         encoded_vars = URI.encode_www_form_component(variables.to_json)
         encoded_feats = URI.encode_www_form_component(features.to_json)
-
-        resolved_id = query_id || XQueryIdResolver.new.resolve("SearchTimeline")
-
-        "https://#{COOKIE_DOMAIN}/i/api/graphql/#{resolved_id}/SearchTimeline?" \
-          "variables=#{encoded_vars}&features=#{encoded_feats}"
+        "#{base}?variables=#{encoded_vars}&features=#{encoded_feats}"
       end
 
-      def self.build_headers(variables, features, query_id: QUERY_ID)
+      def self.build_headers(variables, features, query_id: nil, operation: "SearchTimeline", method: "GET")
+        # query_id é obrigatório para operações que não SearchTimeline:
+        # o default QUERY_ID (id do SearchTimeline) é a mesma classe do bug A0.3.
+        unless query_id || operation == "SearchTimeline"
+          raise ArgumentError, "query_id é obrigatório para operation=#{operation}"
+        end
         txid = BuildTxid.new
         now_ms = Time.now.to_f.to_i * 1000
 
@@ -390,7 +402,7 @@ module Fetcher
         cookie_header = cookies.map { |c| "#{c['name']}=#{c['value']}" }.join("; ")
 
         {
-          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id),
+          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id, path_suffix: operation, method: method),
           "x-twitter-auth-type" => "OAuth2Session",
           "x-twitter-active-user" => "yes",
           "x-twitter-client-language" => "en",
@@ -403,6 +415,35 @@ module Fetcher
           "Origin" => "https://x.com",
           "Referer" => "https://x.com/"
         }
+      end
+
+      def self.perform_get(url:, headers:)
+        response = SafeHttpClient.get(url, headers: headers)
+
+        # Tratamento de status especiais ANTES do raise generico
+        case response.status
+        when 429
+          # Rate limit remoto: marca bloqueio e retorna erro imediato
+          @remote_blocked = true
+          @remote_block_until = Time.now + 60
+          reset_at = parse_rate_limit_reset(response.headers)
+          reset_info = reset_at ? " reset em #{reset_at.strftime('%H:%M:%S')}" : ""
+          raise RateLimitedRemote.new("429 Too Many Requests#{reset_info}")
+        when 401
+          # Erro de autenticacao: unica chance de reativacao
+          raise GraphQLError, "HTTP #{response.status} (nao autorizado)"
+        when 403
+          # Proibido sem retry
+          raise GraphQLError, "HTTP #{response.status} (proibido)"
+        when 404
+          # Query-ID possivelmente invalido: tenta refresh unico (so em fetch_search)
+          raise GraphQLError, "HTTP #{response.status} (query nao encontrada)"
+        else
+          # Demais erros de HTTP
+          raise GraphQLError, "HTTP #{response.status}" unless response.success?
+        end
+
+        response
       end
 
       def self.parse_created_at(created_at_str)

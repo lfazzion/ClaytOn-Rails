@@ -263,5 +263,38 @@ module Fetcher
       result = @resolver.resolve('SearchTimeline', force: true)
       assert_equal 'fallback-id-789', result
     end
+
+    # Sem sessao, x.com/home alterna 200 e 307 (tela de login); com a sessao do jar responde 200.
+    test 'descoberta pede x.com/home com os cookies da sessao do x.com' do
+      Fetcher::CookieJar.stubs(:for).with('x.com').returns(
+        [{ 'name' => 'auth_token', 'value' => 'a1' }, { 'name' => 'ct0', 'value' => 'c2' }]
+      )
+      stub_request(:get, 'https://x.com/home')
+        .with(headers: { 'Cookie' => 'auth_token=a1; ct0=c2' })
+        .to_return(status: 200, body: @home_html, headers: { 'Content-Type' => 'text/html' })
+      stub_request(:get, 'https://abs.twimg.com/responsive-web/client-web/main.132b4bba.js')
+        .to_return(status: 200, body: @bundle_js, headers: { 'Content-Type' => 'application/javascript' })
+
+      assert_equal 'flaR-PUMshxFWZWPNpq4zA', @resolver.resolve('SearchTimeline', force: true)
+    end
+
+    # O PIN e o queryId da SearchTimeline: em outra operacao vira pedido invalido (HTTP 422 no TweetDetail).
+    test 'falha de descoberta nao entrega o PIN da busca para outra operacao' do
+      stub_request(:get, 'https://x.com/home').to_return(status: 307, headers: { 'Location' => 'https://x.com/i/jf/onboarding/web' })
+
+      assert_nil @resolver.resolve('TweetDetail')
+    end
+
+    test 'operacao ausente nos bundles nao grava valor inventado no cache' do
+      stub_request(:get, 'https://x.com/home')
+        .to_return(status: 200, body: @home_html, headers: { 'Content-Type' => 'text/html' })
+      stub_request(:get, 'https://abs.twimg.com/responsive-web/client-web/main.132b4bba.js')
+        .to_return(status: 200, body: @bundle_js, headers: { 'Content-Type' => 'application/javascript' })
+      stub_request(:get, 'https://abs.twimg.com/responsive-web/client-web/bundle.LoggedInMain.b0c4488a.js')
+        .to_return(status: 404)
+
+      assert_nil @resolver.resolve('TweetDetail', force: true)
+      assert_nil @cache.read('fetcher:x_query_id:TweetDetail')
+    end
   end
 end

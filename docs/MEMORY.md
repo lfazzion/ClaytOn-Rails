@@ -17,6 +17,15 @@
   - Estado persistido em Solid Cache (`scraping_incident:#{scraper_name}:#{profile_id}`, TTL 30d) sem migrations no banco. Lock atômico com TTL 5min e double-checked locking para concorrência.
   - Rollback honesto de cota horária e liberação de lock em falha de envio ao Discord, canal admin não configurado ou quota horária esgotada.
   - Resolução de incidente (`AlertThrottler.resolve_incident`) no `ScrapeYoutubeJob` ao obter `collection_status: "success"`.
+- **[2026-09-25]** Leitura do X unificada — bot e agente Hermes usam o MESMO código.
+  - `Fetcher::XLeitura` + `bin/rails x:buscar CONSULTAS=arquivo|-` (uma linha JSON por consulta) e
+    `bin/rails x:conversa ID=<id|link>` (post raiz + comentários em texto, via `XConversation`).
+    O Hermes chama esses comandos; os scripts paralelos dele (busca/captura) deixam de existir.
+  - Parser da busca: o X passou a mandar o autor em `user_results.result.core.screen_name`; exigir o
+    `legacy.screen_name` descartava todos os posts e a busca de produção devolvia `[]` sem erro (medido 24/09).
+  - `XQueryIdResolver`: descoberta pede `x.com/home` com a sessão do jar (sem sessão, ~1 em 2 respostas é
+    307 para o login); o PIN (id da SearchTimeline) nunca é entregue a outra operação — TweetDetail com ele
+    dava HTTP 422; operação ausente nos bundles não grava valor inventado no cache.
 - **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
   - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
   - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
@@ -276,6 +285,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 | 2026-08-10 | Fase 3 implementada e revisada: fusão RRF + clustering (`lib/research/fusion.rb`, `lib/research/cluster.rb`). Decisão de escala registrada (local_relevance como score de trabalho, rrf para ordenação). Entity-cluster da Fase 4 adiado (depende de entity_extract). | Contexto Ativo, Padrões Ratificados, Lições Aprendidas |
 | 2026-08-10 | Atualização da busca por assunto no X: X.search com marcador de estado vazio `empty_state_header_text`, SEARCH_BUDGET/TIMELINE_BUDGET (30/h), scope em RateLimited e fronteira @perfil/assunto em PlatformSearchTool. | Contexto Ativo, Padrões Ratificados |
 | 2026-08-31 | Implementação da busca X via GraphQL (`XGraphql`, `RefreshXQueryIdsJob`, HostRateLimiter scope graphql_search). | Contexto Ativo, Padrões Ratificados |
+| 2026-09-25 | Leitura do X unificada (`Fetcher::XLeitura`, `x:buscar`, `x:conversa`), autor da busca em `core`, resolver com sessão e sem PIN cruzado. | Contexto Ativo |
 | 2026-08-10 | 2ª rodada de correções na Fase 1 do pipeline de sentimento: montagem completa de janelas no frozen_spec do Job/Collector com descarte em rejected_count, escada de modelos LLM por lote com AllModelsFailed + cota diária (150 req/dia), pacing do Reddit 35s sem pré-incremento do HostRateLimiter, interleave entre fontes, validação estrita de IDs e status delivery_failed se canal digest for nulo. | Contexto Ativo, Padrões Ratificados |
 | 2026-08-10 | 3ª rodada de correções na Fase 1 do pipeline de sentimento: remoção incondicional da ramificação allow_paid (AllModelsFailed sempre que a escada free esgota), janela efetiva iniciada com started_at + 1.minute e filtro estrito p_time > w_end, cota diária atômica via SentimentDailyQuota com row lock, pacing do Reddit por leituras efetivas e suite completa de testes de regressão (1 fonte, 6º alvo via tool, job integrado com Collector real). | Contexto Ativo, Padrões Ratificados |
 | 2026-08-10 | 4ª rodada de correções na Fase 1 do pipeline de sentimento: substituição da transação com row lock em SentimentDailyQuota por UPDATE condicional atômico (insert_all idempotente ON CONFLICT DO NOTHING + update_all count < limit) e teste concorrente de 8 threads com barreira, PRAGMA busy_timeout = 10000 e validação de cota estrita sem erros de banco. | Contexto Ativo, Padrões Ratificados |
