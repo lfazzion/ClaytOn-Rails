@@ -39,17 +39,48 @@ trap 'cp "$TMP/resolver.bom.rb" "$ARQ_RESOLVER" 2>/dev/null; rm -rf "$TMP"' EXIT
 # `git show` precisa rodar na raiz do repo, e o script pode ser chamado de fora.
 ( cd "$RAIZ" && git show "$COMMIT_ANTES:$ARQ_TESTE" ) > "$TMP/teste-antigo.rb" 2>/dev/null \
   || { echo "ERRO: nao achei o teste antigo em $COMMIT_ANTES (informe o commit: $0 <commit>)"; exit 1; }
-grep -q 'pior_caso' "$TMP/teste-antigo.rb" \
-  || { echo "ERRO: o teste em $COMMIT_ANTES ja e' a aritmetica NOVA; informe um commit ANTIGO"; exit 1; }
+# ── O GUARD (item 4 do #205) ───────────────────────────────────────────────
+# O QUE ELE DEVE PROTEGER: "este arquivo afirma a aritmética dos tetos contra um
+# teto". O QUE ELE FAZIA (e por isso o comentário mentia): um
+# `grep -q 'pior_caso'` no ARQUIVO INTEIRO. Esse token aparece na VARIÁVEL
+# local (`requisicoes, por_requisicao, pior_caso = ...`), no `puts` de
+# diagnóstico e na própria mensagem de falha do arquivo anti-engano — então o
+# guard passava num arquivo em que a asserção de teto não existe mais, que é
+# exatamente o que ele deveria rejeitar.
+#
+# O guard agora casa com a ASSERÇÃO: uma linha `assert_operator` que compare uma
+# variável de pior caso contra um teto. É isso que distingue "a aritmética dos
+# tetos está aqui" de "a palavra aparece aqui".
+tem_assert_de_pior_caso() {
+  grep -qE 'assert_operator +[a-z_]*pior_caso[a-z_]*, *:<=' "$1"
+}
+tem_assert_de_pior_caso "$TMP/teste-antigo.rb" \
+  || { echo "ERRO: o teste em $COMMIT_ANTES nao afirma pior caso contra teto"; exit 1; }
 
 rodar_aritmetica() {
   docker compose -f docker/docker-compose.yml run --rm test test "$ARQ_TESTE" -n "/pior_caso/" 2>&1
 }
 
-# A mutação do read: 3s -> 8s. Separador `|` (o endereço da regex não tem `|`).
+# A MUTAÇÃO TAMBÉM PRECISA MUDAR (item 4 do #205)
+#
+# Com a aritmética corrigida, o pior caso de UMA requisição é o MAIOR entre
+# `read`, `open` e o TETO TOTAL — não a soma. Subir só o read para 8s (o valor
+# antigo desta mutação) NÃO muda o `max` enquanto o teto total for 8s: o par
+# viraria falso, e um par falso é pior que par nenhum. A mutação sobe o read
+# ACIMA do teto total, que é o que a aritmética real escolhe como relógio
+# dominante.
+#
+# POR QUE O FILTRO `/pior_caso/`: os testes de CONFIGURAÇÃO do cliente
+# comparam `conn.options.timeout` com a constante e pegam QUALQUER mudança no
+# read, inclusive o aumento. O que o card quer provado é o par sobre a
+# ARITMÉTICA — a que prometia o pior caso. Sem o filtro, o passo 1 acusaria uma
+# falha de configuração e o par seria falso. O filtro casa pelo NOME
+# UNDERSCORED do método (o minitest não casa com a prosa do título: medido,
+# `-n "/teto do join/"` roda 0 testes e `-n "/pior_caso/"` roda os 2), e o
+# token existe no nome dos testes de aritmética dos DOIS lados do par.
 aplicar_mutacao_read() {
-  sed -i 's|^    HTTP_READ_TIMEOUT = 3$|    HTTP_READ_TIMEOUT = 8|' "$ARQ_RESOLVER"
-  grep -qP '^    HTTP_READ_TIMEOUT = 8$' "$ARQ_RESOLVER" \
+  sed -i 's|^    HTTP_READ_TIMEOUT = 3$|    HTTP_READ_TIMEOUT = 20|' "$ARQ_RESOLVER"
+  grep -qP '^    HTTP_READ_TIMEOUT = 20$' "$ARQ_RESOLVER" \
     || { echo "ERRO: a mutacao do read timeout NAO foi aplicada"; exit 1; }
 }
 
@@ -63,6 +94,7 @@ aplicar_mutacao_remocao() {
 resultado() { grep -oE '[0-9]+ runs, [0-9]+ assertions, [0-9]+ failures, [0-9]+ errors' "$1" | head -1; }
 read_atual() { grep -oP 'HTTP_READ_TIMEOUT = \K\d+' "$ARQ_RESOLVER"; }
 join_atual() { grep -oP 'BACKGROUND_JOIN_TIMEOUT = \K[0-9.]+' "$ARQ_RESOLVER"; }
+total_atual() { grep -oP 'HTTP_TOTAL_TIMEOUT = \K[0-9.]+' "$ARQ_RESOLVER"; }
 
 cp "$ARQ_RESOLVER" "$TMP/resolver.bom.rb"
 cp "$ARQ_TESTE" "$TMP/teste-novo.rb"
@@ -74,19 +106,22 @@ cp "$TMP/teste-antigo.rb" "$ARQ_TESTE"
 # Join no valor antigo (10.0), para casar com a aritmetica antiga.
 sed -i 's|^    BACKGROUND_JOIN_TIMEOUT = 25\.0$|    BACKGROUND_JOIN_TIMEOUT = 10.0|' "$ARQ_RESOLVER"
 aplicar_mutacao_read
-echo "-- mutacao: HTTP_READ_TIMEOUT = $(read_atual)s  (pior caso real = 3 x (3+$(read_atual)) = $((3 * (3 + $(read_atual))))s)"
+# A aritmetica ANTIGA soma SO o open (3s): a mutacao do read e' invisivel para ela.
+echo "-- mutacao: HTTP_READ_TIMEOUT = $(read_atual)s (teto total = $(total_atual)s)"
+echo "-- aritmetica ANTIGA: soma so o open = 3s -> pior caso = 3 x 3s = 9s, contra join de 10.0s"
 rodar_aritmetica > "$TMP/passo1.log"
 grep -E "MEDIDO" "$TMP/passo1.log"
 echo "RESULTADO PASSO 1: $(resultado "$TMP/passo1.log")  <- ESPERADO: 0 failures"
 
 echo
 echo "################################################################"
-echo "# PASSO 2 — VERMELHO COM A MESMA MUTACAO: a aritmetica NOVA (open+read)"
+echo "# PASSO 2 — VERMELHO COM A MESMA MUTACAO: a aritmetica NOVA (teto total)"
 echo "################################################################"
 cp "$TMP/teste-novo.rb" "$ARQ_TESTE"
 cp "$TMP/resolver.bom.rb" "$ARQ_RESOLVER"
 aplicar_mutacao_read
-echo "-- mutacao: HTTP_READ_TIMEOUT = $(read_atual)s  (pior caso real = 3 x (3+$(read_atual)) = $((3 * (3 + $(read_atual))))s)"
+echo "-- mutacao: HTTP_READ_TIMEOUT = $(read_atual)s (ACIMA do teto total de $(total_atual)s: agora o read domina o max)"
+echo "-- aritmetica NOVA: max(read, open, teto total) = $(read_atual)s -> pior caso = 3 x $(read_atual)s = $((3 * $(read_atual)))s, contra join de 25.0s"
 rodar_aritmetica > "$TMP/passo2.log"
 grep -E "MEDIDO|Expected .* to be <=" "$TMP/passo2.log"
 echo "RESULTADO PASSO 2: $(resultado "$TMP/passo2.log")  <- ESPERADO: >= 1 failure"
@@ -103,4 +138,4 @@ echo "RESULTADO PASSO 3: $(resultado "$TMP/passo3.log")  <- ESPERADO: >= 1 failu
 
 cp "$TMP/resolver.bom.rb" "$ARQ_RESOLVER"
 echo
-echo "restaurado: BACKGROUND_JOIN_TIMEOUT = $(join_atual), HTTP_READ_TIMEOUT = $(read_atual)"
+echo "restaurado: BACKGROUND_JOIN_TIMEOUT = $(join_atual), HTTP_READ_TIMEOUT = $(read_atual), HTTP_TOTAL_TIMEOUT = $(total_atual)"
