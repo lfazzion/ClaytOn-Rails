@@ -117,7 +117,7 @@ engines:
   - name: duckduckgo
     weight: 1.4
   - name: duckduckgo web
-    disabled: false
+    disabled: true
     weight: 1.4
   - name: google cse
     weight: 1.0
@@ -142,7 +142,7 @@ engines:
   - name: seznam
     disabled: false
     weight: 0.5
-    timeout: 10.0
+    timeout: 3.0
   # weight: 0.4 — reforco (decisao do dono, 02/09/2026). `display_type` lista
   # resultados normais alem do infobox: sem isto a factory so mostra infobox
   # e a busca "vira" zero resultados de lista para a maioria das queries.
