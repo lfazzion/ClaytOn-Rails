@@ -27,8 +27,20 @@ cd "$RAIZ"
 
 ARQ_TESTE=test/lib/fetcher/x_query_id_resolver_timeout_test.rb
 ARQ_RESOLVER=lib/fetcher/x_query_id_resolver.rb
+
+# O "teste antigo" (aritmetica que somava so o open) e' o arquivo no commit que
+# ANTECEDE o item 1. Sem este parametro, o script pegaria o HEAD, que depois do
+# commit ja e' a aritmetica NOVA — e o passo 1 seria o passo 2, sem par nenhum.
+#   uso: bash scripts/proofs/timeout_arithmetic_mutation_pair.sh 9f61caf
+COMMIT_ANTES="${1:-HEAD~1}"
 TMP="$(mktemp -d)"
 trap 'cp "$TMP/resolver.bom.rb" "$ARQ_RESOLVER" 2>/dev/null; rm -rf "$TMP"' EXIT
+
+# `git show` precisa rodar na raiz do repo, e o script pode ser chamado de fora.
+( cd "$RAIZ" && git show "$COMMIT_ANTES:$ARQ_TESTE" ) > "$TMP/teste-antigo.rb" 2>/dev/null \
+  || { echo "ERRO: nao achei o teste antigo em $COMMIT_ANTES (informe o commit: $0 <commit>)"; exit 1; }
+grep -q 'pior_caso' "$TMP/teste-antigo.rb" \
+  || { echo "ERRO: o teste em $COMMIT_ANTES ja e' a aritmetica NOVA; informe um commit ANTIGO"; exit 1; }
 
 rodar_aritmetica() {
   docker compose -f docker/docker-compose.yml run --rm test test "$ARQ_TESTE" -n "/pior_caso/" 2>&1
@@ -54,8 +66,6 @@ join_atual() { grep -oP 'BACKGROUND_JOIN_TIMEOUT = \K[0-9.]+' "$ARQ_RESOLVER"; }
 
 cp "$ARQ_RESOLVER" "$TMP/resolver.bom.rb"
 cp "$ARQ_TESTE" "$TMP/teste-novo.rb"
-git show "HEAD:$ARQ_TESTE" > "$TMP/teste-antigo.rb" 2>/dev/null \
-  || { echo "ERRO: o teste anterior nao esta no HEAD (rode depois do 1o commit)"; exit 1; }
 
 echo "################################################################"
 echo "# PASSO 1 — VERDE COM MUTACAO: a aritmetica ANTIGA (soma so o open)"
