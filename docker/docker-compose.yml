@@ -330,7 +330,7 @@ services:
     # cole o digest aqui, suba e rode `scripts/proofs/web_search_proof.sh` —
     # upgrade de SearXNG mexe no catálogo de engines, e o `keep_only` do
     # settings.yml descarta nome inválido em SILÊNCIO.
-    image: searxng/searxng@sha256:e44154be2b623866627d53814977b82274d35ab303bcce536e33fefbeb66220f  # L4: PR #6620 curl_cffi (DDG/Google/Brave sem CAPTCHA); rollback: digest 8486daaebc65adacfe434be38b991cf90da92d3fd80ae9f0ab1409ba65664e28
+    image: searxng/searxng@sha256:5286edb35782454ab8a102c5eff6b54bff745853191b46aeead95f225aa6dfb6  # 2026.9.25: conserta o engine "duckduckgo web" (KeyError na 2026.8.4); medido 10 resultados em 0,55s. rollback: digest e44154be2b623866627d53814977b82274d35ab303bcce536e33fefbeb66220f (2026.8.4)
     # env_file DEDICADO — nunca ../.env. O searxng busca e parseia HTML de sites
     # arbitrários da internet: mesma categoria de exposição do python-scraper.
     # Precisa de UMA variável (SEARXNG_SECRET_KEY, lida por `!env` no

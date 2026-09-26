@@ -118,7 +118,7 @@ engines:
     disabled: true
     weight: 1.4
   - name: duckduckgo web
-    disabled: true
+    disabled: false
     weight: 1.4
   - name: google cse
     disabled: true
