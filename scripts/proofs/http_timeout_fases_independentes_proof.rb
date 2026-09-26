@@ -178,3 +178,17 @@ puts "  B e C juntos são a separação que derruba a semântica 'cumulativa': s
 puts "  estoura antes de a outra ser tocada."
 puts "  A SOMA do pior caso vem da SEQUENCIALIDADE (connect → escrever → ler, uma atrás da"
 puts "  outra), não de dois orçamentos que se acumulam no mesmo relógio."
+
+# ── EXIT: A PROVA CONFIRMA OU NÃO CONFIRMA (fecha o furo) ────────────────────
+#
+# Esta prova saía 0 MESMO QUANDO NÃO CONFIRMAVA. Quem a roda num script (o par
+# por mutação, o CI) não tinha como distinguir "a prova passou" de "a prova
+# rodou": o código 0 era o do fim do script, e o veredicto estava só na tela.
+# A diferença entre um 0 que significa "confirmado" e um 0 que significa "rodou"
+# é a diferença entre uma prova e uma decoracao.
+#
+# O conserto é o mesmo do outro proof da casa (read_timeout_por_leitura_proof.rb:
+# `exit(ok ? 0 : 1)`), e ele vai DEPOIS das linhas de explicação de propósito:
+# quem lê a saída tem de ver o veredicto e o porquê ANTES do processo sair, e
+# quem só olha o código de saída tem o bit que falta.
+exit(ok ? 0 : 1)
