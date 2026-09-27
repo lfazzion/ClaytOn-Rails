@@ -344,9 +344,10 @@ module Fetcher
           @verification_bytes = @pair[:verification]
         end
 
-        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline", method: "GET")
+        def evidence_header(now_ms:, mask: nil, query_id: QUERY_ID, path_suffix: "SearchTimeline", method: "GET", path: nil)
           seconds = (now_ms - 1_682_924_400_000) / 1000
-          path = "/i/api/graphql/#{query_id}/#{path_suffix}"
+          # `path` explícito cobre as rotas REST (ex.: /i/api/1.1/friendships/create.json).
+          path ||= "/i/api/graphql/#{query_id}/#{path_suffix}"
           @payload = "#{method}!#{path}!#{seconds}obfiowerehiring#{@animation_key}"
 
           digest = Digest::SHA256.digest(@payload)
@@ -386,10 +387,10 @@ module Fetcher
         "#{base}?variables=#{encoded_vars}&features=#{encoded_feats}"
       end
 
-      def self.build_headers(variables, features, query_id: nil, operation: "SearchTimeline", method: "GET")
-        # query_id é obrigatório para operações que não SearchTimeline:
-        # o default QUERY_ID (id do SearchTimeline) é a mesma classe do bug A0.3.
-        unless query_id || operation == "SearchTimeline"
+      def self.build_headers(variables, features, query_id: nil, operation: "SearchTimeline", method: "GET", path: nil)
+        # query_id é obrigatório para operações que não SearchTimeline, a menos
+        # que a assinatura venha de um `path` REST explícito (não usa query_id).
+        unless query_id || path || operation == "SearchTimeline"
           raise ArgumentError, "query_id é obrigatório para operation=#{operation}"
         end
         txid = BuildTxid.new
@@ -402,7 +403,7 @@ module Fetcher
         cookie_header = cookies.map { |c| "#{c['name']}=#{c['value']}" }.join("; ")
 
         {
-          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id, path_suffix: operation, method: method),
+          "x-client-transaction-id" => txid.evidence_header(now_ms: now_ms, query_id: query_id, path_suffix: operation, method: method, path: path),
           "x-twitter-auth-type" => "OAuth2Session",
           "x-twitter-active-user" => "yes",
           "x-twitter-client-language" => "en",
