@@ -61,8 +61,8 @@ module Fetcher
         new(total_timeout: total_timeout).get(url, headers: headers)
       end
 
-      def post(url, json:, total_timeout: TOTAL_TIMEOUT, headers: {})
-        new(total_timeout: total_timeout).post(url, json: json, headers: headers)
+      def post(url, json: nil, form: nil, total_timeout: TOTAL_TIMEOUT, headers: {})
+        new(total_timeout: total_timeout).post(url, json: json, form: form, headers: headers)
       end
     end
 
@@ -76,8 +76,11 @@ module Fetcher
       raise RequestTimeout, "timeout de #{@total_timeout}s"
     end
 
-    def post(url, json:, headers: {})
-      body = json.nil? ? "" : json.to_json
+    # `form:` (Hash) envia application/x-www-form-urlencoded (REST do X, ex.: friendships/create);
+    # sem `form:` o corpo é JSON, como sempre foi.
+    def post(url, json: nil, form: nil, headers: {})
+      body = form ? URI.encode_www_form(form) : (json.nil? ? "" : json.to_json)
+      headers = headers.merge("content-type" => "application/x-www-form-urlencoded") if form
       Timeout.timeout(@total_timeout) { follow(url, headers: headers, body: body) }
     rescue Timeout::Error
       raise RequestTimeout, "timeout de #{@total_timeout}s"

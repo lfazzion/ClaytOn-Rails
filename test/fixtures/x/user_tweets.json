@@ -1,0 +1,6 @@
+{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[
+ {"entryId":"tweet-1","content":{"itemContent":{"tweet_results":{"result":{"__typename":"Tweet","rest_id":"1","views":{"count":"150"},"legacy":{"user_id_str":"1800000000000000000","full_text":"primeiro","created_at":"Sat Sep 27 12:00:00 +0000 2026","reply_count":3,"favorite_count":5,"retweet_count":1}}}}}},
+ {"entryId":"tweet-2","content":{"itemContent":{"tweet_results":{"result":{"__typename":"TweetWithVisibilityResults","tweet":{"rest_id":"2","views":{"count":"40"},"legacy":{"user_id_str":"1800000000000000000","full_text":"segundo","created_at":"Sat Sep 27 13:00:00 +0000 2026","reply_count":0,"favorite_count":1,"retweet_count":0}}}}}}},
+ {"entryId":"tweet-3","content":{"itemContent":{"tweet_results":{"result":{"__typename":"Tweet","rest_id":"3","legacy":{"user_id_str":"555","full_text":"de outro","created_at":"Sat Sep 27 14:00:00 +0000 2026","reply_count":0,"favorite_count":0,"retweet_count":0}}}}}},
+ {"entryId":"tweet-4","content":{"itemContent":{"tweet_results":{"result":{"__typename":"Tweet","rest_id":"4","legacy":{"user_id_str":"1800000000000000000","full_text":"sem views","created_at":"Sat Sep 27 15:00:00 +0000 2026","reply_count":0,"favorite_count":0,"retweet_count":0}}}}}}
+]}]}}}}}}

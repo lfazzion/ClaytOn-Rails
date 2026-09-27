@@ -123,7 +123,7 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     Fetcher::CookieJar.stubs(:for).returns(cookies)
 
     fake_txid = Class.new do
-      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil, path: nil)
         "TXID(#{path_suffix})"
       end
     end.new
@@ -514,7 +514,7 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     Fetcher::CookieJar.stubs(:valid?).returns(false) # -> require! levanta Expired
     Fetcher::CookieJar.stubs(:for).returns(cookies)
     fake_txid = Class.new do
-      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil, path: nil)
         "TXID(#{path_suffix})"
       end
     end.new
