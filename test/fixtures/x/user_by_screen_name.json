@@ -1,1 +1,23 @@
-{"data":{"user":{"result":{"__typename":"User","rest_id":"1800000000000000000","core":{"screen_name":"daemon403"},"legacy":{"followers_count":12,"friends_count":30,"statuses_count":7}}}}}
+{
+  "data": {
+    "user": {
+      "result": {
+        "__typename": "User",
+        "rest_id": "2084679070856384512",
+        "core": {
+          "created_at": "Tue Aug 04 16:39:55 +0000 2026",
+          "name": "daemon",
+          "screen_name": "daemon403"
+        },
+        "relationship_counts": {
+          "followers": 0,
+          "following": 12
+        },
+        "tweet_counts": {
+          "media_tweets": 0,
+          "tweets": 0
+        }
+      }
+    }
+  }
+}

@@ -42,33 +42,43 @@ module Fetcher
         user = dados.dig("data", "user", "result")
         raise E::ResponseError, "UserByScreenName: conta #{usuario} não encontrada" unless user.is_a?(Hash) && user["rest_id"]
 
+        # Forma medida em 2026-09-27: contadores em `relationship_counts`/`tweet_counts`, sem `legacy`.
+        # A forma antiga (`legacy.*_count`) fica como reserva.
         legacy = user["legacy"] || {}
         { "id" => user["rest_id"].to_s,
           "usuario" => user.dig("core", "screen_name") || legacy["screen_name"],
-          "seguidores" => legacy["followers_count"], "seguindo" => legacy["friends_count"],
-          "posts" => legacy["statuses_count"] }
+          "seguidores" => user.dig("relationship_counts", "followers") || legacy["followers_count"],
+          "seguindo" => user.dig("relationship_counts", "following") || legacy["friends_count"],
+          "posts" => user.dig("tweet_counts", "tweets") || legacy["statuses_count"] }
       end
 
       def posts(usuario_id:, limite: 20)
         variaveis = { "userId" => usuario_id.to_s, "count" => limite.to_i, "includePromotedContent" => false,
                       "withQuickPromoteEligibilityTweetFields" => false, "withVoice" => true, "withV2Timeline" => true }
-        dados = get!("UserTweets", variaveis, XConversation::FEATURES)
+        # POST: com as flags de FEATURES a URL do GET passa do teto de 2048 do SsrfGuard (medido).
+        dados = get!("UserTweets", variaveis, XConversation::FEATURES, method: "POST")
         tweets = []
         coleta(dados, tweets)
         tweets.select { |t| t.dig("legacy", "user_id_str").to_s == usuario_id.to_s }
               .uniq { |t| t["rest_id"] }.first(limite.to_i).map { |t| formata(t) }
       end
 
-      def get!(operacao, variaveis, features)
+      def get!(operacao, variaveis, features, method: "GET")
         CookieJar.require!(COOKIE_DOMAIN)
         raise E::RateLimited, "trava local de leitura da conta" if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **BUDGET)
 
         query_id = XQueryIdResolver.new.resolve(operacao)
         raise E::ResponseError, "queryId de #{operacao} não encontrado nos bundles do X" if query_id.nil?
 
-        url = XGraphql.build_url("", variaveis, features, query_id, operation: operacao, method: "GET")
-        headers = XGraphql.build_headers(variaveis, features, query_id: query_id, operation: operacao, method: "GET")
-        E.interpreta!(SafeHttpClient.get(url, headers: headers), operacao)
+        url = XGraphql.build_url("", variaveis, features, query_id, operation: operacao, method: method)
+        headers = XGraphql.build_headers(variaveis, features, query_id: query_id, operation: operacao, method: method)
+        resposta = if method == "POST"
+                     corpo = { "variables" => variaveis, "features" => features, "queryId" => query_id }
+                     SafeHttpClient.post(url, json: corpo, headers: headers)
+                   else
+                     SafeHttpClient.get(url, headers: headers)
+                   end
+        E.interpreta!(resposta, operacao)
       rescue SafeHttpClient::Error, SsrfGuard::Blocked => e
         raise E::ResponseError, "falha de rede em #{operacao} (#{e.class.name}): #{e.message}"
       end
