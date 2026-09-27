@@ -385,4 +385,13 @@ class Fetcher::SafeHttpClientTest < ActiveSupport::TestCase
 
     assert_equal 200, response.status
   end
+
+  test "post com form envia corpo urlencoded e content-type de formulario" do
+    stub = stub_request(:post, "https://example.com/f")
+           .with(body: "user_id=123&x=a+b", headers: { "Content-Type" => "application/x-www-form-urlencoded" })
+           .to_return(status: 200, body: "{}")
+    resp = Fetcher::SafeHttpClient.post("https://example.com/f", form: { "user_id" => "123", "x" => "a b" })
+    assert_equal 200, resp.status
+    assert_requested stub
+  end
 end

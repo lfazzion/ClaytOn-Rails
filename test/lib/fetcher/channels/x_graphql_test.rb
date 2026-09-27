@@ -326,7 +326,7 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
     fake_txid = Class.new do
       attr_reader :last_kwargs
-      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil, path: nil)
         @last_kwargs = { now_ms: now_ms, mask: mask, query_id: query_id, path_suffix: path_suffix, method: method }
         "SIGN(#{path_suffix})"
       end
@@ -359,7 +359,7 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
     Fetcher::CookieJar.stubs(:for).returns(cookies)
 
     fake_txid = Class.new do
-      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil)
+      def evidence_header(now_ms:, mask: nil, query_id: nil, path_suffix: nil, method: nil, path: nil)
         "SIGN(#{path_suffix})"
       end
     end.new
@@ -1169,5 +1169,18 @@ class Fetcher::Channels::XGraphqlTest < ActiveSupport::TestCase
 
     assert_match(/404/, error.message)
     assert_match(/query nao encontrada/, error.message)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fase 15: txid com path REST (Plano A: escrita no X)
+  # ---------------------------------------------------------------------------
+
+  test "txid com path REST assina o caminho REST e nao o graphql" do
+    txid = Fetcher::Channels::XGraphql::BuildTxid.new
+    txid.evidence_header(now_ms: 1_800_000_000_000, mask: 7, method: "POST",
+                         path: "/i/api/1.1/friendships/create.json")
+    assert_includes txid.payload, "POST!/i/api/1.1/friendships/create.json!"
+    txid.evidence_header(now_ms: 1_800_000_000_000, mask: 7, query_id: "Q", path_suffix: "CreateTweet", method: "POST")
+    assert_includes txid.payload, "POST!/i/api/graphql/Q/CreateTweet!"
   end
 end
