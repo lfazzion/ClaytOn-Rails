@@ -1,1 +1,23 @@
-{"data":{"create_tweet":{"tweet_results":{"result":{"rest_id":"1970000000000000001","legacy":{"full_text":"hello world","id_str":"1970000000000000001"}}}}}}
+{
+  "data": {
+    "create_tweet": {
+      "tweet_results": {
+        "result": {
+          "rest_id": "2104291497428345283",
+          "legacy": {
+            "created_at": "Sun Sep 27 19:26:03 +0000 2026",
+            "favorite_count": 0,
+            "full_text": "hello, world. first boot.",
+            "id_str": "2104291497428345283",
+            "reply_count": 0,
+            "retweet_count": 0,
+            "user_id_str": "2084679070856384512"
+          },
+          "views": {
+            "state": "Enabled"
+          }
+        }
+      }
+    }
+  }
+}

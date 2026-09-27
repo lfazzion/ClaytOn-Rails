@@ -19,13 +19,14 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     Fetcher::Channels::XGraphql::BuildTxid.stubs(:new).returns(fake)
   end
 
+  # create_tweet_ok.json: captura REAL de 2026-09-27 (@daemon403, podada; post apagado em seguida).
   test "postar devolve id e url" do
     Fetcher::SafeHttpClient.expects(:post).with do |url, json:, headers:|
       url == "https://x.com/i/api/graphql/QID/CreateTweet" &&
         json["variables"]["tweet_text"] == "hello world" && json["queryId"] == "QID" &&
         json["features"].is_a?(Hash) && !json["variables"].key?("reply")
     end.returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
-    assert_equal({ "id" => "1970000000000000001", "url" => "https://x.com/i/status/1970000000000000001" },
+    assert_equal({ "id" => "2104291497428345283", "url" => "https://x.com/i/status/2104291497428345283" },
                  E.postar(texto: "hello world"))
   end
 

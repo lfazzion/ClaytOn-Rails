@@ -1,6 +1,111 @@
-{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[
- {"entryId":"tweet-1","content":{"itemContent":{"tweet_results":{"result":{"__typename":"Tweet","rest_id":"1","views":{"count":"150"},"legacy":{"user_id_str":"1800000000000000000","full_text":"primeiro","created_at":"Sat Sep 27 12:00:00 +0000 2026","reply_count":3,"favorite_count":5,"retweet_count":1}}}}}},
- {"entryId":"tweet-2","content":{"itemContent":{"tweet_results":{"result":{"__typename":"TweetWithVisibilityResults","tweet":{"rest_id":"2","views":{"count":"40"},"legacy":{"user_id_str":"1800000000000000000","full_text":"segundo","created_at":"Sat Sep 27 13:00:00 +0000 2026","reply_count":0,"favorite_count":1,"retweet_count":0}}}}}}},
- {"entryId":"tweet-3","content":{"itemContent":{"tweet_results":{"result":{"__typename":"Tweet","rest_id":"3","legacy":{"user_id_str":"555","full_text":"de outro","created_at":"Sat Sep 27 14:00:00 +0000 2026","reply_count":0,"favorite_count":0,"retweet_count":0}}}}}},
- {"entryId":"tweet-4","content":{"itemContent":{"tweet_results":{"result":{"__typename":"Tweet","rest_id":"4","legacy":{"user_id_str":"1800000000000000000","full_text":"sem views","created_at":"Sat Sep 27 15:00:00 +0000 2026","reply_count":0,"favorite_count":0,"retweet_count":0}}}}}}
-]}]}}}}}}
+{
+  "data": {
+    "user": {
+      "result": {
+        "__typename": "User",
+        "timeline": {
+          "timeline": {
+            "instructions": [
+              {
+                "type": "TimelineClearCache"
+              },
+              {
+                "type": "TimelineAddEntries",
+                "entries": [
+                  {
+                    "entryId": "tweet-2104291497428345283",
+                    "sortIndex": "2104291523515383808",
+                    "content": {
+                      "__typename": "TimelineTimelineItem",
+                      "entryType": "TimelineTimelineItem",
+                      "itemContent": {
+                        "__typename": "TimelineTweet",
+                        "itemType": "TimelineTweet",
+                        "tweetDisplayType": "Tweet",
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "Tweet",
+                            "rest_id": "2104291497428345283",
+                            "legacy": {
+                              "created_at": "Sun Sep 27 19:26:03 +0000 2026",
+                              "favorite_count": 0,
+                              "full_text": "hello, world. first boot.",
+                              "id_str": "2104291497428345283",
+                              "reply_count": 0,
+                              "retweet_count": 0,
+                              "user_id_str": "2084679070856384512"
+                            },
+                            "views": {
+                              "state": "Enabled"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "who-to-follow-1",
+                    "sortIndex": "2104291523515383807",
+                    "content": {
+                      "__typename": "TimelineTimelineModule",
+                      "entryType": "TimelineTimelineModule",
+                      "displayType": "Vertical",
+                      "header": {
+                        "text": "Who to follow"
+                      },
+                      "items": [
+                        {
+                          "entryId": "who-to-follow-1-user-1000000000000000001",
+                          "item": {
+                            "itemContent": {
+                              "__typename": "TimelineUser",
+                              "itemType": "TimelineUser",
+                              "user_results": {
+                                "result": {
+                                  "__typename": "User",
+                                  "rest_id": "1000000000000000001",
+                                  "core": {
+                                    "name": "Terceiro",
+                                    "screen_name": "terceiro"
+                                  },
+                                  "relationship_counts": {
+                                    "followers": 100,
+                                    "following": 10
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "entryId": "cursor-top-2104291523515383809",
+                    "sortIndex": "2104291523515383809",
+                    "content": {
+                      "__typename": "TimelineTimelineCursor",
+                      "cursorType": "Top",
+                      "entryType": "TimelineTimelineCursor",
+                      "value": "DAAHCgABHTPx_dsAJxELAAIAAAATMjEwNDI5MTQ5NzQyODM0NTI4MwgAAwAAAAEAAA"
+                    }
+                  },
+                  {
+                    "entryId": "cursor-bottom-2104291523515383806",
+                    "sortIndex": "2104291523515383806",
+                    "content": {
+                      "__typename": "TimelineTimelineCursor",
+                      "cursorType": "Bottom",
+                      "entryType": "TimelineTimelineCursor",
+                      "value": "DAAHCgABHTPx_dr___4LAAIAAAATMjEwNDI5MTQ5NzQyODM0NTI4MwgAAwAAAAIAAA"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
