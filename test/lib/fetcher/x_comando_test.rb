@@ -34,4 +34,17 @@ class Fetcher::XComandoTest < ActiveSupport::TestCase
     assert_equal 1, status
     assert_equal "ENOENT", JSON.parse(saida.string)["tipo"]
   end
+
+  test "excecao inesperada tambem sai como uma linha json e status 1" do
+    saida = StringIO.new
+    status = Fetcher::XComando.executa(saida) { raise TypeError, "String does not have #dig method" }
+    assert_equal 1, status
+    assert_equal({ "erro" => "String does not have #dig method", "tipo" => "TypeError" }, JSON.parse(saida.string))
+  end
+
+  test "Incerto da escrita sai com o tipo proprio" do
+    saida = StringIO.new
+    Fetcher::XComando.executa(saida) { raise Fetcher::Channels::XEscrita::Incerto, "timeout" }
+    assert_equal "Incerto", JSON.parse(saida.string)["tipo"]
+  end
 end
