@@ -26,6 +26,18 @@
   - `XQueryIdResolver`: descoberta pede `x.com/home` com a sessão do jar (sem sessão, ~1 em 2 respostas é
     307 para o login); o PIN (id da SearchTimeline) nunca é entregue a outra operação — TweetDetail com ele
     dava HTTP 422; operação ausente nos bundles não grava valor inventado no cache.
+- **[2026-09-27]** Escrita e conta do X (`Channels::XEscrita`, `Channels::XConta`, `Fetcher::XComando`).
+  - `bin/rails x:postar TEXTO=-|arq [RESPOSTA_A=]`, `x:curtir|repostar|apagar ID=`, `x:seguir USUARIO=`,
+    `x:perfil USUARIO=`, `x:posts USUARIO= [LIMITE=]` — uma linha JSON; erro `{"erro","tipo"}` + exit 1.
+  - Erro de negócio do X vem em `errors[]` até com HTTP 200: 226/326/64/185/344 → `Restrito`;
+    186/187/385/433 → `Recusado`. Sem retry em 403/429.
+  - Follow é REST (`/i/api/1.1/friendships/create.json`, formulário); o txid assina o caminho REST
+    (`build_headers(path:)`).
+  - Quem usa: porteiro do experimento-x (repo vps). Limites de negócio ficam lá, não aqui.
+  - Medido ao vivo (27/09, @daemon403): `UserByScreenName` não traz mais `legacy` — contadores em
+    `relationship_counts.{followers,following}` e `tweet_counts.tweets`; `UserTweets` vai por POST (com as
+    flags de features o GET passa do teto de 2048 do SsrfGuard); post sem visualização ainda vem com
+    `views: {"state":"Enabled"}` sem `count` → `impressoes: nil`. Fixtures em `test/fixtures/x/` são captura real.
 - **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
   - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
   - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
