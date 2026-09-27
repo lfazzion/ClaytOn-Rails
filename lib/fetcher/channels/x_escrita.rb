@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 require "json"
+require_relative "registry"
+require_relative "../cookie_jar"
+require_relative "../host_rate_limiter"
+require_relative "../safe_http_client"
+require_relative "../ssrf_guard"
 require_relative "x_graphql"
 require_relative "x_conversation"
 
