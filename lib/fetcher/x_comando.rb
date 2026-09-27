@@ -11,7 +11,7 @@ module Fetcher
     def executa(saida = $stdout)
       saida.puts JSON.generate(yield)
       0
-    rescue Channels::Error, CookieJar::Expired, ArgumentError => e
+    rescue Channels::Error, CookieJar::Expired, ArgumentError, SystemCallError => e
       saida.puts JSON.generate("erro" => e.message, "tipo" => e.class.name.split("::").last)
       1
     end

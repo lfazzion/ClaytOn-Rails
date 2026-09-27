@@ -45,12 +45,12 @@ namespace :x do
     }
   end
 
-  { curtir: :curtir, repostar: :repostar, apagar: :apagar }.each do |nome, metodo|
+  %i[curtir repostar apagar].each do |nome|
     desc "#{nome.capitalize} um post: ID=<id|link>"
     task nome => :environment do
       exit Fetcher::XComando.executa {
         id = Fetcher::XLeitura.tweet_id(ENV.fetch("ID") { raise ArgumentError, "uso: x:#{nome} ID=<id|link>" })
-        Fetcher::Channels::XEscrita.public_send(metodo, id: id)
+        Fetcher::Channels::XEscrita.public_send(nome, id: id)
       }
     end
   end

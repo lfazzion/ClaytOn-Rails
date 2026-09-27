@@ -27,4 +27,11 @@ class Fetcher::XComandoTest < ActiveSupport::TestCase
     texto = "linha \"um\"\nlinha 2 🚀"
     assert_equal texto, Fetcher::XComando.le_texto("-", StringIO.new(texto + "\n"))
   end
+
+  test "arquivo inexistente em le_texto vira tipo ENOENT" do
+    saida = StringIO.new
+    status = Fetcher::XComando.executa(saida) { Fetcher::XComando.le_texto("/nao/existe.txt") }
+    assert_equal 1, status
+    assert_equal "ENOENT", JSON.parse(saida.string)["tipo"]
+  end
 end
