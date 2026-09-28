@@ -297,6 +297,37 @@ module Fetcher
       assert_nil @cache.read('fetcher:x_query_id:TweetDetail')
     end
 
+    # Forma medida em 28/09/2026: HomeTimeline e HomeLatestTimeline não estão no `main` nem em
+    # bundle com preload; vivem num chunk carregado sob demanda, cujo nome e hash estão no mapa
+    # do webpack embutido no HTML de x.com/home (`p.u=e=>""+(({id:"nome"})[e]||e)+"."+({id:"hash"})[e]+"a.js"`).
+    HOME_COM_MAPA = <<~HTML
+      <link rel="preload" as="script" crossorigin="anonymous" href="https://abs.twimg.com/responsive-web/client-web/main.132b4bba.js">
+      <script>p.u=e=>""+(({12:"bundle.Explore",53852:"shared~bundle.Compose~bundle.HomeTimeline~bundle.LoggedInMain",69195:"bundle.HomeTimeline",84734:"loader.HomeTimelineAdblockNotice"})[e]||e)+"."+({12:"1111aaaa2222bbbb",53852:"aaaa1111bbbb2222",69195:"72c15648bc90c126",84734:"cccc3333dddd4444"})[e]+"a.js",p.hmd=e=>e</script>
+    HTML
+
+    test 'operacao da timeline inicial e achada no chunk sob demanda do mapa do webpack' do
+      base = 'https://abs.twimg.com/responsive-web/client-web/'
+      stub_request(:get, 'https://x.com/home').to_return(status: 200, body: HOME_COM_MAPA)
+      stub_request(:get, "#{base}main.132b4bba.js").to_return(status: 200, body: @bundle_js)
+      compartilhado = stub_request(:get, "#{base}shared~bundle.Compose~bundle.HomeTimeline~bundle.LoggedInMain.aaaa1111bbbb2222a.js")
+                      .to_return(status: 200, body: 'e.exports={queryId:"FEED123",operationName:"HomeLatestTimeline",operationType:"query"};' \
+                                                    'e.exports={queryId:"HOME456",operationName:"HomeTimeline",operationType:"query"}')
+      proprio = stub_request(:get, "#{base}bundle.HomeTimeline.72c15648bc90c126a.js").to_return(status: 200, body: '')
+
+      assert_equal 'HOME456', @resolver.resolve('HomeTimeline', force: true)
+      assert_requested compartilhado
+      assert_not_requested proprio # parou no primeiro chunk que trouxe a operação
+      assert_equal 'FEED123', @resolver.send(:discover!, 'HomeLatestTimeline')
+    end
+
+    test 'chunk sob demanda so entra para operacao com dica (a busca nao vira varredura do mapa)' do
+      urls = @resolver.send(:lazy_chunk_urls, HOME_COM_MAPA, 'HomeTimeline')
+      assert_equal ['shared~bundle.Compose~bundle.HomeTimeline~bundle.LoggedInMain.aaaa1111bbbb2222a.js',
+                    'bundle.HomeTimeline.72c15648bc90c126a.js'], urls.map { |u| u.split('/').last }
+      assert_empty @resolver.send(:lazy_chunk_urls, HOME_COM_MAPA, 'SearchTimeline')
+      assert_empty @resolver.send(:lazy_chunk_urls, '<html>sem mapa</html>', 'HomeTimeline')
+    end
+
     # ── RESPOSTA TRUNCADA PELO TETO TOTAL NÃO VIRA PIN DE 25h (achado 3) ─────
     #
     # O `HTTP_TOTAL_TIMEOUT` de 8s corta a requisição INTEIRA, e o corte chega

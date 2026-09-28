@@ -1,0 +1,259 @@
+{
+ "data": {
+  "home": {
+   "home_timeline_urt": {
+    "instructions": [
+     {
+      "type": "TimelineAddEntries",
+      "entries": [
+       {
+        "entryId": "cursor-top-2104441862352797697",
+        "sortIndex": "2104441862352797697",
+        "content": {
+         "entryType": "TimelineTimelineCursor",
+         "__typename": "TimelineTimelineCursor",
+         "cursorType": "Top",
+         "value": "CURSOR_TOP_REAL_PODADO"
+        }
+       },
+       {
+        "entryId": "tweet-2104337822350221795",
+        "sortIndex": "2104441862352797696",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2104337822350221795",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000100",
+               "core": {
+                "name": "Conta A",
+                "screen_name": "conta_a"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Sun Sep 27 22:30:08 +0000 2026",
+             "reply_count": 40,
+             "favorite_count": 542,
+             "retweet_count": 50,
+             "quote_count": 22,
+             "id_str": "2104337822350221795",
+             "conversation_id_str": "2104337822350221795",
+             "user_id_str": "1000000000000000100",
+             "full_text": "Ladies and gentlemen, agents and assista"
+            },
+            "views": {
+             "count": "62640",
+             "state": "EnabledWithCount"
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "promoted-tweet-2094227496417849749-733b4afc0b2e26b2",
+        "sortIndex": "2104441862352797695",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2094227496417849749",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000101",
+               "core": {
+                "name": "Conta B",
+                "screen_name": "conta_b"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Mon Aug 31 00:55:18 +0000 2026",
+             "reply_count": 962,
+             "favorite_count": 18719,
+             "retweet_count": 1313,
+             "quote_count": 60,
+             "id_str": "2094227496417849749",
+             "conversation_id_str": "2094227496417849749",
+             "user_id_str": "1000000000000000101",
+             "full_text": "We built the cheapest AI Router \n\nEvery "
+            },
+            "views": {
+             "count": "40415027",
+             "state": "EnabledWithCount"
+            }
+           }
+          },
+          "promotedMetadata": {
+           "advertiser_results": {
+            "result": {
+             "__typename": "User"
+            }
+           },
+           "disclosureType": null
+          }
+         }
+        }
+       },
+       {
+        "entryId": "tweet-2104387164704588077",
+        "sortIndex": "2104441862352797694",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2104387164704588077",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000102",
+               "core": {
+                "name": "Conta C",
+                "screen_name": "conta_c"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Mon Sep 28 01:46:12 +0000 2026",
+             "reply_count": 2,
+             "favorite_count": 42,
+             "retweet_count": 3,
+             "quote_count": 0,
+             "id_str": "2104387164704588077",
+             "conversation_id_str": "2104387164704588077",
+             "user_id_str": "1000000000000000102",
+             "full_text": "Developers, Span-01 is public now!\n\nWe’r"
+            },
+            "views": {
+             "count": "2214",
+             "state": "EnabledWithCount"
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "tweet-2104329978146115998",
+        "sortIndex": "2104441862352797693",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2104329978146115998",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000103",
+               "core": {
+                "name": "Conta D",
+                "screen_name": "conta_d"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Sun Sep 27 21:58:58 +0000 2026",
+             "reply_count": 24,
+             "favorite_count": 480,
+             "retweet_count": 19,
+             "quote_count": 8,
+             "id_str": "2104329978146115998",
+             "conversation_id_str": "2104329978146115998",
+             "user_id_str": "1000000000000000103",
+             "full_text": "Ember-1 by the Fireworks Research team i"
+            },
+            "views": {
+             "count": "24436",
+             "state": "EnabledWithCount"
+            },
+            "note_tweet": {
+             "note_tweet_results": {
+              "result": {
+               "text": "Ember-1 by the Fireworks Research team is built on Kimi K3,  (texto longo)"
+              }
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "who-to-follow-2104441862352797696",
+        "sortIndex": "2104441862352797691",
+        "content": {
+         "entryType": "TimelineTimelineModule",
+         "__typename": "TimelineTimelineModule",
+         "items": [
+          {
+           "entryId": "who-to-follow-2104441862352797696-user-1084212657761148928",
+           "item": {
+            "itemContent": {
+             "itemType": "TimelineUser",
+             "__typename": "TimelineUser",
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000999",
+               "core": {
+                "screen_name": "sugestao_anon"
+               }
+              }
+             }
+            }
+           }
+          }
+         ],
+         "displayType": "Vertical"
+        }
+       },
+       {
+        "entryId": "cursor-bottom-2104441862352797660",
+        "sortIndex": "2104441862352797660",
+        "content": {
+         "entryType": "TimelineTimelineCursor",
+         "__typename": "TimelineTimelineCursor",
+         "cursorType": "Bottom",
+         "value": "CURSOR_BOTTOM_REAL_PODADO"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}

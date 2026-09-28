@@ -73,9 +73,10 @@ module Fetcher
         legacy.key?("retweeted_status_result") || legacy["full_text"].to_s.start_with?("RT @")
       end
 
-      def get!(operacao, variaveis, features, method: "GET")
+      # `budget`: cada leitura tem a sua trava local (o feed usa a dele, `XFeed::BUDGET`).
+      def get!(operacao, variaveis, features, method: "GET", budget: BUDGET)
         CookieJar.require!(COOKIE_DOMAIN)
-        raise E::RateLimited, "trava local de leitura da conta" if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **BUDGET)
+        raise E::RateLimited, "trava local de leitura (#{budget[:scope]})" if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **budget)
 
         resposta = E.com_query_id(operacao) do |query_id|
           url = XGraphql.build_url("", variaveis, features, query_id, operation: operacao, method: method)

@@ -87,9 +87,9 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
     any.stubs(:fetch_bundle).returns(extract ? @bundle_js : '')
   end
 
-  test "chama resolver com force: true para cada operacao (busca, escrita e conta)" do
+  test "chama resolver com force: true para cada operacao (busca, escrita, conta e feed)" do
     assert_equal %w[SearchTimeline CreateTweet FavoriteTweet CreateRetweet DeleteTweet
-                    UserByScreenName UserTweetsAndReplies], OPS
+                    UserByScreenName UserTweetsAndReplies HomeTimeline HomeLatestTimeline], OPS
     resolver = mock
     Fetcher::XQueryIdResolver.expects(:new).returns(resolver)
     OPS.each { |op| resolver.expects(:resolve_with_outcome).with(op, force: true).returns(outcome) }

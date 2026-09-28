@@ -47,6 +47,13 @@
     162/108/160/139/327/144 → `Recusado`. `x:posts` usa `UserTweetsAndReplies` (respostas entram; reposts
     da conta ficam de fora — o original vem como entrada separada). HTTP 404/422 no GraphQL = queryId
     velho: redescobre uma vez e repete uma vez se o id mudou. `RefreshXQueryIdsJob` renova as 7 operações.
+- **[2026-09-28]** Feed da conta no X (`Channels::XFeed`): `bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20]`
+  → uma linha `{"posts":[...],"proximo_cursor"}`; "Para você" = `HomeTimeline`, "Seguindo" = `HomeLatestTimeline`
+  (POST, `requestContext:"launch"` só sem cursor). Promovidos fora; repost sai como o post ORIGINAL com
+  `e_repost:true` e `repostado_por`; texto longo vem de `note_tweet`. Trava própria `graphql_feed` (6/min, 120/h).
+  - Medido (28/09): as duas operações não estão no `main` nem em bundle com preload — vivem no chunk sob demanda
+    `shared~...~bundle.HomeTimeline~...`, achado pelo mapa nome/hash do webpack no HTML de `x.com/home`
+    (`XQueryIdResolver::LAZY_CHUNK_HINTS`). `RefreshXQueryIdsJob` renova as 9 operações.
 - **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
   - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
   - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
