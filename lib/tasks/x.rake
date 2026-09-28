@@ -12,6 +12,8 @@
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
 #   bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20] -> {"posts": [...], "proximo_cursor"}
+#   bin/rails x:artigo TITULO=arquivo|- CORPO=arquivo|- [VISIBILIDADE=Public] [CONVERSA=ByInvitation]
+#                                                               -> {"id","tweet_id","url"}
 namespace :x do
   desc "Busca no X: CONSULTAS=arquivo (uma por linha; - = stdin) [LIMITE=20]. Saida: uma linha JSON por consulta"
   task buscar: :environment do
@@ -85,6 +87,33 @@ namespace :x do
     exit Fetcher::XComando.executa {
       Fetcher::Channels::XFeed.ler(tipo: ENV.fetch("TIPO", "para_voce"), cursor: ENV["CURSOR"].presence,
                                    limite: ENV.fetch("LIMITE", "20"))
+    }
+  end
+
+  # Artigo longo (X Article). Título e corpo vêm de `-` (stdin) ou de arquivo, como nas outras
+  # escritas; o corpo é markdown de um subconjunto (parágrafo, #/##, - , > , link, **negrito**,
+  # *itálico*, ~~riscado~~) e o que não é suportado (código, tabela, imagem) é recusado com erro
+  # tipado, sem chegar ao X. Salvar o artigo com o comando é decisão de quem roda: é escrita
+  # pública na conta.
+  #
+  # SÓ UM dos dois pode ser `-`: o stdin é um único fluxo, e `le_texto` o consome inteiro. Com os
+  # dois em `-` o título viria com o corpo dentro e o corpo sairia vazio — um artigo publicado com o
+  # texto trocado. Por isso a recusa é explícita, e não um combinado calado.
+  desc "Publica artigo: TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=Public] [CONVERSA=ByInvitation]"
+  task artigo: :environment do
+    exit Fetcher::XComando.executa {
+      uso = "uso: x:artigo TITULO=-|arquivo CORPO=-|arquivo"
+      origem_titulo = ENV.fetch("TITULO") { raise ArgumentError, uso }
+      origem_corpo = ENV.fetch("CORPO") { raise ArgumentError, uso }
+      raise ArgumentError, "#{uso} (so um dos dois pode ser '-': o stdin e um fluxo so)" if
+        origem_titulo == "-" && origem_corpo == "-"
+
+      Fetcher::Channels::XArtigo.publicar(
+        titulo: Fetcher::XComando.le_texto(origem_titulo),
+        corpo: Fetcher::XComando.le_texto(origem_corpo),
+        visibilidade: ENV.fetch("VISIBILIDADE", Fetcher::Channels::XArtigo::VISIBILIDADE_PADRAO),
+        conversa: ENV.fetch("CONVERSA", Fetcher::Channels::XArtigo::CONVERSA_PADRAO)
+      )
     }
   end
 end
