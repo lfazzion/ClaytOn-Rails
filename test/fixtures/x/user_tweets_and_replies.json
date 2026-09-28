@@ -13,8 +13,8 @@
                 "type": "TimelineAddEntries",
                 "entries": [
                   {
-                    "entryId": "tweet-2104291497428345283",
-                    "sortIndex": "2104291523515383808",
+                    "entryId": "tweet-2104297895725838783",
+                    "sortIndex": "2104297918486806528",
                     "content": {
                       "__typename": "TimelineTimelineItem",
                       "entryType": "TimelineTimelineItem",
@@ -25,14 +25,63 @@
                         "tweet_results": {
                           "result": {
                             "__typename": "Tweet",
-                            "rest_id": "2104291497428345283",
+                            "rest_id": "2104297895725838783",
                             "legacy": {
-                              "created_at": "Sun Sep 27 19:26:03 +0000 2026",
+                              "created_at": "Sun Sep 27 19:51:28 +0000 2026",
                               "favorite_count": 0,
-                              "full_text": "hello, world. first boot.",
-                              "id_str": "2104291497428345283",
+                              "full_text": "RT @daemon403: hello, world. second boot.",
+                              "id_str": "2104297895725838783",
                               "reply_count": 0,
-                              "retweet_count": 0,
+                              "retweet_count": 1,
+                              "user_id_str": "2084679070856384512",
+                              "retweeted_status_result": {
+                                "result": {
+                                  "__typename": "Tweet",
+                                  "rest_id": "2104297723893571643",
+                                  "legacy": {
+                                    "created_at": "Sun Sep 27 19:50:47 +0000 2026",
+                                    "favorite_count": 1,
+                                    "full_text": "hello, world. second boot.",
+                                    "id_str": "2104297723893571643",
+                                    "reply_count": 0,
+                                    "retweet_count": 1,
+                                    "user_id_str": "2084679070856384512"
+                                  },
+                                  "views": {
+                                    "state": "Enabled"
+                                  }
+                                }
+                              }
+                            },
+                            "views": {
+                              "state": "Enabled"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "tweet-2104297723893571643",
+                    "sortIndex": "2104297918486806527",
+                    "content": {
+                      "__typename": "TimelineTimelineItem",
+                      "entryType": "TimelineTimelineItem",
+                      "itemContent": {
+                        "__typename": "TimelineTweet",
+                        "itemType": "TimelineTweet",
+                        "tweetDisplayType": "Tweet",
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "Tweet",
+                            "rest_id": "2104297723893571643",
+                            "legacy": {
+                              "created_at": "Sun Sep 27 19:50:47 +0000 2026",
+                              "favorite_count": 1,
+                              "full_text": "hello, world. second boot.",
+                              "id_str": "2104297723893571643",
+                              "reply_count": 0,
+                              "retweet_count": 1,
                               "user_id_str": "2084679070856384512"
                             },
                             "views": {
@@ -45,7 +94,7 @@
                   },
                   {
                     "entryId": "who-to-follow-1",
-                    "sortIndex": "2104291523515383807",
+                    "sortIndex": "2104297918486806526",
                     "content": {
                       "__typename": "TimelineTimelineModule",
                       "entryType": "TimelineTimelineModule",
@@ -81,23 +130,23 @@
                     }
                   },
                   {
-                    "entryId": "cursor-top-2104291523515383809",
-                    "sortIndex": "2104291523515383809",
+                    "entryId": "cursor-top-2104297918486806529",
+                    "sortIndex": "2104297918486806529",
                     "content": {
                       "__typename": "TimelineTimelineCursor",
                       "cursorType": "Top",
                       "entryType": "TimelineTimelineCursor",
-                      "value": "DAAHCgABHTPx_dsAJxELAAIAAAATMjEwNDI5MTQ5NzQyODM0NTI4MwgAAwAAAAEAAA"
+                      "value": "DAAHCgABHTP3zs0AJxELAAIAAAATMjEwNDI5Nzg5NTcyNTgzODc4MwgAAwAAAAEAAA"
                     }
                   },
                   {
-                    "entryId": "cursor-bottom-2104291523515383806",
-                    "sortIndex": "2104291523515383806",
+                    "entryId": "cursor-bottom-2104297918486806525",
+                    "sortIndex": "2104297918486806525",
                     "content": {
                       "__typename": "TimelineTimelineCursor",
                       "cursorType": "Bottom",
                       "entryType": "TimelineTimelineCursor",
-                      "value": "DAAHCgABHTPx_dr___4LAAIAAAATMjEwNDI5MTQ5NzQyODM0NTI4MwgAAwAAAAIAAA"
+                      "value": "DAAHCgABHTP3zsz___0LAAIAAAATMjEwNDI5NzcyMzg5MzU3MTY0MwgAAwAAAAIAAA"
                     }
                   }
                 ]

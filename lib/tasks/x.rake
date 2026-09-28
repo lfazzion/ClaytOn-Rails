@@ -10,7 +10,7 @@
 #   bin/rails x:apagar ID=<id|link>                             -> {"id"}
 #   bin/rails x:seguir USUARIO=<screen_name>                    -> {"usuario_id"}
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
-#   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]}
+#   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
 namespace :x do
   desc "Busca no X: CONSULTAS=arquivo (uma por linha; - = stdin) [LIMITE=20]. Saida: uma linha JSON por consulta"
   task buscar: :environment do
@@ -36,6 +36,7 @@ namespace :x do
   end
 
   # Escrita e conta (porteiro do experimento-x). Saída: uma linha JSON; erro -> {"erro","tipo"} e exit 1.
+  # tipo "Incerto": a escrita pode ter acontecido no X (falha de rede depois do envio).
   desc "Posta (ou responde): TEXTO=-|arquivo [RESPOSTA_A=<id|link>]"
   task postar: :environment do
     exit Fetcher::XComando.executa {
@@ -70,7 +71,7 @@ namespace :x do
     }
   end
 
-  desc "Posts da conta com métricas: USUARIO=<screen_name> [LIMITE=20]"
+  desc "Posts e respostas da conta com métricas (sem reposts): USUARIO=<screen_name> [LIMITE=20]"
   task posts: :environment do
     exit Fetcher::XComando.executa {
       perfil = Fetcher::Channels::XConta.perfil(usuario: ENV.fetch("USUARIO") { raise ArgumentError, "uso: x:posts USUARIO=" })

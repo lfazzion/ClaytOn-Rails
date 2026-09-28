@@ -12,7 +12,14 @@ module Fetcher
       saida.puts JSON.generate(yield)
       0
     rescue Channels::Error, CookieJar::Expired, ArgumentError, SystemCallError => e
-      saida.puts JSON.generate("erro" => e.message, "tipo" => e.class.name.split("::").last)
+      erro!(saida, e)
+    rescue StandardError => e
+      # Última rede: qualquer outra exceção também sai como uma linha JSON, nunca como backtrace.
+      erro!(saida, e)
+    end
+
+    def erro!(saida, erro)
+      saida.puts JSON.generate("erro" => erro.message, "tipo" => erro.class.name.to_s.split("::").last)
       1
     end
 

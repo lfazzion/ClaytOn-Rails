@@ -81,13 +81,146 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     assert_raises(E::RateLimited) { E.apagar(id: "1") }
   end
 
-  test "seguir usa REST de formulario com txid do caminho REST" do
-    Fetcher::Channels::XGraphql.expects(:build_headers)
-      .with({}, {}, query_id: nil, operation: "friendships/create", method: "POST", path: "/i/api/1.1/friendships/create.json")
-      .returns({})
-    Fetcher::SafeHttpClient.expects(:post)
-      .with("https://x.com/i/api/1.1/friendships/create.json", form: { "user_id" => "99" }, headers: {})
-      .returns(Resp.new(status: 200, body: { "id_str" => "99" }.to_json, headers: {}))
-    assert_equal({ "usuario_id" => "99" }, E.seguir(usuario_id: "99"))
+  # Sem stub de build_headers nem do SafeHttpClient: o pedido real (WebMock) prova que o
+  # content-type de formulário vence o application/json padrão do POST e que a sessão vai junto.
+  test "seguir manda formulario com headers reais e confere o usuario na resposta" do
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["93.184.216.34"])
+    pedido = stub_request(:post, "https://x.com/i/api/1.1/friendships/create.json")
+             .with(body: "user_id=1000000000000000001",
+                   headers: { "Content-Type" => "application/x-www-form-urlencoded", "X-Csrf-Token" => "csrf-ct0-456",
+                              "X-Client-Transaction-Id" => "TXID" })
+             .to_return(status: 200, body: fixture("friendships_create_ok.json"))
+    assert_equal({ "usuario_id" => "1000000000000000001" }, E.seguir(usuario_id: "1000000000000000001"))
+    assert_requested pedido
+  end
+
+  test "seguir com resposta de outro usuario vira ResponseError" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: fixture("friendships_create_ok.json"), headers: {}))
+    assert_raises(E::ResponseError) { E.seguir(usuario_id: "99") }
+  end
+
+  # ── I1/I6: falha de rede ─────────────────────────────────────────────────────
+  # Pedido real pelo SafeHttpClient (WebMock): a classificação usa a CAUSA que o cliente guarda.
+  def rede_falha!(excecao, metodo: :post, url: "https://x.com/i/api/graphql/QID/FavoriteTweet")
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["93.184.216.34"])
+    stub_request(metodo, url).to_raise(excecao)
+  end
+
+  test "seguir com falha de rede antes do envio sai como ResponseError (nao escapa)" do
+    Fetcher::SsrfGuard.stubs(:resolve!).raises(Fetcher::SsrfGuard::Blocked, "bloqueado")
+    erro = assert_raises(E::ResponseError) { E.seguir(usuario_id: "99") }
+    assert_match(/friendships\/create/, erro.message)
+  end
+
+  test "seguir com conexao resetada depois do envio vira Incerto" do
+    rede_falha!(Errno::ECONNRESET, url: "https://x.com/i/api/1.1/friendships/create.json")
+    assert_raises(E::Incerto) { E.seguir(usuario_id: "99") }
+  end
+
+  test "timeout de leitura numa escrita vira Incerto" do
+    rede_falha!(Net::ReadTimeout)
+    erro = assert_raises(E::Incerto) { E.curtir(id: "1") }
+    assert_match(/FavoriteTweet/, erro.message)
+  end
+
+  # O teto total do SafeHttpClient (`Timeout.timeout` no `post`) vira RequestTimeout com causa
+  # Timeout::Error: o pedido pode ter saído, então é Incerto.
+  test "timeout total do cliente numa escrita vira Incerto" do
+    erro = begin
+      begin
+        raise Timeout::Error, "execution expired"
+      rescue Timeout::Error
+        raise Fetcher::SafeHttpClient::RequestTimeout, "timeout de 25s"
+      end
+    rescue Fetcher::SafeHttpClient::RequestTimeout => e
+      e
+    end
+    assert_kind_of Timeout::Error, erro.cause
+    assert_raises(E::Incerto) { E.falha_de_rede!(erro, "CreateTweet") }
+  end
+
+  test "conexao resetada depois do envio vira Incerto" do
+    rede_falha!(Errno::ECONNRESET)
+    assert_raises(E::Incerto) { E.curtir(id: "1") }
+  end
+
+  test "falha antes do envio (connect) numa escrita e ResponseError, nao Incerto" do
+    [Net::OpenTimeout, Errno::ECONNREFUSED].each do |excecao|
+      rede_falha!(excecao)
+      erro = assert_raises(E::ResponseError) { E.curtir(id: "1") }
+      assert_match(/falha de rede em FavoriteTweet/, erro.message)
+    end
+  end
+
+  # ── I2: resultado conferido ──────────────────────────────────────────────────
+  # favorite_tweet_ok / create_retweet_ok / delete_tweet_ok: captura REAL de 2026-09-27 (@daemon403
+  # curtiu e repostou o próprio post de teste, que foi apagado em seguida).
+  test "curtir, repostar e apagar aceitam as respostas reais" do
+    { curtir: "favorite_tweet_ok.json", repostar: "create_retweet_ok.json", apagar: "delete_tweet_ok.json" }.each do |acao, arq|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: fixture(arq), headers: {}))
+      assert_equal({ "id" => "2104297723893571643" }, E.public_send(acao, id: "2104297723893571643"))
+    end
+  end
+
+  test "curtir, repostar e apagar sem o campo de resultado viram ResponseError" do
+    { curtir: '{"data":{"favorite_tweet":"NotDone"}}', repostar: '{"data":{"create_retweet":{}}}',
+      apagar: '{"data":{}}' }.each do |acao, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      assert_raises(E::ResponseError, "#{acao} aceitou #{corpo}") { E.public_send(acao, id: "1") }
+    end
+  end
+
+  test "resultado vazio no CreateTweet e no CreateRetweet vira Restrito (supressao)" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: '{"data":{"create_tweet":{"tweet_results":{}}}}', headers: {}))
+    assert_raises(E::Restrito) { E.postar(texto: "oi") }
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: '{"data":{"create_retweet":{"retweet_results":{}}}}', headers: {}))
+    assert_raises(E::Restrito) { E.repostar(id: "1") }
+  end
+
+  # ── Minors 1-2: códigos ──────────────────────────────────────────────────────
+  test "161 vira Restrito e 162/108/160/139/327/144 viram Recusado, tambem com 403 no follow" do
+    corpo = ->(codigo) { { "errors" => [{ "message" => "x", "code" => codigo }] }.to_json }
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 403, body: corpo.call(161), headers: {}))
+    assert_raises(E::Restrito) { E.seguir(usuario_id: "99") }
+    [162, 108, 160].each do |codigo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 403, body: corpo.call(codigo), headers: {}))
+      assert_raises(E::Recusado, "codigo #{codigo}") { E.seguir(usuario_id: "99") }
+    end
+    { 139 => :curtir, 327 => :repostar, 144 => :apagar }.each do |codigo, acao|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo.call(codigo), headers: {}))
+      assert_raises(E::Recusado, "codigo #{codigo}") { E.public_send(acao, id: "1") }
+    end
+  end
+
+  # ── I5: queryId velho ────────────────────────────────────────────────────────
+  test "404 ou 422 redescobre o queryId uma vez e repete com o id novo" do
+    [404, 422].each do |status|
+      resolver = Fetcher::XQueryIdResolver.any_instance
+      resolver.stubs(:resolve).with("FavoriteTweet").returns("VELHO")
+      resolver.expects(:resolve).with("FavoriteTweet", force: true).returns("NOVO")
+      ordem = sequence("queryId #{status}")
+      Fetcher::SafeHttpClient.expects(:post).with { |url, **| url == "https://x.com/i/api/graphql/VELHO/FavoriteTweet" }
+                             .in_sequence(ordem).returns(Resp.new(status: status, body: "", headers: {}))
+      Fetcher::SafeHttpClient.expects(:post).with { |url, **| url == "https://x.com/i/api/graphql/NOVO/FavoriteTweet" }
+                             .in_sequence(ordem)
+                             .returns(Resp.new(status: 200, body: fixture("favorite_tweet_ok.json"), headers: {}))
+      assert_equal({ "id" => "1" }, E.curtir(id: "1"))
+    end
+  end
+
+  test "404 repetido ou id igual depois da redescoberta: uma tentativa so, ResponseError" do
+    Fetcher::XQueryIdResolver.any_instance.expects(:resolve).with("DeleteTweet", force: true).returns("QID")
+    Fetcher::SafeHttpClient.expects(:post).once.returns(Resp.new(status: 404, body: "", headers: {}))
+    assert_raises(E::ResponseError) { E.apagar(id: "1") }
+  end
+
+  test "403 e 429 nao redescobrem nem repetem" do
+    Fetcher::XQueryIdResolver.any_instance.expects(:resolve).with(anything, force: true).never
+    Fetcher::SafeHttpClient.expects(:post).once.returns(Resp.new(status: 403, body: "", headers: {}))
+    assert_raises(E::AuthError) { E.curtir(id: "1") }
+    Fetcher::SafeHttpClient.expects(:post).once.returns(Resp.new(status: 429, body: "", headers: {}))
+    assert_raises(E::RateLimitedRemote) { E.curtir(id: "1") }
   end
 end

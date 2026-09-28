@@ -52,34 +52,44 @@ module Fetcher
           "posts" => user.dig("tweet_counts", "tweets") || legacy["statuses_count"] }
       end
 
+      # UserTweetsAndReplies (e não UserTweets): as respostas da conta entram no placar. A timeline
+      # traz posts de terceiros (a conversa em volta das respostas) e os reposts da própria conta;
+      # os dois ficam de fora. Variáveis = as do cliente web (medido em 27/09), sem promovidos.
       def posts(usuario_id:, limite: 20)
         variaveis = { "userId" => usuario_id.to_s, "count" => limite.to_i, "includePromotedContent" => false,
-                      "withQuickPromoteEligibilityTweetFields" => false, "withVoice" => true, "withV2Timeline" => true }
+                      "withCommunity" => true, "withQuickPromoteEligibilityTweetFields" => true, "withVoice" => true }
         # POST: com as flags de FEATURES a URL do GET passa do teto de 2048 do SsrfGuard (medido).
-        dados = get!("UserTweets", variaveis, XConversation::FEATURES, method: "POST")
+        dados = get!("UserTweetsAndReplies", variaveis, XConversation::FEATURES, method: "POST")
         tweets = []
         coleta(dados, tweets)
-        tweets.select { |t| t.dig("legacy", "user_id_str").to_s == usuario_id.to_s }
+        tweets.select { |t| t.dig("legacy", "user_id_str").to_s == usuario_id.to_s && !repost?(t) }
               .uniq { |t| t["rest_id"] }.first(limite.to_i).map { |t| formata(t) }
+      end
+
+      # Repost da própria conta: o post original (se for da conta) já vem como entrada separada
+      # (medido em 27/09), então o embrulho do repost não conta.
+      def repost?(tweet)
+        legacy = tweet["legacy"]
+        legacy.key?("retweeted_status_result") || legacy["full_text"].to_s.start_with?("RT @")
       end
 
       def get!(operacao, variaveis, features, method: "GET")
         CookieJar.require!(COOKIE_DOMAIN)
         raise E::RateLimited, "trava local de leitura da conta" if HostRateLimiter.exceeded?(COOKIE_DOMAIN, **BUDGET)
 
-        query_id = XQueryIdResolver.new.resolve(operacao)
-        raise E::ResponseError, "queryId de #{operacao} não encontrado nos bundles do X" if query_id.nil?
-
-        url = XGraphql.build_url("", variaveis, features, query_id, operation: operacao, method: method)
-        headers = XGraphql.build_headers(variaveis, features, query_id: query_id, operation: operacao, method: method)
-        resposta = if method == "POST"
-                     corpo = { "variables" => variaveis, "features" => features, "queryId" => query_id }
-                     SafeHttpClient.post(url, json: corpo, headers: headers)
-                   else
-                     SafeHttpClient.get(url, headers: headers)
-                   end
+        resposta = E.com_query_id(operacao) do |query_id|
+          url = XGraphql.build_url("", variaveis, features, query_id, operation: operacao, method: method)
+          headers = XGraphql.build_headers(variaveis, features, query_id: query_id, operation: operacao, method: method)
+          if method == "POST"
+            corpo = { "variables" => variaveis, "features" => features, "queryId" => query_id }
+            SafeHttpClient.post(url, json: corpo, headers: headers)
+          else
+            SafeHttpClient.get(url, headers: headers)
+          end
+        end
         E.interpreta!(resposta, operacao)
       rescue SafeHttpClient::Error, SsrfGuard::Blocked => e
+        # Leitura: não há ação a ficar incerta, então toda falha de rede é ResponseError.
         raise E::ResponseError, "falha de rede em #{operacao} (#{e.class.name}): #{e.message}"
       end
 

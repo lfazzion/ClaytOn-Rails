@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
-# Mantém o query ID do X (Twitter) atualizado para SearchTimeline.
+# Mantém atualizados os query IDs do X (Twitter): a SearchTimeline e as operações da escrita e da
+# conta (`Channels::XEscrita`/`Channels::XConta`), que antes só renovavam quando o cache vencia.
 #
 # O resolver (`Fetcher::XQueryIdResolver`) já implementa:
 # - Cache persistente com soft-TTL de 24h
@@ -25,14 +26,21 @@
 class RefreshXQueryIdsJob < ApplicationJob
   queue_as :default
 
-  OPERATION = "SearchTimeline".freeze
+  # Uma descoberta por operação (lock e cache por operação no resolver). A falha de uma não
+  # impede as outras.
+  OPERATIONS = %w[
+    SearchTimeline
+    CreateTweet FavoriteTweet CreateRetweet DeleteTweet
+    UserByScreenName UserTweetsAndReplies
+  ].freeze
 
   def perform
     resolver = Fetcher::XQueryIdResolver.new
-    result = resolver.resolve_with_outcome(OPERATION, force: true)
-    report(result)
-  rescue StandardError => e
-    Rails.logger.warn "[RefreshXQueryIdsJob] falha ao refresh #{OPERATION}: #{e.class}: #{e.message}"
+    OPERATIONS.each do |operation|
+      report(operation, resolver.resolve_with_outcome(operation, force: true))
+    rescue StandardError => e
+      Rails.logger.warn "[RefreshXQueryIdsJob] falha ao refresh #{operation}: #{e.class}: #{e.message}"
+    end
   end
 
   private
@@ -40,48 +48,53 @@ class RefreshXQueryIdsJob < ApplicationJob
   # Um desfecho por linha de log. O padrão da casa: falha ou limite sempre
   # ditos, nunca fallback silencioso. Quem ler o log tem de responder "o cache
   # foi atualizado?" sem precisar de acesso ao código.
-  def report(result)
+  def report(operation, result)
     case result.reason
     when :discovered
-      Rails.logger.info "[RefreshXQueryIdsJob] #{OPERATION} descoberto e gravado: #{result.value}"
+      Rails.logger.info "[RefreshXQueryIdsJob] #{operation} descoberto e gravado: #{result.value}"
     when :lock_busy
       # A ressalva que este card fecha: com `force: true` o caminho perde a
       # corrida de verdade. Isto NÃO é sucesso — outro processo está
       # descobrindo, e este worker não descobriu nada.
-      Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} nao discoverta por este worker: " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{operation} nao discoverta por este worker: " \
                        "outro processo esta descobrindo (lock ocupado); " \
                        "cache servido com #{result.value}"
     when :fetching_in_progress
-      Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} nao descoberta por este worker: " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{operation} nao descoberta por este worker: " \
                        "outro fetch desta instancia ja estava em andamento; " \
                        "cache servido com #{result.value}"
     when :not_found
       # Buscou e não achou: gravou o PIN de última instância. Anunciar isso
       # como "concluído" esconderia que o X mudou o formato dos bundles.
-      Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} nao encontrada nos bundles apos a busca: " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{operation} nao encontrada nos bundles apos a busca: " \
                        "gravado PIN de ultima instancia #{result.value}"
+    when :not_found_uncached
+      # Buscou e não achou, e a operação não tem PIN: nada gravado (o chamador recebe nil e
+      # falha com erro claro em vez de usar um id inventado).
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{operation} nao encontrada nos bundles apos a busca: " \
+                       "sem PIN para esta operacao; nada gravado no cache"
     when :discovery_truncated
       # A busca foi CORTADA pelo teto de requisição, o que é diferente de o X
       # não ter o id: o que se sabe é o que deu, não que o id não existe. Nada
       # foi gravado, e dizer isso é o que impede 25h de PIN em silêncio
       # (achado 3 da revisão A do #205).
-      Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} busca CORTADA pelo teto de requisicao: " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{operation} busca CORTADA pelo teto de requisicao: " \
                        "a resposta nao chegou ao fim, entao NAO da para afirmar que o id nao existe; " \
                        "nada gravado no cache"
     when :stale_cache
-      Rails.logger.warn "[RefreshXQueryIdsJob] #{OPERATION} servida de cache stale; " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] #{operation} servida de cache stale; " \
                        "refresh disparado em background; valor #{result.value}"
     when :fresh_cache
-      Rails.logger.info "[RefreshXQueryIdsJob] #{OPERATION} ainda fresca no cache; " \
+      Rails.logger.info "[RefreshXQueryIdsJob] #{operation} ainda fresca no cache; " \
                         "nenhuma busca necessaria; valor #{result.value}"
     when :failed
-      Rails.logger.warn "[RefreshXQueryIdsJob] falha ao refresh #{OPERATION}: " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] falha ao refresh #{operation}: " \
                        "#{result.error&.class}: #{result.error&.message}; " \
                        "preservado ultimo valor conhecido #{result.value}"
     else
       # Um motivo novo que ninguém mapeou é exatamente o tipo de coisa que o
       # padrão "nunca silencioso" proíbe deixar passar. Dizer, não engolir.
-      Rails.logger.warn "[RefreshXQueryIdsJob] desfecho nao mapeado de #{OPERATION}: " \
+      Rails.logger.warn "[RefreshXQueryIdsJob] desfecho nao mapeado de #{operation}: " \
                        "reason=#{result.reason.inspect} valor=#{result.value}"
     end
   end
