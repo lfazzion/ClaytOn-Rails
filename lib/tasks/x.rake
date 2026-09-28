@@ -11,6 +11,7 @@
 #   bin/rails x:seguir USUARIO=<screen_name>                    -> {"usuario_id"}
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
+#   bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20] -> {"posts": [...], "proximo_cursor"}
 namespace :x do
   desc "Busca no X: CONSULTAS=arquivo (uma por linha; - = stdin) [LIMITE=20]. Saida: uma linha JSON por consulta"
   task buscar: :environment do
@@ -76,6 +77,14 @@ namespace :x do
     exit Fetcher::XComando.executa {
       perfil = Fetcher::Channels::XConta.perfil(usuario: ENV.fetch("USUARIO") { raise ArgumentError, "uso: x:posts USUARIO=" })
       { "posts" => Fetcher::Channels::XConta.posts(usuario_id: perfil["id"], limite: Integer(ENV.fetch("LIMITE", "20"))) }
+    }
+  end
+
+  desc "Uma pagina do feed da conta (sem promovidos): [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20]"
+  task feed: :environment do
+    exit Fetcher::XComando.executa {
+      Fetcher::Channels::XFeed.ler(tipo: ENV.fetch("TIPO", "para_voce"), cursor: ENV["CURSOR"].presence,
+                                   limite: ENV.fetch("LIMITE", "20"))
     }
   end
 end

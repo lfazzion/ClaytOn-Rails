@@ -48,6 +48,15 @@ module Fetcher
     QUERY_ID_REGEX = /queryId\s*:\s*"([^"]+)"\s*,\s*operationName\s*:\s*"([^"]+)"/.freeze
     HOME_URL = 'https://x.com/home'.freeze
     BUNDLE_BASE_URL = 'https://abs.twimg.com/responsive-web/client-web/'.freeze
+    # Operações que não estão em bundle com preload (medido em 28/09/2026): vivem num chunk
+    # carregado sob demanda. A dica escolhe, no mapa do webpack do HTML de x.com/home, só os
+    # chunks cujo nome a contém (hoje 2: o `shared~...~bundle.HomeTimeline~...` e o próprio).
+    LAZY_CHUNK_HINTS = {
+      'HomeTimeline' => 'bundle.HomeTimeline',
+      'HomeLatestTimeline' => 'bundle.HomeTimeline'
+    }.freeze
+    # `p.u=e=>""+(({id:"nome",...})[e]||e)+"."+({id:"hash",...})[e]+"a.js"` (medido em 28/09/2026).
+    CHUNK_MAP_REGEX = /\(\{([^{}]*)\}\)\[(\w+)\]\|\|\2\)\+"\."\+\(\{([^{}]*)\}\)\[\2\]\+"(\w*)\.js"/.freeze
 
     # Desfecho de uma resolução, com a CAUSA. `value` é o query id devolvido
     # (mesmo que preservado do cache); `reason` diz o que aconteceu de verdade.
@@ -451,7 +460,7 @@ module Fetcher
 
       begin
         home_html = fetch_home_html
-        bundle_urls = extract_bundle_urls(home_html)
+        bundle_urls = extract_bundle_urls(home_html) + lazy_chunk_urls(home_html, operation_name)
         allowed_urls = filter_allowed_bundle_urls(bundle_urls)
 
         query_ids = {}
@@ -610,6 +619,20 @@ module Fetcher
         end
       end
       urls.uniq
+    end
+
+    # URLs dos chunks sob demanda da operação (só as com dica em LAZY_CHUNK_HINTS), montadas a
+    # partir do mapa nome/hash do webpack. Sem dica ou sem mapa: nenhuma.
+    def lazy_chunk_urls(html, operation_name)
+      hint = LAZY_CHUNK_HINTS[operation_name]
+      mapa = hint && html.match(CHUNK_MAP_REGEX)
+      return [] unless mapa
+
+      nomes = mapa[1].scan(/(\d+):"([^"]+)"/).to_h
+      hashes = mapa[3].scan(/(\d+):"([^"]+)"/).to_h
+      nomes.filter_map do |id, nome|
+        "#{BUNDLE_BASE_URL}#{nome}.#{hashes[id]}#{mapa[4]}.js" if nome.include?(hint) && hashes[id]
+      end
     end
 
     def fetch_bundle(url)

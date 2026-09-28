@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Mantém atualizados os query IDs do X (Twitter): a SearchTimeline e as operações da escrita e da
-# conta (`Channels::XEscrita`/`Channels::XConta`), que antes só renovavam quando o cache vencia.
+# conta (`Channels::XEscrita`/`Channels::XConta`) e do feed (`Channels::XFeed`), que antes só renovavam quando o cache vencia.
 #
 # O resolver (`Fetcher::XQueryIdResolver`) já implementa:
 # - Cache persistente com soft-TTL de 24h
@@ -32,6 +32,7 @@ class RefreshXQueryIdsJob < ApplicationJob
     SearchTimeline
     CreateTweet FavoriteTweet CreateRetweet DeleteTweet
     UserByScreenName UserTweetsAndReplies
+    HomeTimeline HomeLatestTimeline
   ].freeze
 
   def perform

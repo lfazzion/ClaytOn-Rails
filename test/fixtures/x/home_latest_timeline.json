@@ -1,0 +1,412 @@
+{
+ "data": {
+  "home": {
+   "home_timeline_urt": {
+    "instructions": [
+     {
+      "type": "TimelineAddEntries",
+      "entries": [
+       {
+        "entryId": "cursor-top-2104441864810659841",
+        "sortIndex": "2104441864810659841",
+        "content": {
+         "entryType": "TimelineTimelineCursor",
+         "__typename": "TimelineTimelineCursor",
+         "cursorType": "Top",
+         "value": "CURSOR_TOP_REAL_PODADO"
+        }
+       },
+       {
+        "entryId": "tweet-2104393847350403121",
+        "sortIndex": "2104441864810659840",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2104393847350403121",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000104",
+               "core": {
+                "name": "Conta E",
+                "screen_name": "conta_e"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Mon Sep 28 02:12:45 +0000 2026",
+             "reply_count": 2,
+             "favorite_count": 47,
+             "retweet_count": 1,
+             "quote_count": 0,
+             "id_str": "2104393847350403121",
+             "conversation_id_str": "2104393847350403121",
+             "user_id_str": "1000000000000000104",
+             "full_text": "https://t.co/x"
+            },
+            "views": {
+             "count": "8440",
+             "state": "EnabledWithCount"
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "promoted-tweet-2103071524790165563-733b6e6aded768ff",
+        "sortIndex": "2104441864810659839",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2103071524790165563",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000105",
+               "core": {
+                "name": "Conta F",
+                "screen_name": "conta_f"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Thu Sep 24 10:38:19 +0000 2026",
+             "reply_count": 83,
+             "favorite_count": 1857,
+             "retweet_count": 256,
+             "quote_count": 2,
+             "id_str": "2103071524790165563",
+             "conversation_id_str": "2103071524790165563",
+             "user_id_str": "1000000000000000105",
+             "full_text": "Something is changing at Bybit, and oran"
+            },
+            "views": {
+             "count": "16128647",
+             "state": "EnabledWithCount"
+            }
+           }
+          },
+          "promotedMetadata": {
+           "advertiser_results": {
+            "result": {
+             "__typename": "User"
+            }
+           },
+           "disclosureType": null
+          }
+         }
+        }
+       },
+       {
+        "entryId": "home-conversation-2104355556064444657",
+        "sortIndex": "2104441864810659836",
+        "content": {
+         "entryType": "TimelineTimelineModule",
+         "__typename": "TimelineTimelineModule",
+         "items": [
+          {
+           "entryId": "tweet-2104354839627026909",
+           "item": {
+            "itemContent": {
+             "itemType": "TimelineTweet",
+             "__typename": "TimelineTweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2104354839627026909",
+               "core": {
+                "user_results": {
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "1000000000000000106",
+                  "core": {
+                   "name": "Conta G",
+                   "screen_name": "conta_g"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "created_at": "Sun Sep 27 23:37:45 +0000 2026",
+                "reply_count": 6,
+                "favorite_count": 74,
+                "retweet_count": 0,
+                "quote_count": 1,
+                "id_str": "2104354839627026909",
+                "conversation_id_str": "2104354839627026909",
+                "user_id_str": "1000000000000000106",
+                "full_text": "Guys...\nWe are working on something new."
+               },
+               "views": {
+                "count": "1846",
+                "state": "EnabledWithCount"
+               }
+              }
+             }
+            }
+           }
+          },
+          {
+           "entryId": "tweet-2104355556064444657",
+           "item": {
+            "itemContent": {
+             "itemType": "TimelineTweet",
+             "__typename": "TimelineTweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2104355556064444657",
+               "core": {
+                "user_results": {
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "1000000000000000106",
+                  "core": {
+                   "name": "Conta G",
+                   "screen_name": "conta_g"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "created_at": "Sun Sep 27 23:40:36 +0000 2026",
+                "reply_count": 0,
+                "favorite_count": 23,
+                "retweet_count": 2,
+                "quote_count": 1,
+                "id_str": "2104355556064444657",
+                "conversation_id_str": "2104354839627026909",
+                "in_reply_to_status_id_str": "2104354839627026909",
+                "user_id_str": "1000000000000000106",
+                "full_text": "we might raise the bar this time and use",
+                "in_reply_to_screen_name": "anon"
+               },
+               "views": {
+                "count": "914",
+                "state": "EnabledWithCount"
+               }
+              }
+             }
+            }
+           }
+          }
+         ],
+         "displayType": "VerticalConversation"
+        }
+       },
+       {
+        "entryId": "tweet-2104340411598995854",
+        "sortIndex": "2104441864810659834",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2104340411598995854",
+            "core": {
+             "user_results": {
+              "result": {
+               "__typename": "User",
+               "rest_id": "1000000000000000102",
+               "core": {
+                "name": "Conta C",
+                "screen_name": "conta_c"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "created_at": "Sun Sep 27 22:40:25 +0000 2026",
+             "reply_count": 0,
+             "favorite_count": 0,
+             "retweet_count": 2,
+             "quote_count": 0,
+             "id_str": "2104340411598995854",
+             "conversation_id_str": "2104340411598995854",
+             "user_id_str": "1000000000000000102",
+             "full_text": "RT @anon: 3.87 BILLION tokens.",
+             "retweeted_status_result": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2104338985208385951",
+               "core": {
+                "user_results": {
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "1000000000000000107",
+                  "core": {
+                   "name": "Conta H",
+                   "screen_name": "conta_h"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "created_at": "Sun Sep 27 22:34:45 +0000 2026",
+                "reply_count": 4,
+                "favorite_count": 10,
+                "retweet_count": 2,
+                "quote_count": 0,
+                "id_str": "2104338985208385951",
+                "conversation_id_str": "2104338985208385951",
+                "user_id_str": "1000000000000000107",
+                "full_text": "3.87 BILLION tokens. one day on @anon.\n\n"
+               },
+               "views": {
+                "count": "487",
+                "state": "EnabledWithCount"
+               }
+              }
+             }
+            },
+            "views": {
+             "count": "25",
+             "state": "EnabledWithCount"
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "home-conversation-2103939679397585115",
+        "sortIndex": "2104441864810659808",
+        "content": {
+         "entryType": "TimelineTimelineModule",
+         "__typename": "TimelineTimelineModule",
+         "items": [
+          {
+           "entryId": "tweet-2103922653585162248",
+           "item": {
+            "itemContent": {
+             "itemType": "TimelineTweet",
+             "__typename": "TimelineTweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2103922653585162248",
+               "core": {
+                "user_results": {
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "1000000000000000106",
+                  "core": {
+                   "name": "Conta G",
+                   "screen_name": "conta_g"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "created_at": "Sat Sep 26 19:00:24 +0000 2026",
+                "reply_count": 105,
+                "favorite_count": 3135,
+                "retweet_count": 263,
+                "quote_count": 96,
+                "id_str": "2103922653585162248",
+                "conversation_id_str": "2103922653585162248",
+                "user_id_str": "1000000000000000106",
+                "full_text": "Introducing Julia-1:\nOur first classific"
+               },
+               "views": {
+                "count": "266568",
+                "state": "EnabledWithCount"
+               },
+               "note_tweet": {
+                "note_tweet_results": {
+                 "result": {
+                  "text": "Introducing Julia-1:\nOur first classification model that run (texto longo)"
+                 }
+                }
+               }
+              }
+             }
+            }
+           }
+          },
+          {
+           "entryId": "tweet-2103939679397585115",
+           "item": {
+            "itemContent": {
+             "itemType": "TimelineTweet",
+             "__typename": "TimelineTweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2103939679397585115",
+               "core": {
+                "user_results": {
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "1000000000000000106",
+                  "core": {
+                   "name": "Conta G",
+                   "screen_name": "conta_g"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "created_at": "Sat Sep 26 20:08:03 +0000 2026",
+                "reply_count": 1,
+                "favorite_count": 43,
+                "retweet_count": 0,
+                "quote_count": 0,
+                "id_str": "2103939679397585115",
+                "conversation_id_str": "2103922653585162248",
+                "in_reply_to_status_id_str": "2103922653585162248",
+                "user_id_str": "1000000000000000106",
+                "full_text": "And you can also run Julia-1 on WebGPU:\n",
+                "in_reply_to_screen_name": "anon"
+               },
+               "views": {
+                "count": "10932",
+                "state": "EnabledWithCount"
+               }
+              }
+             }
+            }
+           }
+          }
+         ],
+         "displayType": "VerticalConversation"
+        }
+       },
+       {
+        "entryId": "cursor-bottom-2104441864810659755",
+        "sortIndex": "2104441864810659755",
+        "content": {
+         "entryType": "TimelineTimelineCursor",
+         "__typename": "TimelineTimelineCursor",
+         "cursorType": "Bottom",
+         "value": "CURSOR_BOTTOM_REAL_PODADO"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}
