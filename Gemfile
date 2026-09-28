@@ -26,9 +26,9 @@ gem 'ferrum', '~> 0.18.0'  # Headless Chrome via WebSocket (chromedp/headless-sh
 # SDK oficial de MCP. 1.1.0 (2026-08-01) e dual-era: fala 2026-07-28 e responde
 # o `initialize` legado de 2025-11-25, que e o unico que o cliente do Hermes sabe
 # falar (mcp==1.28.1 no venv do harness). Traz json_schemer >= 2.4 junto.
-gem 'mcp', '~> 1.5'
+gem 'mcp', '~> 1.6'
 gem 'typhoeus', '~> 1.4' # HTTP client com proxy e SSL support
-gem 'ssrf_filter', '~> 1.5'  # SSRF + DNS rebinding protection (PageFetchTool)
+gem 'ssrf_filter', '~> 1.6'  # SSRF + DNS rebinding protection (PageFetchTool)
 gem 'ruby-readability', '~> 0.7.3', require: 'readability'  # Fallback extractor (PageFetchTool)
 gem 'feedjira', '~> 4.0'  # RSS/Atom/RDF — canal de feed do /internal/extract
 gem 'bootsnap', require: false
