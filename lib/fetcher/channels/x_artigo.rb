@@ -117,6 +117,12 @@ module Fetcher
       OPERACAO_TITULO = "ArticleEntityUpdateTitle"
       OPERACAO_CONTEUDO = "ArticleEntityUpdateContent"
       OPERACAO_PUBLICAR = "ArticleEntityPublish"
+      # Trecho que `XEscrita#com_query_id` (x_escrita.rb:146-149) põe no `ResponseError` quando a
+      # descoberta do queryId volta nil. É o mesmo tipo do erro de rede pré-envio, com a mesma
+      # consequência — nada foi enviado — e por isso a casa o reconhece por este texto (ver
+      # `query_id_nao_descoberto?`). Um erro de descoberta é pré-envio por definição: sem queryId
+      # não existe nem URL para o POST.
+      MSG_QUERY_ID_NAO_DESCOBERTO = "não encontrado nos bundles do X"
       # Onde o `rest_id` mora em cada resposta, a partir da raiz `data`. Rascunho e publicação
       # trazem o artigo aninhado em `article_entity_results.result`; título e conteúdo trazem o id
       # direto (articles.ts:30-34). O primeiro elemento é SEMPRE "data" — é a raiz da resposta, e
@@ -465,7 +471,7 @@ module Fetcher
       # "o X disse que NÃO" vs. "a casa NÃO SABE": no segundo caso retomar às cegas pode
       # publicar o artigo duas vezes, e a mensagem precisa mandar conferir antes.
       #
-      # São dois caminhos para a mesma dúvida, e nenhum dos dois é o `Incerto`:
+      # São dois caminhos para a mesma dúvida, e o `Incerto` é um deles:
       #   - `Incerto` (timeout de leitura, conexão resetada): a resposta PERDEU depois do envio;
       #   - `ResponseError` no passo 4 com 2xx: o X respondeu, mas sem `rest_id` (ou com corpo
       #     que nem é JSON) — o pedido CHEGOU, e o que ele fez não está na resposta.
@@ -490,6 +496,14 @@ module Fetcher
       #      o que conferir: avisar ali seria mandar o operador procurar um artigo que não existe
       #      e — pior — treinar ele a ignorar o aviso.
       #
+      # O `ResponseError` de queryId NÃO DESCOBERTO entra na mesma lista, e é o mais fácil de
+      # deixar passar: o passo 4 já estava marcado, mas o erro nasce em
+      # `XEscrita#com_query_id` (x_escrita.rb:146-149), ANTES de existir URL para o POST — o
+      # `SafeHttpClient.post` do publish nem é chamado. O que saiu para a rede ali foi a leitura
+      # dos bundles, não o pedido de publicação. O passo diz QUAL chamada falhou, não se ela
+      # chegou ao X; quem responde se o artigo saiu é o tipo/forma do erro, como nos outros
+      # pré-envios acima.
+      #
       # Sobrou o 2xx sem `rest_id`/sem JSON, que é a resposta que CHEGOU e não confirma.
       def publicado_pode_sair?(erro, passo)
         return false unless passo == OPERACAO_PUBLICAR
@@ -499,8 +513,18 @@ module Fetcher
         # A promessa de `XEscrita#falha_de_rede!`: a mensagem traz o prefixo "falha de rede em"
         # só quando a falha foi ANTES do envio; depois do envio ela vira `Incerto`.
         return false if erro.message.start_with?("falha de rede em")
+        return false if query_id_nao_descoberto?(erro)
 
         true
+      end
+
+      # O `ResponseError` que `com_query_id` levanta quando a descoberta devolve nil. É uma
+      # falha de DESCOBERTA — a operação nem tem queryId para ser tentada — e o texto é a
+      # assinatura desse caminho, como o prefixo "falha de rede em" é o da rede. Casa pela
+      # mensagem (e não por tipo novo) porque a casa já tipa as falhas do X por CLASSE; um
+      # `ResponseError` com esse texto significa exatamente isto: nada foi enviado.
+      def query_id_nao_descoberto?(erro)
+        erro.is_a?(E::ResponseError) && erro.message.include?(MSG_QUERY_ID_NAO_DESCOBERTO)
       end
 
       # Tudo o que SAI para o X passa por aqui, e a conferência é sobre o `content_state` INTEIRO

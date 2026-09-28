@@ -491,6 +491,31 @@ class Fetcher::Channels::XArtigoTest < ActiveSupport::TestCase
     refute_match(/pode JA ter acontecido no X/, erro.message)
   end
 
+  # QueryId NÃO DESCOBERTO no passo 4 é o outro pré-envio, e o mais sutil dos dois: o `ResponseError`
+  # nasce dentro de `XEscrita#com_query_id` (x_escrita.rb:146-149), ou seja, ANTES de existir URL
+  # para o POST — `SafeHttpClient.post` nem é chamado. O passo 4 ser o da publicação não muda isso:
+  # o que saiu (ou não saiu) para o X foi a leitura dos bundles, não o publish. Avisar "pode ter
+  # publicado" ali manda quem lê a mensagem conferir um artigo que com certeza não está no ar, e é
+  # o mesmo ruído que o teste da trava local acima descreve. O texto certo é o de "só o rascunho
+  # está criado", e o id do rascunho continua na mensagem — ele segue existindo no X, e é por ele
+  # que a retomada acontece.
+  test "queryId nao descoberto no passo 4 nao avisa que pode ter publicado: o POST nem saiu" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    Fetcher::XQueryIdResolver.any_instance.stubs(:resolve).with("ArticleEntityPublish").returns(nil)
+    # Se o POST do publish saísse, o stub de `passo` do passo 3 responderia 200 e o teste
+    # passaria por um caminho que não é o do erro: o `never` é o que prova que não houve envio.
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.include?("ArticleEntityPublish") }.never
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/não encontrado nos bundles do X/, erro.message)
+    assert_match(/so o rascunho esta criado/, erro.message)
+    refute_match(/pode JA ter acontecido no X/, erro.message)
+    assert_match(/rascunho 42 ja criado/, erro.message)
+    assert_match(/RASCUNHO=42/, erro.message)
+  end
+
   # 401/403 e 429 são o X RESPONDENDO que não executou: não é resposta ambígua, é recusa com
   # status. O aviso de "pode ter publicado" seria falso. (O stub de `passo` é re-declarado a cada
   # volta: o do último `passo(...)` do laço é o que vale, e aqui ele é o do publish.)
