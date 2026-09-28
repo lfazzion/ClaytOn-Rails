@@ -63,10 +63,33 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     assert_raises(E::Recusado) { E.postar(texto: "olha isso segredo-auth-123") }
   end
 
-  test "texto vazio ou acima de 280 e recusado sem rede" do
+  test "texto vazio ou acima de 25.000 e recusado sem rede" do
     Fetcher::SafeHttpClient.expects(:post).never
     assert_raises(E::Recusado) { E.postar(texto: "   ") }
-    assert_raises(E::Recusado) { E.postar(texto: "a" * 281) }
+    erro = assert_raises(E::Recusado) { E.postar(texto: "a" * 25_001) }
+    assert_match(/25001 caracteres/, erro.message)
+    assert_match(/máx\. 25000/, erro.message)
+  end
+
+  # Borda de cima: a conta ficou Premium em 28/09/2026, então 25.000 é ACEITO (o X manda pro
+  # GraphQL). Com o teto antigo de 280 este teste caía no Recusado local antes de qualquer rede.
+  test "25.000 caracteres sao aceitos e chegam inteiros no tweet_text" do
+    Fetcher::SafeHttpClient.expects(:post).with do |_url, json:, headers:|
+      json["variables"]["tweet_text"] == "a" * E::MAX_CHARS && json["variables"]["tweet_text"].length == 25_000
+    end.returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
+    assert_equal "2104291497428345283", E.postar(texto: "a" * 25_000)["id"]
+  end
+
+  # O texto curto de sempre (280) continua entrando: subir o teto não pode ter quebrado o post comum.
+  test "280 caracteres continuam aceitos" do
+    Fetcher::SafeHttpClient.expects(:post).with do |_url, json:, headers:|
+      json["variables"]["tweet_text"] == "a" * 280
+    end.returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
+    assert_equal "2104291497428345283", E.postar(texto: "a" * 280)["id"]
+  end
+
+  test "o teto e 25.000 e o post vai inteiro para o X" do
+    assert_equal 25_000, E::MAX_CHARS
   end
 
   test "queryId nao descoberto da erro claro" do

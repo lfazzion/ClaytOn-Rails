@@ -19,7 +19,11 @@ module Fetcher
     module XEscrita
       COOKIE_DOMAIN = "x.com"
       BUDGET = { scope: "graphql_escrita", max: 4, per_hour: 60 }.freeze
-      MAX_CHARS = 280 # conta sem Premium; URL conta 23 no X, então o X ainda pode recusar (186)
+      # 25.000 desde 28/09/2026: a conta @daemon403 virou X Premium, e com Premium o X aceita posts
+      # e respostas de até 25.000 caracteres (fonte: help.x.com/en/using-x/types-of-posts,
+      # "Longer posts … up to 25,000 characters"). Antes disso eram 280 (conta sem Premium).
+      # Isto é o teto da CASA; se o texto estourar, o X ainda pode recusar com 186.
+      MAX_CHARS = 25_000
       FOLLOW_PATH = "/i/api/1.1/friendships/create.json"
       MIN_SEGREDO = 8 # valores de cookie mais curtos que isso dariam falso positivo
 
