@@ -2,7 +2,7 @@ source 'https://rubygems.org'
 
 ruby '~> 4.0'
 
-gem 'rails', '~> 8.1.0'
+gem 'rails', '~> 8.1.4'
 gem 'sqlite3', '~> 2.9'
 gem 'puma', '~> 8.0'
 gem 'solid_queue', '~> 1.6'
