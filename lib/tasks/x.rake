@@ -8,6 +8,7 @@
 #   bin/rails x:curtir ID=<id|link>                             -> {"id"}
 #   bin/rails x:repostar ID=<id|link>                           -> {"id"}
 #   bin/rails x:apagar ID=<id|link>                             -> {"id"}
+#   bin/rails x:editar ID=<id|link> TEXTO=-|arquivo             -> {"id","id_anterior","url",...}
 #   bin/rails x:seguir USUARIO=<screen_name>                    -> {"usuario_id"}
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
@@ -57,6 +58,23 @@ namespace :x do
         Fetcher::Channels::XEscrita.public_send(nome, id: id)
       }
     end
+  end
+
+  # Edição de post já publicado (conta Premium; janela de 1h e número limitado de alterações
+  # segundo help.x.com/en/using-x/x-premium). ID aceita id ou link como nas outras escritas, e
+  # TEXTO vem de `-` (stdin) ou de arquivo, como no `postar`.
+  #
+  # A edição SAI com id NOVO: o X cria uma versão nova do post e esconde a antiga do feed. Por
+  # isso a linha de saída traz `id` (o texto novo, dono da `url`) e `id_anterior` (o id pedido) —
+  # quem salva a `url` precisa da nova, e quem precisa conferir o post antigo tem a outra.
+  desc "Edita um post publicado (Premium): ID=<id|link> TEXTO=-|arquivo"
+  task editar: :environment do
+    exit Fetcher::XComando.executa {
+      uso = "uso: x:editar ID=<id|link> TEXTO=-|arquivo"
+      alvo = Fetcher::XLeitura.tweet_id(ENV.fetch("ID") { raise ArgumentError, uso })
+      texto = Fetcher::XComando.le_texto(ENV.fetch("TEXTO") { raise ArgumentError, uso })
+      Fetcher::Channels::XEditar.editar(id: alvo, texto: texto)
+    }
   end
 
   desc "Segue uma conta: USUARIO=<screen_name>"
