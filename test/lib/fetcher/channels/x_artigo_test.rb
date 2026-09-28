@@ -446,6 +446,67 @@ class Fetcher::Channels::XArtigoTest < ActiveSupport::TestCase
     refute_match(/pode JA ter acontecido no X/, erro.message)
   end
 
+  # A trava local do artigo (HostRateLimiter) é NOSSA e dispara ANTES do envio: no passo 4, o
+  # pedido do publish nem saiu. Avisar "pode ter publicado" ali seria mandar quem lê a mensagem
+  # conferir um artigo que com certeza não existe — e a sobre-aviso cansa: é ela que faz o aviso
+  # parecer ruído quando é sinal.
+  test "trava local no passo 4 nao avisa que pode ter publicado: o pedido nem saiu" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    chamadas = 0
+    # `gate!` roda uma vez por chamada GraphQL: 1=rascunho, 2=título, 3=conteúdo, 4=publicar.
+    Fetcher::HostRateLimiter.stubs(:exceeded?).with { |*| chamadas += 1; chamadas > 3 }.returns(true)
+    erro = assert_raises(E::RateLimited) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/so o rascunho esta criado/, erro.message)
+    refute_match(/pode JA ter acontecido no X/, erro.message)
+  end
+
+  # O inverso do teste acima, e o motivo de `passo` existir: a MESMA trava local disparando no
+  # passo 2 não pode produzir a mensagem do passo 4. Se o passo não fosse rastreado, qualquer
+  # falha no artigo sairia com o texto do publish.
+  test "trava local no passo 2 nao vira a mensagem do publish" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    chamadas = 0
+    Fetcher::HostRateLimiter.stubs(:exceeded?).with { |*| chamadas += 1; chamadas > 1 }.returns(true)
+    erro = assert_raises(E::RateLimited) { A.publicar(titulo: "T", corpo: "C") }
+
+    refute_match(/pode JA ter acontecido no X/, erro.message)
+    assert_match(/so o rascunho esta criado/, erro.message)
+  end
+
+  # Falha de rede ANTES do envio (SsrfGuard bloqueia antes de sair) no passo 4: o pedido não
+  # chegou ao X, então o artigo NÃO foi publicado. Este teste amarra a promessa do prefixo —
+  # se `x_escrita.rb#falha_de_rede!` mudar essa frase, o teste avisa em vez de o aviso virar falso.
+  test "falha de rede ANTES do envio no passo 4 nao avisa que pode ter publicado" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    Fetcher::SafeHttpClient.stubs(:post).with { |url, **| url.include?("ArticleEntityPublish") }
+                           .raises(Fetcher::SsrfGuard::Blocked, "bloqueado")
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/falha de rede em ArticleEntityPublish/, erro.message)
+    refute_match(/pode JA ter acontecido no X/, erro.message)
+  end
+
+  # 401/403 e 429 são o X RESPONDENDO que não executou: não é resposta ambígua, é recusa com
+  # status. O aviso de "pode ter publicado" seria falso. (O stub de `passo` é re-declarado a cada
+  # volta: o do último `passo(...)` do laço é o que vale, e aqui ele é o do publish.)
+  test "publish com 403 ou 429 NAO avisa que pode ter publicado: o X respondeu que nao" do
+    [403, 429].each do |status|
+      passo("ArticleEntityDraftCreate", draft("42"))
+      passo("ArticleEntityUpdateTitle", titulo("42"))
+      passo("ArticleEntityUpdateContent", conteudo("42"))
+      passo("ArticleEntityPublish", Resp.new(status: status, body: "", headers: {}))
+      erro = assert_raises(E::Error, "status #{status}") { A.publicar(titulo: "T", corpo: "C") }
+
+      assert_match(/so o rascunho esta criado/, erro.message, "status #{status}")
+      refute_match(/pode JA ter acontecido no X/, erro.message, "status #{status}")
+    end
+  end
+
   # O primeiro passo é o único em que NADA ficou: uma dica de retomar ali seria mentira, e o id
   # que ela carregaria nem existe.
   test "falha no 1o passo nao sugere retomar: nao ha rascunho para retomar" do

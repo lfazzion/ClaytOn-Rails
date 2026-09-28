@@ -79,13 +79,14 @@ module Fetcher
     #     (a publicação é o passo 4, que não chegou a rodar). A mensagem carrega o id +
     #     `RASCUNHO=<id>`; retomar reescreve título e conteúdo no MESMO rascunho e publica uma vez só.
     #   - falha na 4 (publicar) com RESPOSTA DO X que diz que não (código de recusa, restrição,
-    #     401/403, 429) -> o rascunho existe e NÃO foi publicado: retomar é seguro.
-    #   - falha na 4 com RESPOSTA AMBÍGUA -> o pedido saiu e a casa não sabe se publicou. São dois
-    #     caminhos para a mesma dúvida: o `Incerto` (a resposta se perdeu depois do envio) e o
-    #     2xx sem `rest_id` (o X respondeu, mas o corpo não confirma — `rest_id!` levanta
-    #     ResponseError, espelhando `x_escrita.rb:199-209`). Nesses dois a mensagem avisa que a
-    #     publicação PODE ter saído e manda conferir o artigo antes de repetir: retomar às cegas
-    #     publicaria o segundo artigo.
+    #     401/403, 429) -> o rascunho existe e NÃO foi publicado: retomar é seguro. O mesmo vale
+    #     para a falha LOCAL (trava, sessão, rede antes do envio): o pedido nem saiu do processo.
+    #   - falha na 4 com RESPOSTA AMBÍGUA -> o pedido chegou ao X e a casa não sabe se publicou.
+    #     São dois caminhos para a mesma dúvida: o `Incerto` (a resposta se perdeu depois do
+    #     envio) e o 2xx sem `rest_id` (o X respondeu, mas o corpo não confirma — `rest_id!`
+    #     levanta ResponseError, espelhando `x_escrita.rb:199-209`). Nesses dois a mensagem avisa
+    #     que a publicação PODE ter saído e manda conferir o artigo antes de repetir: retomar às
+    #     cegas publicaria o segundo artigo.
     # A retomada é `publicar(rascunho: "<id>")` (task `x:artigo RASCUNHO=<id>`): ela pula a 1 e
     # reaproveita o id nas três seguintes, com a mesma conferência de vazamento e a mesma trava.
     #
@@ -478,12 +479,26 @@ module Fetcher
         "publicar pode JA ter acontecido no X; confira o artigo #{rascunho} antes de retomar"
       end
 
-      # O artigo pode ter saído? Só no passo 4 (publicar) e só quando a casa não tem como saber
-      # que não saiu. `E::Recusado`/`E::Restrito` são o X dizendo que não publicou; qualquer
-      # outra falha no passo 4 é resposta ambígua, e antes do passo 4 nada foi publicado.
+      # O artigo pode ter saído? Três condições, todas necessárias:
+      #   1. passo 4 (publicar) — antes disso nada foi publicado, por construção;
+      #   2. o erro NÃO é uma recusa do X (`Recusado`/`Restrito`, código de negação) nem uma
+      #      resposta com status que significa "não executei" (401/403, 429, 404/422 de
+      #      queryId velho): ali o X disse que não, e "só o rascunho está criado" é o texto certo;
+      #   3. o erro NÃO é uma falha LOCAL que acontece ANTES do pedido sair — a trava
+      #      (`RateLimited`), a sessão (`CookieJar::Expired`) e a falha de rede pré-envio
+      #      (`ResponseError` com "falha de rede em"). Nenhuma delas chegou ao X, então não há
+      #      o que conferir: avisar ali seria mandar o operador procurar um artigo que não existe
+      #      e — pior — treinar ele a ignorar o aviso.
+      #
+      # Sobrou o 2xx sem `rest_id`/sem JSON, que é a resposta que CHEGOU e não confirma.
       def publicado_pode_sair?(erro, passo)
         return false unless passo == OPERACAO_PUBLICAR
         return false if erro.is_a?(E::Recusado) || erro.is_a?(E::Restrito)
+        return false if erro.is_a?(E::RateLimited) || erro.is_a?(E::RateLimitedRemote)
+        return false if erro.is_a?(E::AuthError) || erro.is_a?(Fetcher::CookieJar::Expired)
+        # A promessa de `XEscrita#falha_de_rede!`: a mensagem traz o prefixo "falha de rede em"
+        # só quando a falha foi ANTES do envio; depois do envio ela vira `Incerto`.
+        return false if erro.message.start_with?("falha de rede em")
 
         true
       end
