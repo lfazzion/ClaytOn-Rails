@@ -39,6 +39,23 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
     @bundle_js = File.read(Rails.root.join("test/fixtures/x/main_bundle_with_search_timeline.js"))
     Rails.stubs(:cache).returns(@cache)
     Rails.stubs(:logger).returns(@logger)
+    # O job agora passa por várias operações: as que o teste não prepara não podem sair para a
+    # rede de verdade. `stub_network` (quando usado) sobrescreve estes stubs.
+    any = Fetcher::XQueryIdResolver.any_instance
+    any.stubs(:fetch_home_html).raises(RuntimeError, "rede desligada no teste")
+    any.stubs(:fetch_bundle).raises(RuntimeError, "rede desligada no teste")
+  end
+
+  OPS = RefreshXQueryIdsJob::OPERATIONS
+
+  def outcome(value = "QID")
+    Fetcher::XQueryIdResolver::Discovery.new(discovered: true, value: value, reason: :discovered)
+  end
+
+  # Logs que falam da SearchTimeline: os testes antigos afirmam sobre ela; as demais operações
+  # do mesmo job têm os seus próprios testes abaixo.
+  def search_msgs(level = nil)
+    @logger.messages(level).select { |m| m.include?("SearchTimeline") }
   end
 
   def teardown
@@ -70,12 +87,41 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
     any.stubs(:fetch_bundle).returns(extract ? @bundle_js : '')
   end
 
-  test "chama resolver com force: true" do
+  test "chama resolver com force: true para cada operacao (busca, escrita e conta)" do
+    assert_equal %w[SearchTimeline CreateTweet FavoriteTweet CreateRetweet DeleteTweet
+                    UserByScreenName UserTweetsAndReplies], OPS
     resolver = mock
     Fetcher::XQueryIdResolver.expects(:new).returns(resolver)
-    resolver.expects(:resolve_with_outcome).with("SearchTimeline", force: true).at_least_once
+    OPS.each { |op| resolver.expects(:resolve_with_outcome).with(op, force: true).returns(outcome) }
 
     RefreshXQueryIdsJob.perform_now
+
+    OPS.each do |op|
+      assert @logger.messages(:info).any? { |m| m.include?("#{op} descoberto") }, "sem log de #{op}"
+    end
+  end
+
+  test "falha de uma operacao nao impede as outras" do
+    resolver = mock
+    Fetcher::XQueryIdResolver.expects(:new).returns(resolver)
+    resolver.expects(:resolve_with_outcome).with("SearchTimeline", force: true).raises(StandardError, "caiu")
+    OPS.drop(1).each { |op| resolver.expects(:resolve_with_outcome).with(op, force: true).returns(outcome) }
+
+    RefreshXQueryIdsJob.perform_now
+
+    assert @logger.messages(:warn).any? { |m| m.include?("SearchTimeline") && m.include?("caiu") }
+    assert @logger.messages(:info).any? { |m| m.include?("UserTweetsAndReplies descoberto") }
+  end
+
+  test "operacao sem PIN que nao aparece nos bundles: warn mapeado, nada gravado" do
+    stub_network(extract: true)
+
+    RefreshXQueryIdsJob.perform_now
+
+    warn = @logger.messages(:warn).select { |m| m.include?("CreateTweet") }
+    assert warn.any? { |m| m.include?("sem PIN") }, "veio: #{@logger.entries.map(&:message).inspect}"
+    refute @logger.messages.any? { |m| m.include?("desfecho nao mapeado") }
+    assert_nil @cache.read("fetcher:x_query_id:CreateTweet")
   end
 
   test "descoberta de verdade: loga info dizendo que gravou o valor" do
@@ -87,7 +133,7 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
     info = @logger.messages(:info)
     assert info.any? { |m| m.include?("SearchTimeline") && m.include?(Fetcher::XQueryIdResolver::PIN) },
            "esperado log info com o query_id gravado; veio: #{info.inspect}"
-    assert_empty @logger.messages(:warn)
+    assert_empty search_msgs(:warn)
   end
 
   # ── RESSALVA R2 do PR #203, item 1 deste card ────────────────────────────
@@ -182,7 +228,7 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
   test "falha do resolver não derruba o job" do
     resolver = mock
     Fetcher::XQueryIdResolver.expects(:new).returns(resolver)
-    resolver.expects(:resolve_with_outcome).raises(StandardError, "network timeout")
+    resolver.expects(:resolve_with_outcome).times(OPS.size).raises(StandardError, "network timeout")
 
     RefreshXQueryIdsJob.perform_now
 
@@ -199,7 +245,7 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
     # Cada chamada ao job cria um novo resolver (sem singleton), mas o cache
     # interno do resolver é o mesmo Rails.cache, então o valor já encontrado
     # será retornado imediatamente na segunda chamada (sem network).
-    resolver.expects(:resolve_with_outcome).with("SearchTimeline", force: true).at_least(2).returns(outcome)
+    OPS.each { |op| resolver.expects(:resolve_with_outcome).with(op, force: true).twice.returns(outcome) }
 
     RefreshXQueryIdsJob.perform_now
     RefreshXQueryIdsJob.perform_now

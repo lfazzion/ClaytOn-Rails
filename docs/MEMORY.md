@@ -38,6 +38,15 @@
     `relationship_counts.{followers,following}` e `tweet_counts.tweets`; `UserTweets` vai por POST (com as
     flags de features o GET passa do teto de 2048 do SsrfGuard); post sem visualização ainda vem com
     `views: {"state":"Enabled"}` sem `count` → `impressoes: nil`. Fixtures em `test/fixtures/x/` são captura real.
+  - Revisão final (27/09): toda falha de rede da escrita sai no envelope JSON; depois do envio (timeout
+    de leitura/total, conexão resetada, corpo grande) vira `Incerto` (a ação pode ter acontecido: não
+    repetir às cegas); antes do envio (DNS/SSRF/connect) é `ResponseError`. `XComando` tem rede final
+    `StandardError`. curtir/repostar/apagar/seguir conferem o resultado (formas reais: `favorite_tweet:"Done"`,
+    `retweet_results.result.rest_id`, `delete_tweet:{tweet_results:{}}`, REST devolve o usuário seguido com
+    `following:false`); `tweet_results`/`retweet_results` vazio → `Restrito`. 161 → `Restrito`;
+    162/108/160/139/327/144 → `Recusado`. `x:posts` usa `UserTweetsAndReplies` (respostas entram; reposts
+    da conta ficam de fora — o original vem como entrada separada). HTTP 404/422 no GraphQL = queryId
+    velho: redescobre uma vez e repete uma vez se o id mudou. `RefreshXQueryIdsJob` renova as 7 operações.
 - **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
   - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
   - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
