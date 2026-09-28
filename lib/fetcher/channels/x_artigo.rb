@@ -67,18 +67,25 @@ module Fetcher
     #
     # ── FALHA PARCIAL: o que fica no X e como voltar ─────────────────────────
     # O caminho é de quatro chamadas e a falha pode vir em qualquer uma. O que importa é o que
-    # SOBROU no X, porque é isso que decide se uma nova execução duplica o artigo:
+    # SOBROU no X, porque é isso que decide se uma nova execução duplica o artigo. O que o código
+    # garante — e só isso — está escrito aqui:
     #
-    #   - falha na 1 (rascunho)  -> nada ficou. Sem id para retomar; a mensagem NÃO sugere
-    #     RASCUNHO=, e re-executar cria um rascunho só, como sempre.
-    #   - falha na 2 (título) ou na 3 (conteúdo) -> o rascunho existe, VAZIO e não publicado.
-    #     A mensagem carrega o id + `RASCUNHO=<id>`; retomar reescreve título e conteúdo no MESMO
-    #     rascunho e publica uma vez só.
-    #   - falha na 4 (publicar) com resposta do X (Recusado/Restrito/ResponseError) -> o rascunho
-    #     existe e NÃO foi publicado: retomar é seguro.
-    #   - falha na 4 com `Incerto` (timeout de leitura, conexão resetada, corpo grande) -> o
-    #     pedido PODE ter chegado a publicar. A mensagem avisa isso explicitamente: retomar às
-    #     cegas publicaria o segundo artigo, e a conferência é se o artigo 42 já está no ar.
+    #   - falha na 1 (rascunho)  -> NENHUM id voltou, então a retomada é impossível: a mensagem
+    #     NÃO sugere RASCUNHO= e re-executar cria um rascunho só, como sempre. CUIDADO: isso NÃO
+    #     é a mesma coisa que garantir que nada foi criado no X. O `Incerto` desta chamada (a
+    #     resposta perdeu depois do envio) pode ter deixado um rascunho órfão lá, com id que a casa
+    #     nunca viu. Não há como citá-lo na mensagem; o que se sabe é que NENHUM id é conhecido.
+    #   - falha na 2 (título) ou na 3 (conteúdo) -> o id do rascunho voltou e NADA foi publicado
+    #     (a publicação é o passo 4, que não chegou a rodar). A mensagem carrega o id +
+    #     `RASCUNHO=<id>`; retomar reescreve título e conteúdo no MESMO rascunho e publica uma vez só.
+    #   - falha na 4 (publicar) com RESPOSTA DO X que diz que não (código de recusa, restrição,
+    #     401/403, 429) -> o rascunho existe e NÃO foi publicado: retomar é seguro.
+    #   - falha na 4 com RESPOSTA AMBÍGUA -> o pedido saiu e a casa não sabe se publicou. São dois
+    #     caminhos para a mesma dúvida: o `Incerto` (a resposta se perdeu depois do envio) e o
+    #     2xx sem `rest_id` (o X respondeu, mas o corpo não confirma — `rest_id!` levanta
+    #     ResponseError, espelhando `x_escrita.rb:199-209`). Nesses dois a mensagem avisa que a
+    #     publicação PODE ter saído e manda conferir o artigo antes de repetir: retomar às cegas
+    #     publicaria o segundo artigo.
     # A retomada é `publicar(rascunho: "<id>")` (task `x:artigo RASCUNHO=<id>`): ela pula a 1 e
     # reaproveita o id nas três seguintes, com a mesma conferência de vazamento e a mesma trava.
     #
@@ -163,13 +170,17 @@ module Fetcher
         id = rascunho || rascunho!
         # Daqui em diante qualquer falha deixa o rascunho EXISTINDO no X, e o passo 4 pode ter
         # publicado. A mensagem diz o que ficou e como voltar: re-executar sem `RASCUNHO=` criaria
-        # OUTRO rascunho e, se o publish tinha saído, publicaria o artigo duas vezes.
+        # OUTRO rascunho e, se o publish tinha saído, publicaria o artigo duas vezes. O `passo`
+        # viaja junto porque é ele que diz se o artigo pode ter saído (ver `passo_do`).
+        passo = OPERACAO_TITULO
         begin
           atualiza_titulo!(id, titulo)
+          passo = OPERACAO_CONTEUDO
           atualiza_conteudo!(id, estado)
+          passo = OPERACAO_PUBLICAR
           publicado = publica!(id, visibilidade, conversa)
         rescue E::Error => e
-          raise e.class, "#{e.message} | rascunho #{id} ja criado no X (#{passo_do(id, e)}); " \
+          raise e.class, "#{e.message} | rascunho #{id} ja criado no X (#{passo_do(id, e, passo)}); " \
                          "para retomar sem criar outro: x:artigo RASCUNHO=#{id} TITULO=... CORPO=... " \
                          "(re-executar sem RASCUNHO= publicaria duplicado)"
         end
@@ -260,6 +271,11 @@ module Fetcher
 
       # Passo 1: rascunho VAZIO (articles.ts:93-94). O X cria o artigo sem título e sem corpo; o
       # `rest_id` que volta é o que amarra título, conteúdo e publicação.
+      #
+      # Se esta chamada falhar, a casa fica SEM o id do rascunho e por isso a retomada é
+      # impossível — mas isso não é promessa de que nada foi criado no X: um `Incerto` aqui
+      # (a resposta se perdeu depois do envio) pode ter deixado um rascunho órfão, com id que
+      # ninguém aqui viu. O que a falha garante é só a ausência de id CONHECIDO.
       def rascunho!
         dados = graphql!(OPERACAO_RASCUNHO,
                          { "content_state" => { "blocks" => [], "entity_map" => [] }, "title" => "" })
@@ -444,14 +460,32 @@ module Fetcher
         rascunho.to_s
       end
 
-      # O que a falha parcial deixou para trás, na mensagem. A distinção que importa é a do
-      # `Incerto` (falha DEPOIS do envio): ali o publish pode ter acontecido, e retomar às cegas
-      # seria publicar o segundo. Nomear o passo deixa isso explícito para quem lê o erro.
-      def passo_do(rascunho, erro)
-        return "publicar pode JA ter acontecido no X; confira o artigo #{rascunho} antes de retomar" if
-          erro.is_a?(E::Incerto)
+      # O que a falha parcial deixou para trás, na mensagem. A distinção que importa é
+      # "o X disse que NÃO" vs. "a casa NÃO SABE": no segundo caso retomar às cegas pode
+      # publicar o artigo duas vezes, e a mensagem precisa mandar conferir antes.
+      #
+      # São dois caminhos para a mesma dúvida, e nenhum dos dois é o `Incerto`:
+      #   - `Incerto` (timeout de leitura, conexão resetada): a resposta PERDEU depois do envio;
+      #   - `ResponseError` no passo 4 com 2xx: o X respondeu, mas sem `rest_id` (ou com corpo
+      #     que nem é JSON) — o pedido CHEGOU, e o que ele fez não está na resposta.
+      # Nos dois, a publicação pode ter saído. Já um código de RECUSA do X (187, 186, 144...)
+      # é o X dizendo que não publicou: retomar é seguro e dizer o contrário faria quem lê a
+      # mensagem ir conferir um artigo que com certeza não está no ar.
+      def passo_do(rascunho, erro, passo = nil)
+        return "so o rascunho esta criado; titulo e corpo podem nao ter sido" unless
+          publicado_pode_sair?(erro, passo)
 
-        "so o rascunho esta criado; titulo e corpo podem nao ter sido"
+        "publicar pode JA ter acontecido no X; confira o artigo #{rascunho} antes de retomar"
+      end
+
+      # O artigo pode ter saído? Só no passo 4 (publicar) e só quando a casa não tem como saber
+      # que não saiu. `E::Recusado`/`E::Restrito` são o X dizendo que não publicou; qualquer
+      # outra falha no passo 4 é resposta ambígua, e antes do passo 4 nada foi publicado.
+      def publicado_pode_sair?(erro, passo)
+        return false unless passo == OPERACAO_PUBLICAR
+        return false if erro.is_a?(E::Recusado) || erro.is_a?(E::Restrito)
+
+        true
       end
 
       # Tudo o que SAI para o X passa por aqui, e a conferência é sobre o `content_state` INTEIRO

@@ -110,6 +110,13 @@ namespace :x do
       uso = "uso: x:artigo TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=] [CONVERSA=] [RASCUNHO=<id>]"
       # A retomada NÃO abre exceção de uso: quem re-executa depois de uma falha tem TITULO e CORPO
       # na mão de novo, e a mensagem de erro mandou colar os dois com o RASCUNHO=<id>.
+      #
+      # `RASCUNHO=` VAZIO é recusado, e não apagado com `presence`: ausente é o caminho normal
+      # (cria rascunho novo), mas presente-e-vazio é o sinal de que a pessoa colou o comando de
+      # retomada sem o id. Deixar passar criava OUTRO rascunho — a duplicação que a retomada
+      # existe para impedir, agora silenciosa. Ausente segue ausente; só o vazio é erro.
+      raise ArgumentError, "#{uso} (RASCUNHO= vazio: use um id de artigo ou omita para criar rascunho novo)" if
+        ENV.key?("RASCUNHO") && ENV["RASCUNHO"].to_s.strip.empty?
       retomada = ENV["RASCUNHO"].presence
       origem_titulo = ENV.fetch("TITULO") { raise ArgumentError, "#{uso} (com RASCUNHO= informe TITULO e CORPO)" }
       origem_corpo = ENV.fetch("CORPO") { raise ArgumentError, "#{uso} (com RASCUNHO= informe TITULO e CORPO)" }

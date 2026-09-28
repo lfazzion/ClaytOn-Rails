@@ -176,6 +176,24 @@ class Fetcher::Channels::XArtigoTest < ActiveSupport::TestCase
     assert_equal "https://d.example", estado["entity_map"][0]["value"]["data"]["url"]
   end
 
+  # O `length` do `entity_range` é a MESMA medida do `length` do estilo — o rótulo do link é
+  # conteúdo visível e o X o marca como entidade. Contando em pontos de código, um emoji
+  # dentro do rótulo encurta a marcação e o link sai apontando para a palavra errada (o X
+  # também recusa o content_state). Faltava prova desse lado: os de cima põem emoji ANTES do
+  # range ou DENTRO do estilo, nunca dentro do rótulo.
+  test "offset em UTF-16: emoji DENTRO do rotulo do link conta no length do entity_range" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    estado = A.content_state("🚀 veja o [doc 😀 final](https://d.example) 🚀")
+    bloco = estado["blocks"].first
+
+    assert_equal "🚀 veja o doc 😀 final 🚀", bloco["text"]
+    # offset: "🚀 veja o " = 2+1+4+1+1+1 = 10 unidades; rótulo "doc 😀 final" = 3+1+2+1+5 = 12.
+    assert_equal [{ "key" => 0, "offset" => 10, "length" => 12 }], bloco["entity_ranges"]
+    assert_equal "https://d.example", estado["entity_map"][0]["value"]["data"]["url"]
+    # A entidade carrega o rótulo INTEIRO (com o emoji), como o `caption` que o X mostra.
+    assert_equal "doc 😀 final", estado["entity_map"][0]["value"]["data"]["caption"]
+  end
+
   test "varios links: cada um com sua entidade e sua chave" do
     Fetcher::SafeHttpClient.expects(:post).never
     estado = A.content_state("[um](https://a.example) e [dois](https://b.example)")
@@ -367,6 +385,65 @@ class Fetcher::Channels::XArtigoTest < ActiveSupport::TestCase
 
     assert_match(/pode JA ter acontecido no X/, erro.message)
     assert_match(/RASCUNHO=42/, erro.message)
+  end
+
+  # ── Publish ambíguo: resposta 2xx que não confirma se publicou ───────────────
+  #
+  # `Incerto` cobre a resposta que PERDEU. A 2xx malformada é o outro lado da mesma Doubt: o
+  # X respondeu 200, o pedido saiu, e o corpo não traz o `rest_id` do artigo — o publish PODE
+  # ter saído e a casa não tem como dizer que não saiu. Dizer "só o rascunho está criado" ali é
+  # afirmar o que não se sabe, e retomar às cegas publica o artigo duas vezes.
+  test "publish com 2xx sem rest_id avisa que pode ter publicado, e nao diz que so o rascunho ficou" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    passo("ArticleEntityPublish", ok('{"data":{}}'))
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/pode JA ter acontecido no X/, erro.message)
+    assert_match(/confira o artigo 42 antes de retomar/, erro.message)
+    assert_match(/RASCUNHO=42/, erro.message)
+    refute_match(/so o rascunho esta criado/, erro.message)
+  end
+
+  # Corpo que nem é JSON é a mesma Doubt por outro caminho (mesmo `interpreta!` do XEscrita,
+  # x_escrita.rb:199-209): o X respondeu 2xx e a casa não sabe o que ele fez com o pedido.
+  test "publish com 2xx malformado (corpo nao-JSON) avisa que pode ter publicado" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    passo("ArticleEntityPublish", Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {}))
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/pode JA ter acontecido no X/, erro.message)
+    assert_match(/confira o artigo 42 antes de retomar/, erro.message)
+  end
+
+  # O contraponto que impede o aviso de virar texto genérico: quando o X DIZ QUE NÃO (código de
+  # recusa), o artigo não saiu e retomar é seguro. Avisar "pode ter publicado" aqui faria quem lê
+  # a mensagem ir conferir um artigo que com certeza não existe.
+  test "publish recusado pelo X NAO e tratado como possivelmente publicado: o X disse que nao" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    passo("ArticleEntityPublish", ok({ "errors" => [{ "message" => "duplicado", "code" => 187 }] }.to_json))
+    erro = assert_raises(E::Recusado) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/so o rascunho esta criado/, erro.message)
+    refute_match(/pode JA ter acontecido no X/, erro.message)
+    assert_match(/RASCUNHO=42/, erro.message)
+  end
+
+  # O passo 3 continua sendo o que é: falha de escrita de conteúdo NÃO publica nada, mesmo com
+  # resposta 2xx malformada. O aviso de "pode ter publicado" é do passo 4, não de todo 2xx.
+  test "falha no 3o passo com 2xx malformado NAO avisa que pode ter publicado" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {}))
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/so o rascunho esta criado/, erro.message)
+    refute_match(/pode JA ter acontecido no X/, erro.message)
   end
 
   # O primeiro passo é o único em que NADA ficou: uma dica de retomar ali seria mentira, e o id

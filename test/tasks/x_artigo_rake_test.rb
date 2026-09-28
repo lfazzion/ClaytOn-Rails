@@ -210,16 +210,52 @@ class XArtigoRakeTest < ActiveSupport::TestCase
     assert_match(/com RASCUNHO= informe TITULO e CORPO/, resultado["erro"])
   end
 
-  # `RASCUNHO=` (vazio) é o mesmo que não informar: o comando tem de cair no caminho normal, e não
-  # mandar um id vazio ao canal — nem criar rascunho novo por conta própria.
-  test "RASCUNHO= vazio e o mesmo que nao informar" do
-    A.expects(:publicar).with(titulo: "T", corpo: "corpo", visibilidade: "Public", conversa: "ByInvitation")
-     .returns({ "id" => "42" })
+  # `RASCUNHO=` (vazio) NÃO é o mesmo que não informar. `.presence` apagava o vazio e a task caía
+  # no caminho normal — criando OUTRO rascunho, que é exatamente a duplicação que a retomada
+  # existe para impedir. Quem digita `RASCUNHO=` depois de colar o comando de retomada da mensagem
+  # de erro quase sempre tem o id na mão e o colou errado; a recusa diz o que fazer.
+  test "RASCUNHO= vazio e RECUSADO com o motivo, sem criar rascunho novo" do
+    A.expects(:publicar).never
     titulo = Tempfile.new(["artigo_titulo", ".txt"])
     titulo.write("T\n")
     titulo.flush
-    status, = roda({ "TITULO" => titulo.path, "CORPO" => "-", "RASCUNHO" => "" }, stdin: "corpo\n")
-    assert_equal 0, status
+    status, saida = roda({ "TITULO" => titulo.path, "CORPO" => "-", "RASCUNHO" => "" }, stdin: "corpo\n")
+
+    assert_equal 1, status
+    resultado = JSON.parse(saida.lines.first)
+    assert_equal "ArgumentError", resultado["tipo"]
+    assert_match(/RASCUNHO=/, resultado["erro"])
+    assert_match(/use um id de artigo ou omita para criar rascunho novo/, resultado["erro"])
+  ensure
+    titulo&.close
+  end
+
+  # O mesmo para RASCUNHO só de espaços: `strip` esvazia, e o id tem que ser de dígitos. A recusa
+  # é a mesma, e o motivo cita o que o X devolveu — sem isso, a linha de erro seria um id vazio.
+  test "RASCUNHO= so com espacos e recusado pelo mesmo motivo" do
+    A.expects(:publicar).never
+    titulo = Tempfile.new(["artigo_titulo", ".txt"])
+    titulo.write("T\n")
+    titulo.flush
+    status, saida = roda({ "TITULO" => titulo.path, "CORPO" => "-", "RASCUNHO" => "   " }, stdin: "corpo\n")
+
+    assert_equal 1, status
+    resultado = JSON.parse(saida.lines.first)
+    assert_equal "ArgumentError", resultado["tipo"]
+    assert_match(/use um id de artigo ou omita para criar rascunho novo/, resultado["erro"])
+  ensure
+    titulo&.close
+  end
+
+  # A recusa do vazio é do COMANDO, não do canal: o canal já recusava `rascunho: ""` com
+  # ArgumentError (x_artigo.rb, checa_rascunho) e continua recusando. O que muda aqui é a
+  # mensagem — com o motivo do uso, e não o erro cru de quem tentou.
+  test "RASCUNHO= vazio nao chega a ser repassado ao canal" do
+    A.expects(:publicar).with { |**kwargs| !kwargs.key?(:rascunho) }.never
+    titulo = Tempfile.new(["artigo_titulo", ".txt"])
+    titulo.write("T\n")
+    titulo.flush
+    roda({ "TITULO" => titulo.path, "CORPO" => "-", "RASCUNHO" => "" }, stdin: "corpo\n")
   ensure
     titulo&.close
   end
