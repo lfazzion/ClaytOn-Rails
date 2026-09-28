@@ -28,7 +28,7 @@ class XArtigoRakeTest < ActiveSupport::TestCase
 
   teardown do
     Rake.application = nil
-    %w[TITULO CORPO VISIBILIDADE CONVERSA].each { |variavel| ENV.delete(variavel) }
+    %w[TITULO CORPO VISIBILIDADE CONVERSA RASCUNHO].each { |variavel| ENV.delete(variavel) }
   end
 
   # O task termina em `exit XComando.executa { ... }`, e `exit` LEVANTA `SystemExit` — o caminho
@@ -164,6 +164,64 @@ class XArtigoRakeTest < ActiveSupport::TestCase
     assert_equal 0, status
   ensure
     corpo&.close
+  end
+
+  # ── Retomada: sem RASCUNHO= a task segue criando rascunho novo (caminho normal) ──
+
+  test "sem RASCUNHO= a task nao passa rascunho: o canal cria o rascunho" do
+    A.expects(:publicar).with(titulo: "T", corpo: "corpo", visibilidade: "Public", conversa: "ByInvitation")
+     .returns({ "id" => "42" })
+    titulo = Tempfile.new(["artigo_titulo", ".txt"])
+    titulo.write("T\n")
+    titulo.flush
+    status, = roda({ "TITULO" => titulo.path, "CORPO" => "-" }, stdin: "corpo\n")
+    assert_equal 0, status
+  ensure
+    titulo&.close
+  end
+
+  # O caminho que fecha o achado 2: a falha no meio devolveu "RASCUNHO=<id>" na mensagem, e quem
+  # re-executa passa esse id. A task repassa o id ao canal e NÃO levanta erro de uso.
+  test "RASCUNHO=42 e repassado ao canal e nao recusa o comando" do
+    A.expects(:publicar).with(titulo: "T", corpo: "corpo", visibilidade: "Public", conversa: "ByInvitation",
+                               rascunho: "42")
+     .returns({ "id" => "42", "tweet_id" => "77", "url" => "https://x.com/i/status/77" })
+    titulo = Tempfile.new(["artigo_titulo", ".txt"])
+    titulo.write("T\n")
+    titulo.flush
+    status, saida = roda({ "TITULO" => titulo.path, "CORPO" => "-", "RASCUNHO" => "42" }, stdin: "corpo\n")
+
+    assert_equal 0, status
+    assert_equal({ "id" => "42", "tweet_id" => "77", "url" => "https://x.com/i/status/77" },
+                 JSON.parse(saida.lines.first))
+  ensure
+    titulo&.close
+  end
+
+  # A retomada sem TITULO/CORPO não tem o que reenviar: recusar com o motivo é melhor que publicar
+  # o rascunho antigo com título vazio.
+  test "RASCUNHO= sem TITULO/CORPO e recusado com o motivo, sem publicar" do
+    A.expects(:publicar).never
+    status, saida = roda({ "RASCUNHO" => "42" })
+
+    assert_equal 1, status
+    resultado = JSON.parse(saida.lines.first)
+    assert_equal "ArgumentError", resultado["tipo"]
+    assert_match(/com RASCUNHO= informe TITULO e CORPO/, resultado["erro"])
+  end
+
+  # `RASCUNHO=` (vazio) é o mesmo que não informar: o comando tem de cair no caminho normal, e não
+  # mandar um id vazio ao canal — nem criar rascunho novo por conta própria.
+  test "RASCUNHO= vazio e o mesmo que nao informar" do
+    A.expects(:publicar).with(titulo: "T", corpo: "corpo", visibilidade: "Public", conversa: "ByInvitation")
+     .returns({ "id" => "42" })
+    titulo = Tempfile.new(["artigo_titulo", ".txt"])
+    titulo.write("T\n")
+    titulo.flush
+    status, = roda({ "TITULO" => titulo.path, "CORPO" => "-", "RASCUNHO" => "" }, stdin: "corpo\n")
+    assert_equal 0, status
+  ensure
+    titulo&.close
   end
 
   # `Rake::Task#comment` é nil quando o arquivo é carregado por `load` num `Rake::Application`

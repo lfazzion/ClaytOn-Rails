@@ -65,6 +65,23 @@ module Fetcher
     #     arquivo, só escreve texto.
     # Pin (fixar o artigo) também não entra: as fontes da missão não confirmam a operação.
     #
+    # ── FALHA PARCIAL: o que fica no X e como voltar ─────────────────────────
+    # O caminho é de quatro chamadas e a falha pode vir em qualquer uma. O que importa é o que
+    # SOBROU no X, porque é isso que decide se uma nova execução duplica o artigo:
+    #
+    #   - falha na 1 (rascunho)  -> nada ficou. Sem id para retomar; a mensagem NÃO sugere
+    #     RASCUNHO=, e re-executar cria um rascunho só, como sempre.
+    #   - falha na 2 (título) ou na 3 (conteúdo) -> o rascunho existe, VAZIO e não publicado.
+    #     A mensagem carrega o id + `RASCUNHO=<id>`; retomar reescreve título e conteúdo no MESMO
+    #     rascunho e publica uma vez só.
+    #   - falha na 4 (publicar) com resposta do X (Recusado/Restrito/ResponseError) -> o rascunho
+    #     existe e NÃO foi publicado: retomar é seguro.
+    #   - falha na 4 com `Incerto` (timeout de leitura, conexão resetada, corpo grande) -> o
+    #     pedido PODE ter chegado a publicar. A mensagem avisa isso explicitamente: retomar às
+    #     cegas publicaria o segundo artigo, e a conferência é se o artigo 42 já está no ar.
+    # A retomada é `publicar(rascunho: "<id>")` (task `x:artigo RASCUNHO=<id>`): ela pula a 1 e
+    # reaproveita o id nas três seguintes, com a mesma conferência de vazamento e a mesma trava.
+    #
     # MODIFICAÇÃO INLINE: o que o texto não entende vira texto literal. '*' só vira itálico entre
     # caracteres de palavra, ao contrário do CommonMark (que exige fronteira): `user_id_str`,
     # `query_id` e `2 * 3` são texto comum neste repo, e itálico silencioso corromperia o texto.
@@ -127,24 +144,38 @@ module Fetcher
 
       # Publica o artigo e devolve `{"id","tweet_id","url"}`. `tweet_id` e `url` são nil quando o X
       # publica sem devolver o post que carrega o artigo: id inventado seria pior que id ausente.
-      def publicar(titulo:, corpo:, visibilidade: VISIBILIDADE_PADRAO, conversa: CONVERSA_PADRAO)
+      #
+      # `rascunho:` retoma um rascunho JÁ EXISTENTE (o id que a falha anterior devolveu na
+      # mensagem) e pula o passo 1 — re-executar sem ele criaria outro rascunho e, se a falha foi
+      # no publish, publicaria o artigo duas vezes. Sem `rascunho:`, o caminho é o normal.
+      def publicar(titulo:, corpo:, visibilidade: VISIBILIDADE_PADRAO, conversa: CONVERSA_PADRAO, rascunho: nil)
         titulo = titulo.to_s.strip
         raise FormatoInvalido, "titulo do artigo vazio" if titulo.empty?
 
         checa_visibilidade(visibilidade, conversa)
-        # A conversão valida o formato ANTES de gastar trava local ou rede; a checagem de
-        # vazamento de cookie vem sobre o texto que de fato vai sair.
+        checa_rascunho(rascunho)
+        # A conversão valida o formato e a conferência de vazamento cobrem TUDO que sai (texto,
+        # título e as URLs das entidades) ANTES de gastar trava local ou rede: recusado no passo 3
+        # o X já teria um rascunho criado do artigo que ninguém vai ler.
         estado = content_state(corpo)
-        E.recusa_vazamento!(titulo)
-        E.recusa_vazamento!(texto_cheio(estado))
+        recusa_vazamento!(titulo, estado)
 
-        rascunho = rascunho!
-        atualiza_titulo!(rascunho, titulo)
-        atualiza_conteudo!(rascunho, estado)
-        publicado = publica!(rascunho, visibilidade, conversa)
+        id = rascunho || rascunho!
+        # Daqui em diante qualquer falha deixa o rascunho EXISTINDO no X, e o passo 4 pode ter
+        # publicado. A mensagem diz o que ficou e como voltar: re-executar sem `RASCUNHO=` criaria
+        # OUTRO rascunho e, se o publish tinha saído, publicaria o artigo duas vezes.
+        begin
+          atualiza_titulo!(id, titulo)
+          atualiza_conteudo!(id, estado)
+          publicado = publica!(id, visibilidade, conversa)
+        rescue E::Error => e
+          raise e.class, "#{e.message} | rascunho #{id} ja criado no X (#{passo_do(id, e)}); " \
+                         "para retomar sem criar outro: x:artigo RASCUNHO=#{id} TITULO=... CORPO=... " \
+                         "(re-executar sem RASCUNHO= publicaria duplicado)"
+        end
 
         tweet_id = published_tweet_id(publicado)
-        { "id" => rascunho, "tweet_id" => tweet_id, "url" => (tweet_id ? "https://x.com/i/status/#{tweet_id}" : nil) }
+        { "id" => id, "tweet_id" => tweet_id, "url" => (tweet_id ? "https://x.com/i/status/#{tweet_id}" : nil) }
       end
 
       # ── Conversão texto -> content_state (PURA, sem rede) ────────────────────
@@ -331,6 +362,11 @@ module Fetcher
       # Percorre o texto UMA vez, montando o texto visível e os intervalos ao mesmo tempo: o
       # offset é o comprimento do texto JÁ montado, então um link e um negrito no mesmo parágrafo
       # não se atropelam por pertencerem a contas diferentes.
+      #
+      # A conta é em UNIDADES DE CÓDIGO UTF-16, não em pontos de código: o DraftJS é JavaScript e
+      # `"😀".length` vale 2 lá. `comprimento_utf16` faz essa conversão; sem ela, qualquer emoji
+      # (todo caractere fora do BMP) antes de um trecho marcado desloca a marcação — o X aplica o
+      # negrito no caractere errado ou recusa o content_state.
       def aplica_inline(texto, achado)
         visivel = +""
         posicao = 0
@@ -339,22 +375,31 @@ module Fetcher
           visivel << texto[posicao...caso.begin(0)]
 
           if (rotulo = achados["link_texto"])
-            inicio = visivel.length
+            inicio = comprimento_utf16(visivel)
             visivel << rotulo
-            achado.entity_ranges << { "key" => achado.entidades.length, "offset" => inicio, "length" => rotulo.length }
+            achado.entity_ranges << { "key" => achado.entidades.length, "offset" => inicio,
+                                      "length" => comprimento_utf16(rotulo) }
             achado.entidades << { "value" => { "data" => { "url" => achados["link_url"], "caption" => rotulo },
                                                "mutability" => "MUTABLE", "type" => "LINK" } }
           else
             grupo, estilo = ESTILOS.find { |nome, _| achados[nome] }
             interno = achados[grupo]
-            inicio = visivel.length
+            inicio = comprimento_utf16(visivel)
             visivel << interno
-            achado.inline_style_ranges << { "offset" => inicio, "length" => interno.length, "style" => estilo }
+            achado.inline_style_ranges << { "offset" => inicio, "length" => comprimento_utf16(interno),
+                                            "style" => estilo }
           end
           posicao = caso.end(0)
         end
         visivel << texto[posicao..]
         visivel
+      end
+
+      # Quantas unidades de código UTF-16 o texto ocupa. Um caractere do plano básico (BMP) vale
+      # 1; fora do BMP (emoji, alguns símbolos) o JavaScript conta 2 (o par substituto), e é 2 que
+      # o X espera nos offsets. `String#length` contaria 1 e desalinharia a marcação.
+      def comprimento_utf16(texto)
+        texto.each_char.sum { |caractere| caractere.ord > 0xFFFF ? 2 : 1 }
       end
 
       # ── Validação de formato ───────────────────────────────────────────────
@@ -384,9 +429,50 @@ module Fetcher
         nil
       end
 
+      # `RASCUNHO=` vem do terminal, então é entrada não confiável: o id vai para a URL do
+      # GraphQL e para o `articleEntityId` das três chamadas seguintes. Só dígitos, como o
+      # `rest_id!` exige de volta (articles.ts:30-31) — a mesma regra nas duas pontas.
+      #
+      # VAZIO também é recusado, e não tratado como "não informado": em Ruby `""` é truthy, então
+      # deixá-lo passar mandaria `articleEntityId: ""` ao X. E tratar vazio como "cria rascunho
+      # novo" seria justamente a duplicação que a retomada existe para impedir.
+      def checa_rascunho(rascunho)
+        return nil if rascunho.nil?
+
+        raise ArgumentError, "rascunho deve ser o id de artigo do X (so digitos), veio #{rascunho.inspect}" unless
+          rascunho.to_s.match?(/\A\d+\z/)
+        rascunho.to_s
+      end
+
+      # O que a falha parcial deixou para trás, na mensagem. A distinção que importa é a do
+      # `Incerto` (falha DEPOIS do envio): ali o publish pode ter acontecido, e retomar às cegas
+      # seria publicar o segundo. Nomear o passo deixa isso explícito para quem lê o erro.
+      def passo_do(rascunho, erro)
+        return "publicar pode JA ter acontecido no X; confira o artigo #{rascunho} antes de retomar" if
+          erro.is_a?(E::Incerto)
+
+        "so o rascunho esta criado; titulo e corpo podem nao ter sido"
+      end
+
+      # Tudo o que SAI para o X passa por aqui, e a conferência é sobre o `content_state` INTEIRO
+      # (texto visível + as URLs que vão no `entity_map`), não só sobre o texto: um
+      # `auth_token` numa query string de link é enviado do mesmo jeito que um no corpo, e só
+      # conferir o texto visível deixava esse segundo caminho aberto. A checagem é antes de
+      # `rascunho!` — ou seja, antes da trava local e de qualquer chamada de rede.
+      def recusa_vazamento!(titulo, estado)
+        E.recusa_vazamento!(titulo)
+        E.recusa_vazamento!(texto_cheio(estado))
+        nil
+      end
+
       # O texto que vai para o X, para a conferência de vazamento de cookie.
+      #
+      # NÃO é só o texto dos blocos: as ENTIDADES entram também. A URL de um link markdown mora
+      # no `entity_map` e é enviada ao X como parte do `content_state`, então ela é conteúdo
+      #publicado tanto quanto o texto visível. O JSON serializado cobre os dois de uma vez — é
+      # literalmente o corpo do POST do passo 3.
       def texto_cheio(estado)
-        estado["blocks"].map { |bloco| bloco["text"] }.join("\n")
+        JSON.generate(estado)
       end
 
       def digs(dados, *caminho)

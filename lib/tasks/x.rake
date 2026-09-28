@@ -12,7 +12,7 @@
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
 #   bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20] -> {"posts": [...], "proximo_cursor"}
-#   bin/rails x:artigo TITULO=arquivo|- CORPO=arquivo|- [VISIBILIDADE=Public] [CONVERSA=ByInvitation]
+#   bin/rails x:artigo TITULO=arquivo|- CORPO=arquivo|- [VISIBILIDADE=Public] [CONVERSA=ByInvitation] [RASCUNHO=<id>]
 #                                                               -> {"id","tweet_id","url"}
 namespace :x do
   desc "Busca no X: CONSULTAS=arquivo (uma por linha; - = stdin) [LIMITE=20]. Saida: uma linha JSON por consulta"
@@ -99,21 +99,33 @@ namespace :x do
   # SÓ UM dos dois pode ser `-`: o stdin é um único fluxo, e `le_texto` o consome inteiro. Com os
   # dois em `-` o título viria com o corpo dentro e o corpo sairia vazio — um artigo publicado com o
   # texto trocado. Por isso a recusa é explícita, e não um combinado calado.
-  desc "Publica artigo: TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=Public] [CONVERSA=ByInvitation]"
+  #
+  # RASCUNHO=<id> RETOMA um rascunho que já existe no X (é o id que a falha anterior devolveu na
+  # linha de erro). TITULO e CORPO continuam obrigatórios: o rascunho é reescrito com eles, e sem
+  # eles a retomada publicaria o rascunho antigo com título vazio.
+  desc "Publica artigo: TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=Public] [CONVERSA=ByInvitation] " \
+       "[RASCUNHO=<id>]"
   task artigo: :environment do
     exit Fetcher::XComando.executa {
-      uso = "uso: x:artigo TITULO=-|arquivo CORPO=-|arquivo"
-      origem_titulo = ENV.fetch("TITULO") { raise ArgumentError, uso }
-      origem_corpo = ENV.fetch("CORPO") { raise ArgumentError, uso }
+      uso = "uso: x:artigo TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=] [CONVERSA=] [RASCUNHO=<id>]"
+      # A retomada NÃO abre exceção de uso: quem re-executa depois de uma falha tem TITULO e CORPO
+      # na mão de novo, e a mensagem de erro mandou colar os dois com o RASCUNHO=<id>.
+      retomada = ENV["RASCUNHO"].presence
+      origem_titulo = ENV.fetch("TITULO") { raise ArgumentError, "#{uso} (com RASCUNHO= informe TITULO e CORPO)" }
+      origem_corpo = ENV.fetch("CORPO") { raise ArgumentError, "#{uso} (com RASCUNHO= informe TITULO e CORPO)" }
       raise ArgumentError, "#{uso} (so um dos dois pode ser '-': o stdin e um fluxo so)" if
         origem_titulo == "-" && origem_corpo == "-"
 
-      Fetcher::Channels::XArtigo.publicar(
+      argumentos = {
         titulo: Fetcher::XComando.le_texto(origem_titulo),
         corpo: Fetcher::XComando.le_texto(origem_corpo),
         visibilidade: ENV.fetch("VISIBILIDADE", Fetcher::Channels::XArtigo::VISIBILIDADE_PADRAO),
         conversa: ENV.fetch("CONVERSA", Fetcher::Channels::XArtigo::CONVERSA_PADRAO)
-      )
+      }
+      # `:rascunho` só entra quando existe: sem RASCUNHO= a chamada é a de sempre, e quem chama o
+      # canal por fora não precisa conhecer a palavra nova.
+      argumentos[:rascunho] = retomada if retomada
+      Fetcher::Channels::XArtigo.publicar(**argumentos)
     }
   end
 end

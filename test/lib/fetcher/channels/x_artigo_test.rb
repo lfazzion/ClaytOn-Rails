@@ -140,6 +140,42 @@ class Fetcher::Channels::XArtigoTest < ActiveSupport::TestCase
     assert_equal "https://a.example", estado["entity_map"][0]["value"]["data"]["url"]
   end
 
+  # ── Offsets em unidades UTF-16 ────────────────────────────────────────────
+  #
+  # DraftJS é JavaScript: `offset` e `length` contam UNIDADES DE CÓDIGO UTF-16 (`"😀".length`
+  # é 2 em JS), enquanto o Ruby conta pontos de código. Emoji vive fora do BMP e vale 2
+  # unidades: contado como 1, todo range depois dele sai deslocado e o X marca a palavra errada
+  # (ou recusa o content_state). Os números abaixo são o cálculo à mão, não derivado do código.
+
+  test "offset em UTF-16: emoji ANTES do trecho marca desloca em 2 unidades" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    bloco = A.content_state("😀 **grosso** e [link](https://a.example) e ~~fim~~ 😎")["blocks"].first
+    assert_equal "😀 grosso e link e fim 😎", bloco["text"]
+    # "😀 " = 2 unidades de emoji + 1 de espaço; o rótulo do link começa depois de "😀 grosso e ".
+    assert_equal [{ "key" => 0, "offset" => 12, "length" => 4 }], bloco["entity_ranges"]
+    assert_equal [{ "offset" => 3, "length" => 6, "style" => "BOLD" },
+                  { "offset" => 19, "length" => 3, "style" => "STRIKETHROUGH" }],
+                 bloco["inline_style_ranges"]
+  end
+
+  test "offset em UTF-16: emoji DENTRO do trecho marcado dobra o length" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    bloco = A.content_state("antes **😀😀** depois")["blocks"].first
+    assert_equal "antes 😀😀 depois", bloco["text"]
+    assert_equal [{ "offset" => 6, "length" => 4, "style" => "BOLD" }], bloco["inline_style_ranges"]
+  end
+
+  test "offset em UTF-16: entity_range com dois emoji antes aponta para a palavra certa" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    estado = A.content_state("🚀 🚀 [doc](https://d.example) e **fim**")
+    bloco = estado["blocks"].first
+    assert_equal "🚀 🚀 doc e fim", bloco["text"]
+    # "🚀 🚀 doc e " = 2+1+2+1+3+1+1+1 = 12 unidades (8 pontos de código).
+    assert_equal [{ "key" => 0, "offset" => 6, "length" => 3 }], bloco["entity_ranges"]
+    assert_equal [{ "offset" => 12, "length" => 3, "style" => "BOLD" }], bloco["inline_style_ranges"]
+    assert_equal "https://d.example", estado["entity_map"][0]["value"]["data"]["url"]
+  end
+
   test "varios links: cada um com sua entidade e sua chave" do
     Fetcher::SafeHttpClient.expects(:post).never
     estado = A.content_state("[um](https://a.example) e [dois](https://b.example)")
@@ -262,6 +298,118 @@ class Fetcher::Channels::XArtigoTest < ActiveSupport::TestCase
     assert_raises(A::FormatoInvalido) { A.publicar(titulo: "  ", corpo: "corpo") }
     assert_raises(A::FormatoInvalido) { A.publicar(titulo: "T", corpo: "\n\n") }
     assert_raises(E::Recusado) { A.publicar(titulo: "T", corpo: "olha segredo-auth-123") }
+  end
+
+  # ── O que SAI para o X precisa passar pela conferência, não só o texto visível ──
+  #
+  # O texto visível é uma das coisas enviadas; a URL do link é OUTRA, e mora no `entity_map`.
+  # Conferir só `texto_cheio` deixava passar `[doc](https://x.com/a?auth_token=segredo-auth-123)`.
+  # A conferência roda sobre o JSON do `content_state` inteiro — é o que de fato vai no corpo do
+  # POST — e ANTES da trava local e da rede (contador de chamadas em zero é a prova).
+  test "segredo na URL do link e recusado ANTES de qualquer chamada" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    Fetcher::HostRateLimiter.expects(:exceeded?).never
+    erro = assert_raises(E::Recusado) do
+      A.publicar(titulo: "T", corpo: "olha o [doc](https://a.example/?auth_token=segredo-auth-123) da casa")
+    end
+    assert_match(/valor da sessão do X/, erro.message)
+  end
+
+  test "segredo na URL com user:senha@host tambem e recusado antes da rede" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    erro = assert_raises(E::Recusado) do
+      A.publicar(titulo: "T", corpo: "[repo](https://segredo-auth-123:senha@a.example/x)")
+    end
+    assert_match(/valor da sessão do X/, erro.message)
+  end
+
+  # O caminho de continua: um link NORMAL (sem segredo na URL) tem de passar e chegar inteiro na
+  # terceira chamada. A conferência não pode ser o que impede o artigo de existir.
+  test "link sem segredo na URL passa e a entidade chega no content_state enviado" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, **|
+      url.include?("ArticleEntityUpdateContent") &&
+        json["variables"]["content_state"]["entity_map"].first["value"]["data"]["url"] == "https://a.example/ok?x=1" &&
+        json["variables"]["content_state"]["blocks"].first["entity_ranges"] == [{ "key" => 0,
+                                                                                 "offset" => 5,
+                                                                                 "length" => 5 }]
+    end.returns(conteudo("42"))
+    passo("ArticleEntityPublish", publicado("42", "77"))
+    assert_equal "77", A.publicar(titulo: "T", corpo: "veja [o doc](https://a.example/ok?x=1)")["tweet_id"]
+  end
+
+  # ── Falha parcial: o rascunho já existe no X e a retomada tem de ser possível ──
+  #
+  # Sem isto, quem re-executa a task depois de uma falha no passo 3 cria OUTRO rascunho e publica
+  # o artigo duas vezes. A mensagem de erro precisa dizer o que ficou e como voltar.
+
+  test "falha no 3o passo: a mensagem carrega o id do rascunho e o caminho de retomada" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", ok('{"data":{}}'))
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/rascunho 42 ja criado/, erro.message)
+    assert_match(/RASCUNHO=42/, erro.message)
+    assert_match(/publicaria duplicado/, erro.message)
+  end
+
+  # No `Incerto` do publish o pedido PODE ter chegado ao X: a dica de retomar precisa dizer isso,
+  # senão o "RASCUNHO=" vira convite a publicar o segundo.
+  test "falha incerta no publish avisa que pode ja ter publicado e ainda da a retomada" do
+    passo("ArticleEntityDraftCreate", draft("42"))
+    passo("ArticleEntityUpdateTitle", titulo("42"))
+    passo("ArticleEntityUpdateContent", conteudo("42"))
+    Fetcher::SafeHttpClient.stubs(:post).with { |url, **| url.include?("ArticleEntityPublish") }
+                           .raises(Fetcher::SafeHttpClient::BodyTooLarge, "corpo grande demais")
+    erro = assert_raises(E::Incerto) { A.publicar(titulo: "T", corpo: "C") }
+
+    assert_match(/pode JA ter acontecido no X/, erro.message)
+    assert_match(/RASCUNHO=42/, erro.message)
+  end
+
+  # O primeiro passo é o único em que NADA ficou: uma dica de retomar ali seria mentira, e o id
+  # que ela carregaria nem existe.
+  test "falha no 1o passo nao sugere retomar: nao ha rascunho para retomar" do
+    passo("ArticleEntityDraftCreate", ok('{"data":{}}'))
+    erro = assert_raises(E::ResponseError) { A.publicar(titulo: "T", corpo: "C") }
+
+    refute_match(/RASCUNHO=/, erro.message)
+  end
+
+  test "retomar com RASCUNHO=42 nao cria segundo rascunho: tres chamadas, o id do rascunho dado" do
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.include?("ArticleEntityDraftCreate") }.never
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, **|
+      url.include?("ArticleEntityUpdateTitle") && json["variables"]["articleEntityId"] == "42"
+    end.returns(titulo("42"))
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, **|
+      url.include?("ArticleEntityUpdateContent") && json["variables"]["article_entity"] == "42"
+    end.returns(conteudo("42"))
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, **|
+      url.include?("ArticleEntityPublish") && json["variables"]["articleEntityId"] == "42"
+    end.returns(publicado("42", "77"))
+
+    assert_equal({ "id" => "42", "tweet_id" => "77", "url" => "https://x.com/i/status/77" },
+                 A.publicar(titulo: "T", corpo: "C", rascunho: "42"))
+  end
+
+  # A retomada NÃO pode furar a conferência de segredo nem a trava: ela roda antes da rede, como
+  # no caminho normal.
+  test "retomar com RASCUNHO= nao pula a conferencia de vazamento" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    assert_raises(E::Recusado) { A.publicar(titulo: "T", corpo: "[doc](https://a.example/?t=segredo-auth-123)",
+                                             rascunho: "42") }
+  end
+
+  test "RASCUNHO que nao sao digitos e recusado com ArgumentError, sem rede" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    ["", "abc", "42; DROP", "42 "].each do |invalido|
+      erro = assert_raises(ArgumentError, "aceitou #{invalido.inspect}") do
+        A.publicar(titulo: "T", corpo: "C", rascunho: invalido)
+      end
+      assert_match(/digitos/, erro.message)
+    end
   end
 
   test "rascunho sem rest_id nao publica nada: ResponseError no primeiro passo" do
