@@ -43,6 +43,31 @@ module Fetcher
       FALHAS_POS_ENVIO = [Net::ReadTimeout, Net::WriteTimeout, Timeout::Error, Errno::ECONNRESET,
                           Errno::EPIPE, EOFError].freeze
 
+      # ── A BARREIRA DE RETOMADA DA ESCRITA ─────────────────────────────────────
+      #
+      # Regra da casa, e ela é sobre o QUE A CASA SABE, não sobre o que o X quis dizer:
+      #
+      #   **escrita 2xx sem id utilizável = POSSIVELMENTE FEITO. Confira antes de repetir.**
+      #
+      # A 2xx chega depois do envio: o X recebeu o pedido e respondeu. Se o corpo não traz o id
+      # utilizável (não é JSON, ou o JSON não tem `rest_id`/`tweet_results`), a casa não tem como
+      # dizer que a ação NÃO saiu — e reportar isso como "falhou" é afirmar o que não se sabe.
+      # Repetir às cegas aqui é DESTRUTIVO no X: o `postar` cria OUTRO post, o `editar` cria
+      # OUTRA VERSÃO do mesmo post (cada edição gasta uma das `.allowed` da janela do Premium), e
+      # o `curtir`/`repostar` repetem o efeito. Por isso os dois lados ficam `Incerto` — a mesma
+      # classe da falha de rede depois do envio (`falha_de_rede!`), que é a mesma dúvida com o
+      # corpo a menos — e não um tipo novo: o porteiro do experimento-x JÁ conta `erro:Incerto`
+      # como "pode ter chegado ao X".
+      #
+      # O que NÃO entra aqui: código de RECUSA/RESTRIÇÃO do X (186, 187, 226...), 401/403, 429 e
+      # falha local antes do envio. Nesses o X disse que não fez, e mandar conferir seria treinar
+      # o operador a ignorar o aviso.
+      AVISO_PODE_TER_SAIDO = "pode TER saido no X; confira o post ANTES de repetir"
+      # O custo de repetir às cegas, por ação. `postar` e `editar` é que duplicam de verdade: o
+      # postar cria OUTRO post e o editar outra VERSÃO do mesmo post.
+      CUSTO_REPETIR_POSTAR = "repetir as cegas cria OUTRO post"
+      CUSTO_REPETIR_EDITAR = "repetir as cegas cria OUTRA versao do post (nova edicao na janela)"
+
       class Error < ::Fetcher::Channels::Error; end
       class Recusado < Error; end
       class RateLimited < Error; end
@@ -71,11 +96,13 @@ module Fetcher
         end
         dados = graphql!("CreateTweet", variaveis, features: XConversation::FEATURES)
         resultados = dados.dig("data", "create_tweet", "tweet_results")
-        # `tweet_results: {}` com HTTP 200: o X engoliu o post sem erro (supressão da conta).
-        raise Restrito, "CreateTweet: X devolveu tweet_results vazio (post suprimido)" if resultados == {}
-
+        # `tweet_results: {}` com HTTP 200: o X engoliu o post sem erro. Isto NAO e "falhou": a
+        # 2xx prova que o pedido chegou, e sem o `tweet_results` a casa não sabe se o post saiu —
+        # então sai como Incerto, com o aviso de conferir. Repetir às cegas aqui criava OUTRO
+        # post do mesmo texto no X.
         id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
-        raise ResponseError, "CreateTweet sem rest_id na resposta" if id.nil?
+        raise Incerto, "CreateTweet: #{CUSTO_REPETIR_POSTAR} (#{resultados.inspect}); #{AVISO_PODE_TER_SAIDO}" if
+          id.nil?
 
         { "id" => id.to_s, "url" => "https://x.com/i/status/#{id}" }
       end
@@ -93,10 +120,11 @@ module Fetcher
       def repostar(id:)
         dados = graphql!("CreateRetweet", { "tweet_id" => id.to_s, "dark_request" => false })
         resultados = dados.dig("data", "create_retweet", "retweet_results")
-        raise Restrito, "CreateRetweet: X devolveu retweet_results vazio (repost suprimido)" if resultados == {}
-
+        # Mesma barreira do `postar`: `retweet_results: {}` (ou sem `rest_id`) com 2xx é o X
+        # engolindo a chamada, não o X dizendo que não repostou. Repetir aqui refaz o repost.
         repost_id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
-        raise ResponseError, "CreateRetweet sem rest_id do repost na resposta" if repost_id.nil?
+        raise Incerto, "CreateRetweet: repetir as cegas refaz o repost (#{resultados.inspect}); " \
+                       "#{AVISO_PODE_TER_SAIDO}" if repost_id.nil?
 
         { "id" => id.to_s }
       end
@@ -116,7 +144,7 @@ module Fetcher
                                                  method: "POST", path: FOLLOW_PATH)
         resposta = SafeHttpClient.post("https://#{COOKIE_DOMAIN}#{FOLLOW_PATH}",
                                        form: { "user_id" => usuario_id.to_s }, headers: headers)
-        dados = interpreta!(resposta, "friendships/create")
+        dados = interpreta!(resposta, "friendships/create", escrita: true)
         unless dados["id_str"].to_s == usuario_id.to_s
           raise ResponseError, "friendships/create: resposta não traz o usuário #{usuario_id}"
         end
@@ -136,7 +164,10 @@ module Fetcher
           SafeHttpClient.post("https://#{COOKIE_DOMAIN}/i/api/graphql/#{query_id}/#{operacao}",
                               json: corpo, headers: headers)
         end
-        interpreta!(resposta, operacao)
+        # `escrita: true`: este `graphql!` é o caminho das MUTAÇÕES (CreateTweet, CreateRetweet,
+        # DeleteTweet, FavoriteTweet). Um 2xx sem JSON aqui é o mesmo `Incerto` da falha de rede
+        # depois do envio, não um "corpo não é JSON" calado.
+        interpreta!(resposta, operacao, escrita: true)
       rescue SafeHttpClient::Error, SsrfGuard::Blocked => e
         falha_de_rede!(e, operacao)
       end
@@ -182,7 +213,13 @@ module Fetcher
       end
 
       # O X manda erro de negócio em `errors[]` até com HTTP 200: os códigos vêm antes do status.
-      def interpreta!(resposta, operacao)
+      #
+      # `escrita:` é o que separa "não sei se saiu" de "falhou". Numa LEITURA um 2xx sem JSON é
+      # só um `ResponseError`: nada foi criado no X, não há o que conferir, e avisar ali seria
+      # treinar o operador a ignorar o aviso. Numa ESCRITA a 2xx veio DEPOIS do envio — o X
+      # recebeu o pedido e respondeu sem o id utilizável, e a casa não pode afirmar que a ação
+      # não saiu (ver a regra em `AVISO_PODE_TER_SAIDO`).
+      def interpreta!(resposta, operacao, escrita: false)
         dados = begin
           JSON.parse(resposta.body.to_s)
         rescue JSON::ParserError
@@ -201,7 +238,19 @@ module Fetcher
         when 401, 403 then raise AuthError, "#{operacao}: HTTP #{resposta.status} (sessão/txid/csrf)"
         when 200..299
           raise ResponseError, "#{operacao}: erro do X: #{mensagem}" if erros.any? && dados["data"].to_h.empty?
-          raise ResponseError, "#{operacao}: corpo não é JSON" unless dados.is_a?(Hash)
+          unless dados.is_a?(Hash)
+            # 2xx sem corpo utilizável numa ESCRITA: chegou ao X e a resposta não diz o que ele
+            # fez. Não é "falhou" — e o `Incerto` diz isso na cara de quem decide repetir.
+            #
+            # O custo aqui é o do POSTAR porque a camada compartilhada não sabe que operação é.
+            # A edição é a única que repete para OUTRA VERSÃO do mesmo post, e ela corrige a
+            # frase no `XEditar#graphql_da_edicao!` (que envolve este `Incerto` e acrescenta o
+            # custo dela) — assim o aviso não mente para nenhum dos dois caminhos.
+            raise Incerto, "#{operacao}: resposta 2xx sem JSON utilizavel; #{CUSTO_REPETIR_POSTAR}; " \
+                           "#{AVISO_PODE_TER_SAIDO}" if escrita
+
+            raise ResponseError, "#{operacao}: corpo não é JSON"
+          end
 
           dados
         else raise ResponseError, "#{operacao}: HTTP #{resposta.status}"

@@ -187,23 +187,71 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
   end
 
   # 2xx CHEGOU ao X e o corpo nao confirma: `tweet_results` existe mas o `result` nao tem
-  # `rest_id`. O mesmo cuidado do Article: avisar que a edicao PODE ter saído, porque repetir
+  # `rest_id`. O mesmo cuidado do Article: avisar que a edicao PODE ter saido, porque repetir
   # às cegas edita duas vezes (e cada edicao gasta uma das.allowed do Premium).
-  test "2xx sem rest_id vira ResponseError avisando que a edicao pode ter saido" do
+  test "2xx sem rest_id vira Incerto avisando que a edicao pode ter saido" do
     Fetcher::SafeHttpClient.stubs(:post)
                            .returns(Resp.new(status: 200, body: '{"data":{"create_tweet":{"tweet_results":{"result":{}}}}}',
                                              headers: {}))
-    erro = assert_raises(E::ResponseError) { X.editar(id: "1", texto: "oi") }
+    erro = assert_raises(E::Incerto) { X.editar(id: "1", texto: "oi") }
     assert_match(/pode JA ter sido editado/, erro.message)
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
   end
 
-  # `tweet_results: {}` com 200: o X engoliu (supressao da conta) — nao e sucesso. DISTINTO do
-  # caso acima: aqui o X disse que nao postou, ali ele respondeu sem dizer o que fez.
-  test "tweet_results vazio vira Restrito (supressao)" do
+  # `tweet_results: {}` com 200: o X engoliu a chamada (supressao) — nao e sucesso. E o caminho
+  # que o codigo antigo reconhecia como "post suprimido" era o que FAZIA a barreira de retomada
+  # falhar: a edicao pode ter saido e a mensagem dizia so "suprimido", mandando repetir. Agora e
+  # o mesmo `Incerto` do caso sem `rest_id`, com o aviso de conferir — e nunca mais "so suprimido".
+  test "tweet_results vazio vira Incerto com aviso de conferir, e nao Restrito" do
     Fetcher::SafeHttpClient.stubs(:post)
                            .returns(Resp.new(status: 200, body: '{"data":{"create_tweet":{"tweet_results":{}}}}',
                                              headers: {}))
-    assert_raises(E::Restrito) { X.editar(id: "1", texto: "oi") }
+    erro = assert_raises(E::Incerto) { X.editar(id: "1", texto: "oi") }
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+    refute_match(/so o post suprimido/, erro.message)
+  end
+
+  # 2xx sem JSON: o `graphql!` do `XEscrita` levanta, e a edicao tem de reportar a duvida da MESMA
+  # forma que os outros dois ramos — E tem de dizer que e EDICAO, porque o custo de repetir aqui
+  # (outra versao) nao e o custo de repetir um postar (outro post). Sem a traducao, o operador
+  # veria o aviso generico de escrita e nao saberia o que conferir.
+  test "2xx sem JSON vira o mesmo Incerto avisando que a EDICAO pode ter saido" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {}))
+    erro = assert_raises(E::Incerto) { X.editar(id: "1", texto: "oi") }
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+    assert_includes erro.message, E::CUSTO_REPETIR_EDITAR
+    assert_includes erro.message, "conferir o post 1"
+  end
+
+  # O aviso tem de mandar a ACAO, e nao so levantar duvida: quem le e decide repetir. E o repetir
+  # que cria a OUTRA versao do post. A frase e a que o `postar` manda tambem — os dois caminhos
+  # tem de falar a mesma coisa, senao o operador aprende que so a edicao exige conferir.
+  test "o aviso manda conferir o post ANTES de repetir, e diz o custo de repetir as cegas" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: '{"data":{"create_tweet":{"tweet_results":{}}}}',
+                                             headers: {}))
+    erro = assert_raises(E::Incerto) { X.editar(id: "1", texto: "oi") }
+    assert_match(/confira o post ANTES de repetir/, erro.message)
+    assert_includes erro.message, E::CUSTO_REPETIR_EDITAR
+    assert_includes erro.message, "conferir o post 1"
+    refute_match(/tente de novo|repita agora/i, erro.message)
+  end
+
+  # Os tres ramos tem de ser INDISTINGUEIS pelo resultado: mesma classe, mesmo aviso. O que muda
+  # entre eles e o que o X respondeu, nao o que a casa pode concluir.
+  test "os tres ramos de 2xx sem id saem com a mesma classe e o mesmo aviso" do
+    corpos = {
+      "sem JSON" => "<html>erro do proxy</html>",
+      "JSON sem rest_id" => '{"data":{"create_tweet":{"tweet_results":{"result":{}}}}}',
+      "tweet_results vazio" => '{"data":{"create_tweet":{"tweet_results":{}}}}'
+    }
+    classes = corpos.map do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Incerto, nome) { X.editar(id: "1", texto: "oi") }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, nome
+      erro.class
+    end
+    assert_equal 1, classes.uniq.length
   end
 
   # ── queryId velho: o mecanismo do repo, sem id fixo ──────────────────────────

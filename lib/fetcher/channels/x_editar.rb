@@ -115,22 +115,20 @@ module Fetcher
           "media" => { "media_entities" => [], "possibly_sensitive" => false },
           "semantic_annotation_ids" => []
         }
-        dados = E.graphql!(OPERACAO, variaveis, features: Fetcher::Channels::XConversation::FEATURES)
+        dados = graphql_da_edicao!(id, variaveis)
         resultados = dados.dig("data", "create_tweet", "tweet_results")
-        # `tweet_results: {}` com HTTP 200: o X engoliu a chamada sem erro. Numa edição isso
-        # significa que o texto novo pode ter saído (e o post virado outra versão) sem a casa
-        # ter o id: o `Restrito` é a mesma supressão que o `postar` reconhece, e a mensagem de
-        # quem chamou tem de conferir o post antes de repetir.
-        raise E::Restrito, "CreateTweet (edicao): X devolveu tweet_results vazio (post suprimido)" if resultados == {}
-
         id_novo = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
-        # 2xx SEM rest_id é o caminho que chegou ao X e nao confirma: o X pode ter editado. A
-        # mensagem diz isso, porque repetir às cegas edita duas vezes (e o `Incerto`, do
-        # `XEscrita`, é o mesmo cuidado para a falha de rede depois do envio).
-        if id_novo.nil?
-          raise E::ResponseError, "CreateTweet (edicao): X nao devolveu rest_id do texto novo " \
-                                  "(o post #{id} pode JA ter sido editado; confira antes de repetir)"
-        end
+        # 2xx SEM id utilizável é o caminho que CHEGOU ao X e não confirma. São três formas do
+        # MESMO caso, e as três são `Incerto` (e não "falhou", e não "post suprimido"):
+        #   - corpo que nem é JSON           → levantado no `XEscrita#interpreta!`, com o aviso;
+        #   - JSON sem `rest_id` no `result` → o X respondeu e não disse o texto novo;
+        #   - `tweet_results: {}`            → o X engoliu a chamada sem erro.
+        # O comentário antigo do `tweet_results: {}` admitia isto mesmo ("o texto novo pode ter
+        # saído") e mesmo assim a mensagem dizia só "post suprimido", mandando o operador
+        # repetir — e repetir às cegas edita DUAS vezes, criando OUTRA VERSÃO do post (cada
+        # edição gasta uma das `.allowed` da janela do Premium).
+        incerto_de_edicao!(id, "X nao devolveu rest_id do texto novo, entao o post #{id} " \
+                               "pode JA ter sido editado (veio #{resultados.inspect})") if id_novo.nil?
 
         estado = estado_edit_control(dados.dig(*CAMINHO_EDIT_CONTROL))
         {
@@ -139,6 +137,25 @@ module Fetcher
           "url" => "https://x.com/i/status/#{id_novo}"
         }.merge(estado)
       end
+
+      # A mutação da edição, com o `Incerto` JÁ traduzido para "edição": o `XEscrita#graphql!`
+      # levanta o aviso genérico de escrita (que fala em "post"), e quem recebeu aquilo não sabe
+      # que a repetição vai criar OUTRA VERSÃO do MESMO post — que é o custo específico deste
+      # caminho, e o que o aviso tem de dizer. O `id` entra na mensagem porque é o post a conferir.
+      def graphql_da_edicao!(id, variaveis)
+        E.graphql!(OPERACAO, variaveis, features: Fetcher::Channels::XConversation::FEATURES)
+      rescue E::Incerto => e
+        raise e.class, "#{e.message} | #{custo_repetir_editar(id)}"
+      end
+
+      # O `Incerto` da edição: o mesmo de sempre (falha de rede depois do envio, ou 2xx sem id
+      # utilizável), mas com o texto que diz o que o operador tem de fazer — e o custo real na
+      # edição, que é o que o `postar` não tem.
+      def incerto_de_edicao!(id, detalhe)
+        raise E::Incerto, "CreateTweet (edicao): #{detalhe}; #{custo_repetir_editar(id)}; #{E::AVISO_PODE_TER_SAIDO}"
+      end
+
+      def custo_repetir_editar(id) = "#{E::CUSTO_REPETIR_EDITAR} (conferir o post #{id})"
 
       # O `edit_control` que volta na mutação tem TRÊS formas no cliente do X, e o próprio
       # bundle as normaliza para uma só (main.d0bb33e09c6a2565a.js, medido):

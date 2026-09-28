@@ -185,21 +185,101 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     end
   end
 
-  test "curtir, repostar e apagar sem o campo de resultado viram ResponseError" do
-    { curtir: '{"data":{"favorite_tweet":"NotDone"}}', repostar: '{"data":{"create_retweet":{}}}',
-      apagar: '{"data":{}}' }.each do |acao, corpo|
+  # AJUSTE DE 28/09 (fechando o REPROVADO do editar, card t_dabd8768): o `repostar` saiu daqui.
+  # Este teste cristalizava o comportamento VELHO — 2xx sem id utilizável como `ResponseError`,
+  # que é "falhou, pode repetir". Repetir às cegas refazia o repost e a casa afirmava o que
+  # não sabe: a 2xx prova que o pedido chegou ao X, e sem `retweet_results` não há como dizer que
+  # o repost NÃO saiu. Agora é `Incerto` com o aviso de conferir (ver o bloco "RESPOSTA CHEGOU E NAO
+  # CONFIRMA" mais abaixo, que cobre os três ramos do repostar). O `curtir` e o `apagar` seguem
+  # `ResponseError`: os dois conferem o resultado SEMPRE (nenhum deles tem ramo de sucesso sem
+  # confirmação), e não são o caminho que duplica post.
+  test "curtir e apagar sem o campo de resultado continuam ResponseError" do
+    { curtir: '{"data":{"favorite_tweet":"NotDone"}}', apagar: '{"data":{}}' }.each do |acao, corpo|
       Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
       assert_raises(E::ResponseError, "#{acao} aceitou #{corpo}") { E.public_send(acao, id: "1") }
     end
   end
 
-  test "resultado vazio no CreateTweet e no CreateRetweet vira Restrito (supressao)" do
+  # ── RESPOSTA CHEGOU E NÃO CONFIRMA: pode ter saido, e repetir as cegas duplica ──
+  #
+  # O `Incerto` ja cobre a resposta que PERDEU depois do envio (`falha_de_rede!`). A 2xx sem id
+  # utilizavel e o outro lado da MESMA duvida: o X respondeu 200, o pedido saiu, e o corpo nao diz
+  # o que ele fez com ele. Reportar isso como "falhou" e afirmar o que nao se sabe, e repetir as
+  # cegas cria OUTRA versao do post no X. Por isso os tres ramos (sem JSON, JSON sem `rest_id`,
+  # `tweet_results` vazio) saem como `Incerto` com o mesmo aviso — e `Incerto` e nao um tipo novo
+  # porque o porteiro JA conta `erro:Incerto` como "pode ter chegado ao X".
+  test "2xx sem JSON no postar vira Incerto mandando conferir o post antes de repetir" do
     Fetcher::SafeHttpClient.stubs(:post)
-                           .returns(Resp.new(status: 200, body: '{"data":{"create_tweet":{"tweet_results":{}}}}', headers: {}))
-    assert_raises(E::Restrito) { E.postar(texto: "oi") }
+                           .returns(Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {}))
+    erro = assert_raises(E::Incerto) { E.postar(texto: "oi") }
+    assert_match(/pode TER saido no X/, erro.message)
+    assert_match(/confira o post ANTES de repetir/, erro.message)
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+  end
+
+  test "2xx sem JSON no responder e a mesma duvida do postar" do
     Fetcher::SafeHttpClient.stubs(:post)
-                           .returns(Resp.new(status: 200, body: '{"data":{"create_retweet":{"retweet_results":{}}}}', headers: {}))
-    assert_raises(E::Restrito) { E.repostar(id: "1") }
+                           .returns(Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {}))
+    erro = assert_raises(E::Incerto) { E.postar(texto: "oi", em_resposta_a: "42") }
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+  end
+
+  # Os TRES ramos de uma vez, no postar e no responder: a classe e a frase tem de ser as mesmas,
+  # senao o operador aprende que "vazio" e falha normal e "sem rest_id" e que precisa conferir.
+  test "2xx sem id utilizavel e sempre o mesmo Incerto, com o mesmo aviso, no postar e no responder" do
+    corpos = {
+      "2xx sem JSON" => "<html>erro do proxy</html>",
+      "JSON sem rest_id" => '{"data":{"create_tweet":{"tweet_results":{"result":{}}}}}',
+      "tweet_results vazio" => '{"data":{"create_tweet":{"tweet_results":{}}}}'
+    }
+    corpos.each do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      [{}, { em_resposta_a: "42" }].each do |extra|
+        erro = assert_raises(E::Incerto, "postar #{nome} #{extra}") { E.postar(texto: "oi", **extra) }
+        assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "postar #{nome} #{extra}"
+        refute_kind_of E::Restrito, erro, "#{nome} #{extra} nao pode dizer so 'suprimido'"
+      end
+    end
+  end
+
+  test "no repostar os mesmos tres ramos tambem sao Incerto" do
+    corpos = {
+      "2xx sem JSON" => "<html>erro do proxy</html>",
+      "sem rest_id do repost" => '{"data":{"create_retweet":{"retweet_results":{"result":{}}}}}',
+      "retweet_results vazio" => '{"data":{"create_retweet":{"retweet_results":{}}}}'
+    }
+    corpos.each do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Incerto, "repostar #{nome}") { E.repostar(id: "1") }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "repostar #{nome}"
+      refute_kind_of E::Restrito, erro, "repostar #{nome}"
+    end
+  end
+
+  # O conserto e na camada COMPARTILHADA, entao vale para toda escrita, nao so para o postar:
+  # aqui o `curtir` e o exemplo, e o aviso e o mesmo.
+  test "o aviso e o mesmo em qualquer escrita 2xx sem id, e nao so no postar" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: "", headers: {}))
+    erro = assert_raises(E::Incerto) { E.curtir(id: "1") }
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+  end
+
+  # A metrica do aviso: a resposta tem de mandar conferIR, e nao apenas avisar que houve duvida.
+  test "o aviso de 2xx sem id diz o que fazer: conferir antes de repetir" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {}))
+    erro = assert_raises(E::Incerto) { E.postar(texto: "oi") }
+    refute_match(/tente de novo|repita agora|so tent(e|ar) de novo/i, erro.message)
+    assert_includes erro.message, E::CUSTO_REPETIR_POSTAR
+  end
+
+  # LEITURA e o outro lado: `XConta` passa pelo mesmo `interpreta!` e nao tem post para conferir,
+  # nem nada criado no X. A diferença e o `escrita:` que o chamador passa — sem ele, o 2xx sem
+  # JSON continua `ResponseError` calado, como antes.
+  test "2xx sem JSON de uma LEITURA continua ResponseError, sem aviso de conferir" do
+    resposta = Resp.new(status: 200, body: "<html>erro do proxy</html>", headers: {})
+    erro = assert_raises(E::ResponseError) { E.interpreta!(resposta, "UserByScreenName") }
+    refute_kind_of E::Incerto, erro
+    refute_includes erro.message, "confira o post"
   end
 
   # ── Minors 1-2: códigos ──────────────────────────────────────────────────────

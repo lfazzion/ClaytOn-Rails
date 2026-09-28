@@ -54,6 +54,22 @@
   - Medido (28/09): as duas operações não estão no `main` nem em bundle com preload — vivem no chunk sob demanda
     `shared~...~bundle.HomeTimeline~...`, achado pelo mapa nome/hash do webpack no HTML de `x.com/home`
     (`XQueryIdResolver::LAZY_CHUNK_HINTS`). `RefreshXQueryIdsJob` renova as 9 operações.
+- **[2026-09-28]** Barreira de retomada da escrita no X (regra da casa, `Channels::XEscrita`/`XEditar`):
+  **escrita 2xx sem id utilizável = POSSIVELMENTE FEITO — confira antes de repetir.** A 2xx prova
+  que o pedido chegou ao X; se o corpo não traz `rest_id`/`tweet_results`, a casa não pode dizer
+  que a ação NÃO saiu, e reportar "falhou" manda o operador repetir às cegas — o que cria OUTRO
+  post (`postar`) ou OUTRA VERSÃO do mesmo post (`editar`, gastando uma das `.allowed` da janela
+  Premium). Reporta como `Incerto` (a mesma classe da falha de rede depois do envio) com
+  `AVISO_PODE_TER_SAIDO` + o custo de repetir, nunca como falha.
+  - Onde mora: `XEscrita::AVISO_PODE_TER_SAIDO`/`CUSTO_REPETIR_POSTAR`/`CUSTO_REPETIR_EDITAR`;
+    `XEscrita#interpreta!(..., escrita: true)` (o 2xx sem JSON), `#postar` (sem `rest_id` e
+    `tweet_results` vazio) e `#repostar`. A LEITURA (`XConta`) segue `ResponseError`: não criou
+    nada no X, e avisar ali treina o operador a ignorar o aviso. `XEditar#graphql_da_edicao!`
+    traduz o aviso para o custo da edição (outra versão) e cita o id a conferir.
+  - Testes que cristalizavam o comportamento VELHO e foram ajustados (o comportamento errado era
+    "falhou", não "posivelmente feito"): `repostar` 2xx sem `retweet_results` era `ResponseError`
+    em x_escrita_test.rb; `tweet_results: {}` na edição era `Restrito` ("post suprimido") em
+    x_editar_test.rb. Motivo: nenhuma das duas mensagens mandava conferir antes de repetir.
 - **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
   - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
   - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
@@ -292,6 +308,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
+| 2026-09-28 | Regra da casa "escrita 2xx sem id utilizável = possivelmente feito; conferir antes de repetir" (card t_dabd8768, fechando o REPROVADO do editar): `XEscrita` 2xx sem JSON/sem `rest_id`/`tweet_results` vazio e `XEditar` 2xx sem id passam a sair como `Incerto` com o aviso e o custo de repetir, no postar, responder, repostar e editar. **Motivo:** antes, dois desses ramos diziam "falhou"/"post suprimido" sem aviso, e repetir às cegas criava outro post ou outra versão do post. Registrou-se também quais testes cristalizavam o comportamento velho (`repostar` e `tweet_results: {}` na edição) e por que foram ajustados. | Padrões Sistêmicos Ratificados |
 | 2026-09-26 | Causa medida do card t_f63b3613: por que o canal do Reddit navegou old.reddit 65x em 90 min num alvo que responde 403 em 0,025s. A regra 4 do AGENTS.md (backoff 6-12h) está INERTE nesse caminho por três furos independentes — `RateLimitHandler` com ZERO call sites em `lib/fetcher`, `BotDetection.cooldown!` lido só por `PageFetcher#call` (que o canal não usa), e o 403 real chegando como `RenderTimeout(35s)` em 6/6 chamadas, que não casa com nenhum padrão de backoff. **Ainda não corrigido** (o card mandou medir a causa primeiro). Registrado também o achado que corrige um FATO do card: o Chrome do container não tem `--proxy-server` e o bloqueio é do IP da VM, não do `SCRAPING_PROXY`. 12 provas em `scripts/proofs/`, commit `6980313`. | Lições Aprendidas de Bugs Recorrentes |
 | 2026-09-26 | Quatro bloqueantes da revisão A do #205 fechados (card t_ab1dd082) — detalhado na seção de Lições Aprendidas. |
 | 2026-09-26 | [CORRIGIDO em 26/09/2026, card t_ab1dd082] A entrada do item 3 do #205 afirmava, na coluna "resolvido", um "segundo teto estático, o número de bundles" (`CORE_CHUNK_PATTERNS.size + 1`) que **NÃO EXISTE no código** — o filtro é um `select` por nome, e o número de bundles não é limitado (medido: 50 URLs de um padrão passam todas, 408s). A coluna do "o que causou" mantinha "pior caso REAL (estático) é 31 requisições x 8s = 248s", que é um PISO vendido como teto; e a regra geral não dizia que contagem de permitidos não é teto. As três foram corrigidas no texto, com o resultado da medição, e a entrada do item 3 foi marcada `[CORRIGIDO em 26/09/2026]`. | Lições Aprendidas de Bugs Recorrentes |
