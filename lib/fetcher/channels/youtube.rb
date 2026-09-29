@@ -167,21 +167,76 @@ module Fetcher
           raise CookieJar::Expired, COOKIE_DOMAIN
         end
 
+        ID_VIDEO = /\A[A-Za-z0-9_-]{11}\z/
+
+        # Id de vídeo a partir de id cru ou link; recusa o resto ANTES de gastar rede.
+        def video_id!(entrada)
+          bruto = entrada.to_s.strip
+          id = bruto.match?(ID_VIDEO) ? bruto : video_id_from(bruto)
+          raise ArgumentError, "id de vídeo do YouTube inválido: #{bruto[0, 80].inspect}" unless id.to_s.match?(ID_VIDEO)
+
+          id
+        end
+
+        # Página inicial de recomendações da conta (`:ytrec`), só a lista — não abre vídeo nenhum.
+        def feed(limit: 20)
+          n = [[limit.to_i, 1].max, MAX_RESULTADOS].min
+          raise RateLimited, COOKIE_DOMAIN if HostRateLimiter.exceeded?(COOKIE_DOMAIN, max: MAX_PER_WINDOW)
+
+          cookies, = SessionCookies.for(COOKIE_DOMAIN)
+          CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) do |caminho|
+            lista(":ytrec", n, caminho).map { |item| para_agente(item) }
+          end
+        end
+
+        # Transcrição + marca como assistido (histórico da conta treina as recomendações).
+        def assistir(url:)
+          id = video_id!(url)
+          link = "https://www.youtube.com/watch?v=#{id}"
+          cookies, origem = SessionCookies.for(COOKIE_DOMAIN)
+          r = Dir.mktmpdir("ytdlp") do |dir|
+            info = CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) do |cookie_path|
+              resultado = run(link, dir, cookie_path, mark_watched: true)
+              verify_session!(cookie_path)
+              if origem == :jar
+                CookieJar.refresh_from_netscape!(domain: COOKIE_DOMAIN, path: cookie_path, auth_cookies: AUTH_COOKIES)
+              end
+              resultado
+            end
+            build_from(dir: dir, url: link, info: info)
+          end
+          m = r[:metadata]
+          { "id" => m["video_id"].presence || id, "titulo" => r[:title], "canal" => m["channel"],
+            "idioma" => m["lang"], "automatica" => m["auto_generated"], "texto" => r[:content] }
+        end
+
+        # Item de `search`/`feed` (forma interna) -> forma do agente.
+        def para_agente(item)
+          id = item["url"].to_s[/[?&]v=([A-Za-z0-9_-]{11})/, 1]
+          { "id" => id, "titulo" => item["title"], "canal" => item["channel"],
+            "duracao" => item["duration_seconds"], "url" => item["url"] }
+        end
+
         private
 
         def resultados(termo, n, cookie_path)
+          lista("ytsearch#{n}:#{termo}", nil, cookie_path)
+        end
+
+        def lista(fonte, n, cookie_path)
           comando = [
             "yt-dlp", "--no-update", "--quiet", "--no-warnings", "--flat-playlist",
             "--ignore-no-formats-error", "--cookies", cookie_path,
-            "--print", "%(id)s\t%(title)s\t%(channel)s\t%(duration)s",
-            "--socket-timeout", "15", "ytsearch#{n}:#{termo}"
+            "--print", "%(id)s\t%(title)s\t%(channel)s\t%(duration)s", "--socket-timeout", "15"
           ]
+          comando += ["--playlist-end", n.to_s] if n
+          comando << fonte
           out, err, = Timeout.timeout(YTDLP_TIMEOUT) { Open3.capture3(*comando) }
           raise CookieJar::Expired, COOKIE_DOMAIN if sessao_rejeitada?(err)
 
           out.to_s.lines.filter_map { |linha| linha_para_item(linha) }
         rescue Timeout::Error
-          raise NoTranscript, "busca do YouTube não respondeu em #{YTDLP_TIMEOUT}s"
+          raise NoTranscript, "YouTube não respondeu em #{YTDLP_TIMEOUT}s (#{fonte})"
         end
 
         def linha_para_item(linha)
@@ -242,16 +297,16 @@ module Fetcher
         # Passe 2: estendido (all) SOMENTE se passe 1 não produziu legenda válida com conteúdo.
         # Tolerância por faixa: falha em uma faixa (429, 403) não aborta o run se algo foi baixado.
         # Timeout total compartilhado de 30s (YTDLP_TIMEOUT).
-        def run(url, dir, cookie_path)
+        def run(url, dir, cookie_path, mark_watched: false)
           inicio = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-          info = exec_download_subs(dir, cookie_path, url, PASSE_1_LANGS, YTDLP_TIMEOUT)
+          info = exec_download_subs(dir, cookie_path, url, PASSE_1_LANGS, YTDLP_TIMEOUT, mark_watched: mark_watched)
 
           unless tem_legenda_valida?(dir, info)
             gasto = Process.clock_gettime(Process::CLOCK_MONOTONIC) - inicio
             restante = YTDLP_TIMEOUT - gasto
             if restante > 0
-              info2 = exec_download_subs(dir, cookie_path, url, "all", restante)
+              info2 = exec_download_subs(dir, cookie_path, url, "all", restante, mark_watched: mark_watched)
               info = info2 if (info.nil? || info.empty?) && info2.present?
             end
           end
@@ -259,8 +314,8 @@ module Fetcher
 info || { "id" => video_id_from(url) }
         end
 
-        def exec_download_subs(dir, cookie_path, url, langs, timeout)
-          download_subs(dir, cookie_path, url, langs, timeout)
+        def exec_download_subs(dir, cookie_path, url, langs, timeout, mark_watched: false)
+          download_subs(dir, cookie_path, url, langs, timeout, mark_watched: mark_watched)
 rescue YtdlpError => e
           # Falha de UMA faixa (429, 403, vazio) NUNCA aborta o run: pular e seguir;
           # YtdlpError so se NADA foi baixado.
@@ -282,10 +337,11 @@ text.present?
 
         # Uma chamada do yt-dlp para o `dir` informado. A escolha do budget
         # é do chamador. Timeout::Error é convertido em NoTranscript.
-        def download_subs(dir, cookie_path, url, langs, timeout)
+        def download_subs(dir, cookie_path, url, langs, timeout, mark_watched: false)
           command = [
             "yt-dlp", "--no-update", "--skip-download", "--ignore-no-formats-error",
             "--no-progress", "--no-warnings", "--quiet", "--no-simulate",
+            *("--mark-watched" if mark_watched),
             "--write-subs", "--write-auto-subs", "--sub-format", "json3/vtt/srt/best",
             "--sub-langs", langs,
             "--print", INFO_TEMPLATE, "--cookies", cookie_path,
