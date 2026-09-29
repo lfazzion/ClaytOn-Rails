@@ -3,6 +3,7 @@
 # Leitura e escrita no X por linha de comando (usada pelo agente Hermes e pelo porteiro do
 # experimento-x; lógica em Fetcher::XLeitura, Fetcher::Channels::XEscrita/XConta e Fetcher::XComando).
 #   bin/rails x:buscar CONSULTAS=arquivo|- [LIMITE=20]     -> uma linha JSON por consulta
+#   bin/rails x:ler URL=<url>                                   -> {"url","titulo","texto","caracteres_total","truncado"}
 #   bin/rails x:conversa ID=<id ou link> [LIMITE=40] [FORMATO=texto|json]
 #   bin/rails x:postar TEXTO=-|arquivo [RESPOSTA_A=<id|link>]  -> {"id","url"}
 #   bin/rails x:curtir ID=<id|link>                             -> {"id"}
@@ -27,6 +28,13 @@ namespace :x do
     resultados.each { |r| puts JSON.generate(r) }
     falhas = resultados.count { |r| r["erro"] }
     abort "x:buscar: #{falhas} de #{resultados.size} consulta(s) falharam (campo erro)" if falhas.positive?
+  end
+
+  desc "Abre uma pagina da web pelo SafeHttpClient: URL=<url> -> {url,titulo,texto,caracteres_total,truncado}"
+  task ler: :environment do
+    exit Fetcher::XComando.executa {
+      Fetcher::XLer.ler(url: ENV.fetch("URL") { raise ArgumentError, "uso: x:ler URL=<url>" })
+    }
   end
 
   desc "Post + comentarios do X: ID=<id ou link> [LIMITE=40] [FORMATO=texto|json]"
