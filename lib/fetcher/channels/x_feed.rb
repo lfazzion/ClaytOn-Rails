@@ -75,13 +75,13 @@ module Fetcher
         autor = autor(base)
         views = base.dig("views", "count")
         { "id" => base["rest_id"].to_s, "autor" => autor,
-          "texto" => (base.dig("note_tweet", "note_tweet_results", "result", "text") || legacy["full_text"]).to_s,
+          "texto" => XFormato.texto(base),
           "criado_em" => (Time.parse(legacy["created_at"].to_s).utc.iso8601 rescue nil),
           "impressoes" => views && Integer(views, exception: false),
           "respostas" => legacy["reply_count"], "curtidas" => legacy["favorite_count"], "reposts" => legacy["retweet_count"],
           "url" => "https://x.com/#{autor || 'i'}/status/#{base['rest_id']}",
           "e_resposta" => !legacy["in_reply_to_status_id_str"].to_s.empty?,
-          "e_repost" => !original.nil?, "repostado_por" => original && autor(tweet) }
+          "e_repost" => !original.nil?, "repostado_por" => original && autor(tweet) }.merge(XFormato.campos(base))
       end
 
       def autor(tweet)

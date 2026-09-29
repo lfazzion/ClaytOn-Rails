@@ -10,6 +10,7 @@ require_relative "../ssrf_guard"
 require_relative "x_graphql"
 require_relative "x_conversation"
 require_relative "x_escrita"
+require_relative "x_formato"
 
 module Fetcher
   module Channels
@@ -109,11 +110,11 @@ module Fetcher
       def formata(tweet)
         legacy = tweet["legacy"]
         views = tweet.dig("views", "count")
-        { "id" => tweet["rest_id"].to_s, "texto" => legacy["full_text"].to_s,
+        { "id" => tweet["rest_id"].to_s, "texto" => XFormato.texto(tweet),
           "criado_em" => (Time.parse(legacy["created_at"].to_s).utc.iso8601 rescue nil),
           "impressoes" => views && Integer(views, exception: false),
           "respostas" => legacy["reply_count"], "curtidas" => legacy["favorite_count"],
-          "reposts" => legacy["retweet_count"] }
+          "reposts" => legacy["retweet_count"] }.merge(XFormato.campos(tweet))
       end
     end
   end

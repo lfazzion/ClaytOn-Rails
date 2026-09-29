@@ -30,7 +30,8 @@ class Fetcher::Channels::XFeedTest < ActiveSupport::TestCase
       url == "https://x.com/i/api/graphql/QID/HomeTimeline" && json["queryId"] == "QID" &&
         v == { "count" => 20, "includePromotedContent" => false, "latestControlAvailable" => true,
                "requestContext" => "launch", "withCommunity" => true } &&
-        json["features"]["rweb_cashtags_enabled"] == false && headers.is_a?(Hash)
+        json["features"]["rweb_cashtags_enabled"] == false && json["features"]["articles_preview_enabled"] == true &&
+        headers.is_a?(Hash)
     end.returns(ok(fixture("home_timeline.json")))
 
     feed = F.ler(tipo: "para_voce")
@@ -41,7 +42,7 @@ class Fetcher::Channels::XFeedTest < ActiveSupport::TestCase
                    "criado_em" => "2026-09-27T22:30:08Z", "impressoes" => feed["posts"][0]["impressoes"],
                    "respostas" => 40, "curtidas" => 542, "reposts" => 50,
                    "url" => "https://x.com/conta_a/status/2104337822350221795",
-                   "e_resposta" => false, "e_repost" => false, "repostado_por" => nil }, feed["posts"][0])
+                   "e_resposta" => false, "e_repost" => false, "repostado_por" => nil, "formato" => "curto" }, feed["posts"][0])
     assert_kind_of Integer, feed["posts"][0]["impressoes"]
   end
 
@@ -49,6 +50,7 @@ class Fetcher::Channels::XFeedTest < ActiveSupport::TestCase
     Fetcher::SafeHttpClient.stubs(:post).returns(ok(fixture("home_timeline.json")))
     post = F.ler(tipo: "para_voce")["posts"].find { |p| p["id"] == "2104329978146115998" }
     assert post["texto"].end_with?("(texto longo)"), post["texto"]
+    assert_equal "longo", post["formato"]
   end
 
   test "seguindo vai em HomeLatestTimeline; conversa entra inteira, repost vira o original marcado" do
