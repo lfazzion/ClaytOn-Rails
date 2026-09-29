@@ -18,6 +18,7 @@ module Fetcher
       ondemand.HoverCard
       bundle.UserProfile
       bundle.HomeTimeline
+      bundle.Notifications
       bundle.TrendTimeline
       bundle.SettingsAccount
       bundle.SettingsSecurity
