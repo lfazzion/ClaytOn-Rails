@@ -4,6 +4,7 @@
 #   bin/rails yt:feed [LIMITE=20]                -> {"videos": [{"id","titulo","canal","duracao","url"}]}
 #   bin/rails yt:buscar CONSULTA=<texto> [LIMITE=10] -> {"videos": [...]}
 #   bin/rails yt:assistir ID=<id|link>           -> {"id","titulo","canal","idioma","automatica","texto"}
+#   bin/rails yt:curtir ID=<id|link>             -> {"id"}
 namespace :yt do
   desc "Página inicial de recomendações da conta: [LIMITE=20]"
   task feed: :environment do
@@ -27,6 +28,14 @@ namespace :yt do
       entrada = ENV.fetch("ID") { raise ArgumentError, "uso: yt:assistir ID=<id|link>" }
       Fetcher::Channels::Youtube.video_id!(entrada)
       Fetcher::Channels::Youtube.assistir(url: entrada)
+    }
+  end
+
+  desc "Curte um vídeo: ID=<id|link>"
+  task curtir: :environment do
+    exit Fetcher::XComando.executa {
+      id = Fetcher::Channels::Youtube.video_id!(ENV.fetch("ID") { raise ArgumentError, "uso: yt:curtir ID=<id|link>" })
+      Fetcher::Channels::YoutubeEscrita.curtir(id: id)
     }
   end
 end

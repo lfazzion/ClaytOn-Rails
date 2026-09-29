@@ -52,4 +52,23 @@ class YtRakeTest < ActiveSupport::TestCase
     assert_equal 1, status
     assert_equal "ArgumentError", corpo["tipo"]
   end
+
+  test "yt:curtir aceita link e chama curtir com o id" do
+    Fetcher::Channels::YoutubeEscrita.expects(:curtir).with(id: "dQw4w9WgXcQ").returns({ "id" => "dQw4w9WgXcQ" })
+    assert_equal [0, { "id" => "dQw4w9WgXcQ" }], roda("yt:curtir", { "ID" => "https://youtu.be/dQw4w9WgXcQ" })
+  end
+
+  test "yt:curtir com id invalido sai erro tipado sem rede" do
+    Fetcher::Channels::YoutubeEscrita.expects(:curtir).never
+    status, corpo = roda("yt:curtir", { "ID" => "0" })
+    assert_equal 1, status
+    assert_equal "ArgumentError", corpo["tipo"]
+  end
+
+  test "yt:curtir sem ID sai erro de uso" do
+    Fetcher::Channels::YoutubeEscrita.expects(:curtir).never
+    status, corpo = roda("yt:curtir", {})
+    assert_equal 1, status
+    assert_match(/uso: yt:curtir/, corpo["erro"])
+  end
 end
