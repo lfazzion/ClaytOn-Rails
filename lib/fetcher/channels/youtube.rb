@@ -185,7 +185,10 @@ module Fetcher
 
           cookies, = SessionCookies.for(COOKIE_DOMAIN)
           CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) do |caminho|
-            lista(":ytrec", n, caminho).map { |item| para_agente(item) }
+            itens = lista(":ytrec", n, caminho)
+            # Sessão caída sem marca no stderr devolveria lista vazia — que o agente leria como "nada a recomendar".
+            verify_session!(caminho)
+            itens.map { |item| para_agente(item) }
           end
         end
 

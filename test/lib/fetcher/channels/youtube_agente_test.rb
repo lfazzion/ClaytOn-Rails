@@ -44,6 +44,13 @@ class Fetcher::Channels::YoutubeAgenteTest < ActiveSupport::TestCase
     assert_raises(Fetcher::CookieJar::Expired) { Y.feed(limit: 5) }
   end
 
+  test "feed sem cookie de autenticacao sai Expired mesmo sem marca no stderr, nunca lista vazia" do
+    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "PREF", "value" => "x", "domain" => ".youtube.com" },
+                                                  { "name" => "YSC", "value" => "y", "domain" => ".youtube.com" }], :jar])
+    Open3.stubs(:capture3).returns(["", "", Status.new(true)])
+    assert_raises(Fetcher::CookieJar::Expired) { Y.feed(limit: 5) }
+  end
+
   test "assistir marca como assistido e devolve a forma do agente" do
     Y.expects(:run).with { |url, _dir, _cookie, mark_watched:| url.include?("dQw4w9WgXcQ") && mark_watched == true }
      .returns({ "id" => "dQw4w9WgXcQ", "title" => "T", "channel" => "C" })
