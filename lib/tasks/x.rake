@@ -16,6 +16,8 @@
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
 #   bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20] -> {"posts": [...], "proximo_cursor"}
+#   bin/rails x:mencoes [LIMITE=40]                             -> {"posts": [...]} (menções e respostas à conta, da aba Menções das
+#                                                                  notificações: id, autor, texto, criado_em, url, em_resposta_a, e_resposta)
 #   bin/rails x:artigo TITULO=arquivo|- CORPO=arquivo|- [VISIBILIDADE=Public] [CONVERSA=ByInvitation] [RASCUNHO=<id>]
 #                                                               -> {"id","tweet_id","url"}
 namespace :x do
@@ -141,6 +143,13 @@ namespace :x do
     exit Fetcher::XComando.executa {
       Fetcher::Channels::XFeed.ler(tipo: ENV.fetch("TIPO", "para_voce"), cursor: ENV["CURSOR"].presence,
                                    limite: ENV.fetch("LIMITE", "20"))
+    }
+  end
+
+  desc "Menções à conta lidas das notificações (aba Menções): [LIMITE=40]"
+  task mencoes: :environment do
+    exit Fetcher::XComando.executa {
+      { "posts" => Fetcher::Channels::XNotificacoes.mencoes(limite: Integer(ENV.fetch("LIMITE", "40"))) }
     }
   end
 

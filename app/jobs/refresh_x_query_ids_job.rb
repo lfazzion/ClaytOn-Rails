@@ -37,7 +37,7 @@ class RefreshXQueryIdsJob < ApplicationJob
     SearchTimeline
     CreateTweet FavoriteTweet CreateRetweet DeleteTweet UnfavoriteTweet
     UserByScreenName UserTweetsAndReplies
-    HomeTimeline HomeLatestTimeline
+    HomeTimeline HomeLatestTimeline NotificationsTimeline
   ].freeze
 
   def perform

@@ -1,0 +1,44 @@
+{
+  "data": {
+    "viewer_v2": {
+      "user_results": {
+        "result": {
+          "__typename": "User",
+          "notification_timeline": {
+            "id": "ID_TIMELINE_PODADO",
+            "timeline": {
+              "instructions": [
+                {
+                  "type": "TimelineClearCache"
+                },
+                {
+                  "entries": [
+                    {
+                      "content": {
+                        "__typename": "TimelineTimelineCursor",
+                        "cursorType": "Top",
+                        "entryType": "TimelineTimelineCursor",
+                        "value": "CURSOR_TOP_REAL_PODADO"
+                      },
+                      "entryId": "cursor-top-1",
+                      "sortIndex": "1"
+                    }
+                  ],
+                  "type": "TimelineAddEntries"
+                },
+                {
+                  "type": "TimelineClearEntriesUnreadState"
+                },
+                {
+                  "sort_index": "SORT_INDEX_PODADO",
+                  "type": "TimelineMarkEntriesUnreadGreaterThanSortIndex"
+                }
+              ]
+            }
+          },
+          "rest_id": "ID_DA_CONTA_PODADO"
+        }
+      }
+    }
+  }
+}

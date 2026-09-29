@@ -48,6 +48,10 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
 
   OPS = RefreshXQueryIdsJob::OPERATIONS
 
+  test "NotificationsTimeline (aba Menções) entra no refresh proativo" do
+    assert_includes OPS, "NotificationsTimeline"
+  end
+
   def outcome(value = "QID")
     Fetcher::XQueryIdResolver::Discovery.new(discovered: true, value: value, reason: :discovered)
   end
@@ -96,9 +100,9 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
                     "sem refresh proativo, o primeiro descurtir apos a rotacao do queryId so se recupera pelo retry"
   end
 
-  test "chama resolver com force: true para cada operacao (busca, escrita, conta e feed)" do
+  test "chama resolver com force: true para cada operacao (busca, escrita, conta, feed e notificações)" do
     assert_equal %w[SearchTimeline CreateTweet FavoriteTweet CreateRetweet DeleteTweet UnfavoriteTweet
-                    UserByScreenName UserTweetsAndReplies HomeTimeline HomeLatestTimeline], OPS
+                    UserByScreenName UserTweetsAndReplies HomeTimeline HomeLatestTimeline NotificationsTimeline], OPS
     resolver = mock
     Fetcher::XQueryIdResolver.expects(:new).returns(resolver)
     OPS.each { |op| resolver.expects(:resolve_with_outcome).with(op, force: true).returns(outcome) }

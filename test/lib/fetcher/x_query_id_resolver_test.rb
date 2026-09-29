@@ -328,6 +328,12 @@ module Fetcher
       assert_empty @resolver.send(:lazy_chunk_urls, '<html>sem mapa</html>', 'HomeTimeline')
     end
 
+    test 'NotificationsTimeline e achada no chunk bundle.Notifications do mapa (medido em 29/09/2026)' do
+      html = '<script>p.u=e=>""+(({7:"bundle.Notifications",8:"loader.NotificationHandler"})[e]||e)+"."+({7:"39f37ae04c94b71b",8:"cccc"})[e]+"a.js"</script>'
+      urls = @resolver.send(:lazy_chunk_urls, html, 'NotificationsTimeline')
+      assert_equal ['bundle.Notifications.39f37ae04c94b71ba.js'], urls.map { |u| u.split('/').last }
+    end
+
     # ── RESPOSTA TRUNCADA PELO TETO TOTAL NÃO VIRA PIN DE 25h (achado 3) ─────
     #
     # O `HTTP_TOTAL_TIMEOUT` de 8s corta a requisição INTEIRA, e o corte chega
