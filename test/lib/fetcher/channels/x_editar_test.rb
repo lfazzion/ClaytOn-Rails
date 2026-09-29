@@ -477,6 +477,107 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
                  saida.slice("versoes", "edicoes_restantes", "editavel_ate_ms"))
   end
 
+  # ── A RECUSA DO X QUE A CASA NAO SABIA LER: o 190 num pedido de edicao ─────────
+  #
+  # Medido no smoke real de 29/09/2026 (imagem 0c76a60, branch main): `x:editar ID=` de um post
+  # ANTIGO chegou ao X (queryId resolvido, chamada real) e voltou, no envelope do `XComando`:
+  #
+  #   {"erro":"CreateTweet: erro do X: Authorization: Status *** failed: Tweet creation failed. (190)",
+  #    "tipo":"ResponseError"}
+  #
+  # O caminho funcionou e NADA foi publicado — mas a mensagem e a CRUA do X: nao diz que a recusa
+  # e da EDICAO, nao diz o que o 190 significa e nao diz o que o operador tem de fazer. O 190 nao
+  # esta em `CODIGOS_RECUSA` nem em `CODIGOS_RESTRICAO`, entao nao caiu em nenhum ramo e saiu no
+  # generico `ResponseError` de `interpreta!` ("erro do X: <mensagem> do X>").
+  #
+  # O texto do X, como chegou (o `***` e a propria casa censurando o status no envelope):
+  TEXTO_190 = "Authorization: Status *** failed: Tweet creation failed. (190)"
+  CORPO_190 = { "errors" => [{ "message" => TEXTO_190 }] }.freeze
+
+  test "a recusa do X com 190 num pedido de edicao vira mensagem legivel, com codigo e acao" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: CORPO_190.to_json, headers: {}))
+    erro = assert_raises(E::ResponseError) { X.editar(id: "2104670335882977677", texto: "oi") }
+
+    # O que a mensagem CRUA dizia, e nao pode ser o que ela diz sozinha:
+    refute_equal "CreateTweet: erro do X: #{TEXTO_190}", erro.message, "a recusa continua sendo a crua do X"
+    # O que ela tem de dizer agora:
+    assert_includes erro.message, "recusou a edicao"           # a recusa e do pedido de edicao
+    assert_includes erro.message, "2104670335882977677"         # o post a conferir
+    assert_includes erro.message, "190"                         # o codigo do X, para rastreio
+    assert_includes erro.message, "1 h"                          # a janela, sem prometer o motivo
+    assert_includes erro.message, "apagar o post e publicar de novo" # a acao que corrige
+    assert_includes erro.message, TEXTO_190                      # o texto do X, INTEIRO
+  end
+
+  # O gancho casa pelo que o X MEDIU — o codigo 190 no texto — e nao por palavra do motivo. As
+  # duas formas do mesmo corpo (com e sem `code` estruturado) tem de sair iguais na traducao:
+  # quem le o envelope so ve a `mensagem`.
+  test "o 190 e traduzido com e sem o code estruturado no errors[]" do
+    sem_campo = CORPO_190
+    com_campo = { "errors" => [{ "message" => TEXTO_190, "code" => 190, "name" => "AuthorizationError" }] }
+    [sem_campo, com_campo].each do |corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo.to_json, headers: {}))
+      erro = assert_raises(E::ResponseError) { X.editar(id: "111", texto: "oi") }
+      assert_includes erro.message, "recusou a edicao", corpo.inspect
+      assert_includes erro.message, TEXTO_190, corpo.inspect
+    end
+  end
+
+  # A DEFINICAO do gancho e o CODIGO medido, e nao "erro de edicao" em geral: um erro do X sem
+  # o 190 continua saindo com a frase de antes, intacta. Sem este teste o gancho viraria "traduz
+  # qualquer coisa que o X responder na edicao", que e a categoria que a casa nao pode inventar.
+  test "erro do X SEM o 190 no pedido de edicao sai intacto, sem a traducao" do
+    outros = [
+      "Authorization: Status *** failed: Tweet creation failed. (187)",
+      "Authorization: Status *** failed: Tweet creation failed.",
+      "falha qualquer sem codigo do X",
+      "CreateTweet: erro do X: Tweet creation failed. (1900)" # codigo QUE COMECA com 190, e nao o 190
+    ]
+    outros.each do |mensagem|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: { "errors" => [{ "message" => mensagem }] }.to_json,
+                                               headers: {}))
+      erro = assert_raises(E::ResponseError) { X.editar(id: "111", texto: "oi") }
+      assert_equal "CreateTweet: erro do X: #{mensagem}", erro.message, "traduziu erro que nao e o 190: #{mensagem}"
+      refute_includes erro.message, "apagar o post", mensagem
+    end
+  end
+
+  # A traducao e do CAMINHO DE EDICAO: o `postar` e o MESMO `CreateTweet` e o MESMO `190`, e lá
+  # a frase de "apagar e publicar de novo" seria uma PIADA (o post nem existe ainda). O gancho
+  # mora no `XEditar`, e este teste e o que impede ele de vazar para o `postar`.
+  test "o 190 no postar NAO recebe a traducao de edicao (a acao seria enganosa)" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: CORPO_190.to_json, headers: {}))
+    erro = assert_raises(E::ResponseError) { E.postar(texto: "oi") }
+    assert_equal "CreateTweet: erro do X: #{TEXTO_190}", erro.message
+    refute_includes erro.message, "apagar o post"
+  end
+
+  # A classe NAO muda: o porteiro (repo vps) le `{"erro","tipo"}` e ja roteia por `tipo`. O
+  # 190 nao esta em `CODIGOS_RECUSA`, e mexer nessa lista mudaria o contrato com o porteiro por
+  # um codigo cujo significado no X a casa nao documentou. O que estava quebrado era a MENSAGEM.
+  test "a classe do erro do 190 nao muda (o porteiro le tipo), e o envelope continua tipado" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: CORPO_190.to_json, headers: {}))
+    erro = assert_raises(E::ResponseError) { X.editar(id: "111", texto: "oi") }
+    assert_equal "ResponseError", erro.class.name.split("::").last
+    refute_includes E::CODIGOS_RECUSA, 190, "o 190 nao pode entrar na lista de recusa sem doc do X"
+    refute_includes E::CODIGOS_RESTRICAO, 190, "190 nao e restricao de conta"
+  end
+
+  # O caminho feliz nao pode quebrar por causa do gancho: id novo real continua SUCESSO, com a
+  # url do id novo e o estado do `edit_control`. Sem este os testes de recusa passariam com um
+  # gancho que recusa tudo.
+  test "com o caminho feliz o 190 nao aparece em nada e a edicao continua SUCESSO" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: resposta_edicao("2104299999999999999", "111"), headers: {}))
+    saida = X.editar(id: "111", texto: "texto novo")
+    assert_equal "2104299999999999999", saida["id"]
+    assert_equal "111", saida["id_anterior"]
+    assert_equal "https://x.com/i/status/2104299999999999999", saida["url"]
+    assert_equal %w[111 2104299999999999999], saida["versoes"]
+    assert_equal 2, saida["edicoes_restantes"]
+  end
+
   # ── queryId velho: o mecanismo do repo, sem id fixo ──────────────────────────
   test "404 ou 422 redescobre o queryId uma vez e repete com o id novo" do
     [404, 422].each do |status|

@@ -81,6 +81,51 @@ module Fetcher
       OPERACAO = "CreateTweet"
       E = Fetcher::Channels::XEscrita
 
+      # ── A RECUSA QUE A CASA SABIA O NOME E NAO SABIA LER: o 190 ────────────────
+      #
+      # Medido no smoke real de 29/09/2026 (imagem 0c76a60, `main`): `x:editar ID=` de um post
+      # ANTIGO chegou ao X (queryId resolvido, chamada real) e voltou assim no envelope do
+      # `XComando`:
+      #
+      #   {"erro":"CreateTweet: erro do X: Authorization: Status *** failed: Tweet creation failed. (190)",
+      #    "tipo":"ResponseError"}
+      #
+      # O caminho funcionou e NADA foi publicado. A mensagem, porém, era a CRUA do X repassada:
+      # o `190` não está em `XEscrita::CODIGOS_RECUSA` nem em `CODIGOS_RESTRICAO`, então não caiu
+      # em nenhum ramo e saiu no `ResponseError` genérico do `interpreta!` ("erro do X: <texto>").
+      # Quem lê aquilo descobre que o X falhou e não descobre NADA de útil: nem que a recusa foi
+      # do pedido de EDIÇÃO (e não de um post novo), nem o que o 190 significa aqui, nem o que
+      # fazer. A ação que corrige — apagar e publicar de novo — existe no repo (`x:apagar` +
+      # `x:postar`) e não estava na cara de ninguém.
+      #
+      # ── O QUE ESTA TRADUÇÃO AFIRMA, E O QUE NÃO AFIRMA ───────────────────────
+      # O que ela AFIRMA, e é o que a casa mediu: neste caminho (um pedido de EDIÇÃO) o X
+      # respondeu com o 190 e RECUSOU — isto é, disse que não fez. É a mesma leitura que a casa
+      # já faz dos outros códigos de recusa (186/187/...): erro de negócio com código é resposta
+      # do X, não falha de transporte, e por isso repetir não resolve.
+      #
+      # O que ela NÃO afirma, e a lição do item 2 do card: **a casa não documenta o significado do
+      # 190.** Não há, no repo, fonte do X que diga o que 190 significa na edição — só a
+      # observação de que veio numa edição de post antigo. Por isso a janela de ~1 h aparece como
+      # HIPÓTESE DA CASA e com a alternativa explícita ("ou o post não é editável"), nunca como
+      # diagnóstico. Se um dia a doc do X explicar o 190, a hipótese sai daqui e vira fato, com o
+      # texto do X junto para rastreio (é o que `docs/MEMORY.md` registra nesta data).
+      #
+      # O gancho casa pelo CÓDIGO medido, dentro de parênteses — `\s*190\s*` fecha no `)`, então
+      # um código que só começa com 190 (`(1900)`) não casa. Casar por palavra do motivo seria
+      # inventar a categoria.
+      CODIGO_190 = 190
+      REGEX_190 = /\(\s*#{CODIGO_190}\s*\)/.freeze
+      # A recusa, dita para quem tem de decidir. O texto do X entra INTEIRO (rastreio: sem ele não
+      # há como conferir no painel do X o que a casa respondeu), o código também, e a janela é
+      # nomeada como hipótese, com a alternativa que a casa não consegue distinguir.
+      RECUSA_190 = "o X recusou a edicao do post %{id}: o codigo %{codigo} do X neste caminho costuma ser " \
+                   "fora da janela de edicao de ~1 h (o X so deixa editar por cerca de 1 h depois de " \
+                   "publicar) OU o post nao e editavel — a casa nao tem como distinguir as duas; " \
+                   "para corrigir agora, a acao e apagar o post e publicar de novo " \
+                   "(x:apagar + x:postar), porque repetir a edicao nao resolve: " \
+                   "o X ja respondeu que nao fez a edicao"
+
       # Onde a resposta traz o que a casa devolve, a partir da raiz `data`. `edit_control` é o
       # objeto que o próprio cliente do X lê (ver o bloco do topo do arquivo).
       CAMINHO_TWEET = %w[data create_tweet tweet_results result].freeze
@@ -159,11 +204,35 @@ module Fetcher
       # levanta o aviso genérico de escrita (que fala em "post"), e quem recebeu aquilo não sabe
       # que a repetição vai criar OUTRA VERSÃO do MESMO post — que é o custo específico deste
       # caminho, e o que o aviso tem de dizer. O `id` entra na mensagem porque é o post a conferir.
+      #
+      # Aqui entra também a RECUSA DO 190, pela mesma razão de ser do `Incerto`: o texto que o
+      # `XEscrita` monta ("erro do X: <cru>") não diz que a recusa foi de uma EDIÇÃO. A diferença
+      # é que o `Incerto` traduz um aviso genérico (falta o tipo de ação); aqui o que se traduz é
+      # um ERRO DE NEGÓCIO do X que a casa não tinha mapeado.
+      #
+      # A classe NÃO muda (`ResponseError`): o porteiro do experimento-x (repo vps) lê
+      # `{"erro","tipo"}` e já roteia por `tipo`, e o 190 não está em `CODIGOS_RECUSA` — colocá-lo
+      # ali mudaria o contrato com o porteiro por um código cujo significado no X a casa não
+      # documentou. O que estava quebrado era a MENSAGEM, e é a mensagem que se conserta.
       def graphql_da_edicao!(id, variaveis)
         E.graphql!(OPERACAO, variaveis, features: Fetcher::Channels::XConversation::FEATURES)
       rescue E::Incerto => e
         raise e.class, "#{e.message} | #{custo_repetir_editar(id)}"
+      rescue E::ResponseError => e
+        raise e unless recusa_190?(e)
+
+        # O texto do X entra INTEIRO no fim: é o que permite conferir no painel do X o que a
+        # casa respondeu, e o que fecha o rastreio quando o motivo (janela de 1 h x post não
+        # editável) não puder ser distinguido. Sem o `#{OPERACAO}:` da frente, porque a mensagem
+        # original JÁ vem prefixada por ele (o `interpreta!` monta "#{operacao}: erro do X: ...").
+        raise e.class, "#{RECUSA_190 % { id: id, codigo: CODIGO_190 }} | #{e.message}"
       end
+
+      # O gancho é o CÓDIGO medido, e só ele. Deliberadamente NÃO casa por palavra do motivo
+      # ("authorization", "failed"): isso seria inventar a categoria que o item 2 do card proíbe,
+      # e traduziria recusas do X que não têm nada com a janela de edição. O `\(` exige o
+      # parêntese em que o X escreve o código, e o `\)` fecha nele — `(1900)` não casa.
+      def recusa_190?(erro) = erro.message.match?(REGEX_190)
 
       # O `Incerto` da edição: o mesmo de sempre (falha de rede depois do envio, ou 2xx sem id
       # utilizável), mas com o texto que diz o que o operador tem de fazer — e o custo real na
