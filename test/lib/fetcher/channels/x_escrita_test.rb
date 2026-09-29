@@ -745,4 +745,185 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     Fetcher::SafeHttpClient.expects(:post).once.returns(Resp.new(status: 429, body: "", headers: {}))
     assert_raises(E::RateLimitedRemote) { E.curtir(id: "1") }
   end
+
+  # ── DESFAZER: descurtir e deseguir ───────────────────────────────────────────
+  #
+  # Contrato lido no PRÓPRIO bundle do X em 29/09/2026 (só GET do HTML de home e dos bundles de
+  # JS, pelo `XQueryIdResolver` que a casa já usa; NENHUMA escrita no X), porque nome de operação
+  # e caminho de endpoint não se inventam. O que o bundle diz, medido:
+  #
+  #   - descurtir: mutation `UnfavoriteTweet` (chunk 137832, `queryId` `ZYKSe-w7KEslx3JhSIk5LA`,
+  #     resolvido por NOME em runtime como as outras, com o 404/422 rediscovering), `variables`
+  #     `{ "tweet_id" => <id> }` — as MESMAS do `FavoriteTweet`, no bundle `unlike(e,r){…t.graphQL
+  #     (W(), { tweet_id: n, …})}` — e resposta `data.unfavorite_tweet == "Done"`, que é o que o
+  #     PRÓPRIO cliente do X compara (`"Done"!==e?.unfavorite_tweet`, "GQL Favorites: Failed to
+  #     unfavorite tweet"). Os `featureSwitches`/`fieldToggles` da operação são VAZIOS no bundle,
+  #     então nada é enviado além das `variables`.
+  #   - deseguir: REST `friendships/destroy` (`unfollow(r,i={}){…e.post("friendships/destroy",
+  #     {…user_id:n,…},{},i)}`), que o client versiona em `/1.1/` e fecha com `.json` — a MESMA
+  #     montagem do `friendships/create` que o `seguir` já usa, na MESMA família de endpoint.
+  #
+  # O que NÃO se sabe (e por isso o teste não afirma): se o X responde alguma coisa além do
+  # `id_str` do usuário, e o texto exato das recusas específicas do desfazer. As recusas
+  # testadas são as da TABELA que o canal já tem, com códigos que não contradizem o desfazer.
+  UNFOLLOW_ID = "1000000000000000001"
+
+  def corpo_desfazer(valor)
+    JSON.generate("data" => { "unfavorite_tweet" => valor })
+  end
+
+  test "o canal expoe os dois desfazeres" do
+    assert_respond_to E, :descurtir, "XEscrita precisa expor descurtir (desfazer da curtida)"
+    assert_respond_to E, :deseguir, "XEscrita precisa expor deseguir (desfazer do follow)"
+  end
+
+  test "descurtir manda o UnfavoriteTweet com o tweet_id e aceita o Done" do
+    assert_respond_to E, :descurtir
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, headers:|
+      url == "https://x.com/i/api/graphql/QID/UnfavoriteTweet" &&
+        json["variables"] == { "tweet_id" => ID_REAL } && json["queryId"] == "QID" &&
+        !json.key?("features")
+    end.returns(Resp.new(status: 200, body: corpo_desfazer("Done"), headers: {}))
+    assert_equal({ "id" => ID_REAL }, E.descurtir(id: ID_REAL))
+  end
+
+  # Sem stub de build_headers nem do SafeHttpClient: o pedido real (WebMock) prova que o
+  # content-type de formulário vence o application/json do POST e que a sessão vai junto —
+  # é o mesmo caminho do `seguir`, e o endpoint é irmão dele.
+  test "deseguir manda formulario no friendships/destroy.json e confere o usuario na resposta" do
+    assert_respond_to E, :deseguir
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns(["93.184.216.34"])
+    pedido = stub_request(:post, "https://x.com/i/api/1.1/friendships/destroy.json")
+             .with(body: "user_id=#{UNFOLLOW_ID}",
+                   headers: { "Content-Type" => "application/x-www-form-urlencoded", "X-Csrf-Token" => "csrf-ct0-456",
+                              "X-Client-Transaction-Id" => "TXID" })
+             .to_return(status: 200, body: fixture("friendships_destroy_ok.json"))
+    assert_equal({ "usuario_id" => UNFOLLOW_ID }, E.deseguir(usuario_id: UNFOLLOW_ID))
+    assert_requested pedido
+  end
+
+  test "deseguir com resposta de outro usuario nao sai como sucesso" do
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: fixture("friendships_destroy_ok.json"),
+                                                         headers: {}))
+    erro = assert_raises(E::Error) { E.deseguir(usuario_id: "99") }
+    assert_match(/friendships\/destroy/, erro.message)
+  end
+
+  # 2xx SEM CONFIRMAÇÃO é a MESMA dúvida da falha de rede depois do envio: o pedido chegou ao X
+  # e a resposta não diz o que ele fez. A regra da casa é Incerto + conferir antes de repetir
+  # (e aqui repetir NÃO duplica nada: descurtir/deseguir duas vezes não muda o estado final).
+  #
+  # A asserção do aviso é a do AVISO DO DESFAZER (`AVISO_PODE_TER_SAIDO_DESFAZER`), e não a do
+  # postar: `AVISO_PODE_TER_SAIDO` manda "confira o POST", e no `deseguir` não existe post para
+  # conferir. Além disso o `Incerto` NÃO pode carregar `CUSTO_REPETIR_POSTAR` ("repetir as cegas
+  # cria OUTRO post") — para o desfazer isso é mentira, e foi o que este teste pegou na primeira
+  # rodada GREEN: o `interpreta!` levanta o aviso genérico, e sem a tradução no canal a casa
+  # mandava conferir um post que nunca existiu.
+  test "2xx sem confirmacao no descurtir e Incerto com o aviso de conferir" do
+    [corpo_desfazer(nil), corpo_desfazer("NotDone"), '{"data":{}}', '{"data":{"unfavorite_tweet":"oops"}}',
+     '{"data":"oops"}', "[]", "<html>erro do proxy</html>"].each do |corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Incerto, "descurtir #{corpo}") { E.descurtir(id: ID_REAL) }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO_DESFAZER, "descurtir #{corpo}"
+      assert_includes erro.message, E::CUSTO_REPETIR_DESFAZER, "descurtir #{corpo}"
+      refute_includes erro.message, E::CUSTO_REPETIR_POSTAR, "descurtir #{corpo}: nao crea post"
+      refute_includes erro.message, "confira o post", "descurtir #{corpo}: nao ha post para conferir"
+      refute_kind_of TypeError, erro, "descurtir #{corpo}"
+    end
+  end
+
+  test "2xx sem confirmacao no deseguir e Incerto com o aviso de conferir" do
+    ['{"id_str":null}', '{"id_str":"99"}', "{}", "[]", "<html>erro do proxy</html>", ""].each do |corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Incerto, "deseguir #{corpo}") { E.deseguir(usuario_id: UNFOLLOW_ID) }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO_DESFAZER, "deseguir #{corpo}"
+      assert_includes erro.message, E::CUSTO_REPETIR_DESFAZER, "deseguir #{corpo}"
+      refute_includes erro.message, E::CUSTO_REPETIR_POSTAR, "deseguir #{corpo}: nao crea post"
+      refute_includes erro.message, "confira o post", "deseguir #{corpo}: nao ha post para conferir"
+      refute_kind_of TypeError, erro, "deseguir #{corpo}"
+    end
+  end
+
+  # O id do X é um SNOWFLAKE (`id_utilizavel?`, a definição única da casa) e aqui ele é ENTRADA:
+  # sai nas `variables` do GraphQL ou no formulário do REST. Fora da definição é recusado LOCAL,
+  # antes da rede — e nunca `Incerto`, porque nada saiu e a casa sabe que o X não fez nada.
+  test "id fora da definicao de snowflake e recusado sem rede, no descurtir e no deseguir" do
+    ids = FORMAS_NAO_UTILIZAVEIS.values.map { |h| h["rest_id"] } + [nil, "", "   ", "abc", 2**64]
+    ids.uniq.each do |mau|
+      Fetcher::SafeHttpClient.expects(:post).never
+      erro = assert_raises(E::Recusado, "descurtir #{mau.inspect}") { E.descurtir(id: mau) }
+      assert_match(/id invalido/, erro.message)
+      Fetcher::SafeHttpClient.expects(:post).never
+      erro = assert_raises(E::Recusado, "deseguir #{mau.inspect}") { E.deseguir(usuario_id: mau) }
+      assert_match(/id invalido/, erro.message)
+    end
+  end
+
+  # Sem isto o teste acima passaria com uma regra que recusa TUDO: o caminho feliz continua
+  # (“id utilizável não é o mesmo que nenhum id serve”).
+  test "o caminho feliz do desfazer continua: id real e id no teto saem como sucesso" do
+    [ID_REAL, TETO.to_s, ID_REAL.to_i].each do |bom|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo_desfazer("Done"), headers: {}))
+      assert_equal({ "id" => bom.to_s }, E.descurtir(id: bom), "descurtir #{bom.inspect}")
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: fixture("friendships_destroy_ok.json"),
+                                                            headers: {}))
+      assert_equal({ "usuario_id" => UNFOLLOW_ID }, E.deseguir(usuario_id: UNFOLLOW_ID), "deseguir #{bom.inspect}")
+    end
+  end
+
+  # A recusa do X continua passando pela TABELA DO CANAL (mesma do postar/seguir), com códigos que
+  # não contradizem o desfazer: 226 é restrição da conta; 144 é “post não existe” e 108 é “usuário
+  # não existe”. O que o teste afirma é o roteamento, não o significado do X para o desfazer.
+  test "recusa e restricao do X no desfazer usam a mesma tabela do canal" do
+    corpo = ->(codigo) { { "errors" => [{ "message" => "x", "code" => codigo }] }.to_json }
+    { 226 => E::Restrito, 144 => E::Recusado }.each do |codigo, classe|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo.call(codigo), headers: {}))
+      assert_raises(classe, "descurtir #{codigo}") { E.descurtir(id: ID_REAL) }
+    end
+    { 161 => E::Restrito, 108 => E::Recusado, 162 => E::Recusado }.each do |codigo, classe|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 403, body: corpo.call(codigo), headers: {}))
+      assert_raises(classe, "deseguir #{codigo}") { E.deseguir(usuario_id: UNFOLLOW_ID) }
+    end
+  end
+
+  # As guardas de rede são as do arquivo: falha DEPOIS do envio é Incerto, falha ANTES é
+  # ResponseError, e nenhuma das duas escapa do canal.
+  test "falha depois do envio no desfazer e Incerto, e antes do envio e ResponseError" do
+    rede_falha!(Errno::ECONNRESET, url: "https://x.com/i/api/graphql/QID/UnfavoriteTweet")
+    assert_raises(E::Incerto) { E.descurtir(id: ID_REAL) }
+    rede_falha!(Net::OpenTimeout, url: "https://x.com/i/api/graphql/QID/UnfavoriteTweet")
+    erro = assert_raises(E::ResponseError) { E.descurtir(id: ID_REAL) }
+    assert_match(/falha de rede em UnfavoriteTweet/, erro.message)
+
+    Fetcher::SsrfGuard.unstub(:resolve_all)
+    Fetcher::SsrfGuard.stubs(:resolve!).raises(Fetcher::SsrfGuard::Blocked, "bloqueado")
+    erro = assert_raises(E::ResponseError) { E.deseguir(usuario_id: UNFOLLOW_ID) }
+    assert_match(/friendships\/destroy/, erro.message)
+  end
+
+  test "deseguir com conexao resetada depois do envio vira Incerto" do
+    rede_falha!(Errno::ECONNRESET, url: "https://x.com/i/api/1.1/friendships/destroy.json")
+    assert_raises(E::Incerto) { E.deseguir(usuario_id: UNFOLLOW_ID) }
+  end
+
+  # A trava local vale para os dois desfazeres: o deseguir tem `gate!` próprio (caminho REST) e o
+  # descurtir herda o do `graphql!`.
+  test "a trava local barra os dois desfazeres antes da rede" do
+    Fetcher::HostRateLimiter.stubs(:exceeded?).returns(true)
+    Fetcher::SafeHttpClient.expects(:post).never
+    assert_raises(E::RateLimited) { E.descurtir(id: ID_REAL) }
+    assert_raises(E::RateLimited) { E.deseguir(usuario_id: UNFOLLOW_ID) }
+  end
+
+  # O queryId velho se refaz como nas outras mutações: 404/422 = id velho, redescoberta UMA vez.
+  test "queryId velho do UnfavoriteTweet redescobre uma vez e repete com o id novo" do
+    resolver = Fetcher::XQueryIdResolver.any_instance
+    resolver.stubs(:resolve).with("UnfavoriteTweet").returns("VELHO")
+    resolver.expects(:resolve).with("UnfavoriteTweet", force: true).returns("NOVO")
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url == "https://x.com/i/api/graphql/VELHO/UnfavoriteTweet" }
+                           .returns(Resp.new(status: 422, body: "", headers: {}))
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url == "https://x.com/i/api/graphql/NOVO/UnfavoriteTweet" }
+                           .returns(Resp.new(status: 200, body: corpo_desfazer("Done"), headers: {}))
+    assert_equal({ "id" => ID_REAL }, E.descurtir(id: ID_REAL))
+  end
 end

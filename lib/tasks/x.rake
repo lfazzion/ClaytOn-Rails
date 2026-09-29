@@ -7,10 +7,12 @@
 #   bin/rails x:conversa ID=<id ou link> [LIMITE=40] [FORMATO=texto|json]
 #   bin/rails x:postar TEXTO=-|arquivo [RESPOSTA_A=<id|link>]  -> {"id","url"}
 #   bin/rails x:curtir ID=<id|link>                             -> {"id"}
+#   bin/rails x:descurtir ID=<id|link>                         -> {"id"}
 #   bin/rails x:repostar ID=<id|link>                           -> {"id"}
 #   bin/rails x:apagar ID=<id|link>                             -> {"id"}
 #   bin/rails x:editar ID=<id|link> TEXTO=-|arquivo             -> {"id","id_anterior","url",...}
 #   bin/rails x:seguir USUARIO=<screen_name>                    -> {"usuario_id"}
+#   bin/rails x:deseguir USUARIO_ID=<id>                        -> {"usuario_id"}
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
 #   bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20] -> {"posts": [...], "proximo_cursor"}
@@ -66,6 +68,32 @@ namespace :x do
         Fetcher::Channels::XEscrita.public_send(nome, id: id)
       }
     end
+  end
+
+  # ── DESFAZER: a saída de um sweep que errou a seleção ─────────────────────────
+  #
+  # `x:descurtir` e `x:deseguir` desfazem o que `x:curtir`/`x:seguir` fizeram. `ID=` aceita id ou
+  # link, como nas outras escritas.
+  #
+  # `USUARIO_ID=` é o ID NUMÉRICO e não o screen_name, e a diferença é deliberada: o `x:seguir`
+  # aceita `USUARIO=` e traduz com o `XConta.perfil`, que é uma LEITURA (gasta cota da conta).
+  # O desfazer é para uso logo depois de um sweep que JÁ sabe o id, e fazer uma leitura a mais
+  # para isso seria gasto sem motivo. Um `@screen_name` colado aqui é recusado pelo canal com
+  # `Recusado` e o valor recusado na mensagem — nada é traduzido por baixo dos panos.
+  desc "Desfaz a curtida de um post: ID=<id|link>"
+  task descurtir: :environment do
+    exit Fetcher::XComando.executa {
+      id = Fetcher::XLeitura.tweet_id(ENV.fetch("ID") { raise ArgumentError, "uso: x:descurtir ID=<id|link>" })
+      Fetcher::Channels::XEscrita.descurtir(id: id)
+    }
+  end
+
+  desc "Desfaz o follow de uma conta: USUARIO_ID=<id numerico do X>"
+  task deseguir: :environment do
+    exit Fetcher::XComando.executa {
+      alvo = ENV.fetch("USUARIO_ID") { raise ArgumentError, "uso: x:deseguir USUARIO_ID=<id numerico do X>" }
+      Fetcher::Channels::XEscrita.deseguir(usuario_id: alvo)
+    }
   end
 
   # Edição de post já publicado (conta Premium; janela de 1h e número limitado de alterações

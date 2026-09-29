@@ -25,6 +25,11 @@ module Fetcher
       # Isto é o teto da CASA; se o texto estourar, o X ainda pode recusar com 186.
       MAX_CHARS = 25_000
       FOLLOW_PATH = "/i/api/1.1/friendships/create.json"
+      # O caminho do DESFAZER do follow é o IRMÃO do `seguir`, não uma invenção: no bundle do X
+      # (29/09/2026) o `unfollow` é `e.post("friendships/destroy", {…user_id:n,…}, {}, i)` e o
+      # cliente versiona o nome em `/1.1/` fechando com `.json` — a MESMA montagem do
+      # `friendships/create`, na MESMA família de endpoint.
+      UNFOLLOW_PATH = "/i/api/1.1/friendships/destroy.json"
       MIN_SEGREDO = 8 # valores de cookie mais curtos que isso dariam falso positivo
 
       # Códigos do X que indicam que a conta está sob restrição (não é culpa do texto):
@@ -67,6 +72,15 @@ module Fetcher
       # postar cria OUTRO post e o editar outra VERSÃO do mesmo post.
       CUSTO_REPETIR_POSTAR = "repetir as cegas cria OUTRO post"
       CUSTO_REPETIR_EDITAR = "repetir as cegas cria OUTRA versao do post (nova edicao na janela)"
+      # O custo do DESFAZER é o MENOR de todos, e é por isso que ele NÃO é mudo: repetir o
+      # descurtir/deseguir não duplica nada no X (não cria post, não gasta a janela do Premium), mas
+      # a PERGUNTA que o `Incerto` faz ("será que já desfez?") continua sem resposta, e responder
+      # "não sei" sem dizer isso treina o operador a repetir em tudo. A frase diz a verdade útil:
+      # repetir não faz estrago, mas a duvida continua até conferir.
+      CUSTO_REPETIR_DESFAZER = "repetir o desfazer nao cria nada no X, mas a duvida continua: confira antes"
+      # E o aviso é o do desfazer, e não o do postar: `AVISO_PODE_TER_SAIDO` manda "confira o POST",
+      # e no `deseguir` não existe post nenhum para conferir — o que existe é o vínculo com a conta.
+      AVISO_PODE_TER_SAIDO_DESFAZER = "pode TER saido no X; confira ANTES de repetir"
 
       # ── O TETO DO ID, e ELE FAZ PARTE DA DEFINIÇÃO ────────────────────────────
       #
@@ -199,6 +213,12 @@ module Fetcher
       LIMITE_SIMPLES = 280
       OPERACAO_CURTA = "CreateTweet"
       OPERACAO_LONGA = "CreateNoteTweet"
+      # As duas operações do DESFAZER, com os nomes EXATOS que o bundle do X usa (lidos em
+      # 29/09/2026; ver o bloco do desfazer, mais abaixo, que traz a citação do bundle). O
+      # `queryId` NÃO fica aqui: ele rotaciona a cada deploy do X e é resolvido por nome em
+      # runtime (`XQueryIdResolver`), como as outras mutações.
+      OPERACAO_DESFAZER_CURTIDA = "UnfavoriteTweet"
+      OPERACAO_DESFAZER_SEGUIR = "friendships/destroy"
 
       def peso_do_texto(texto)
         texto.each_char.sum do |c|
@@ -315,6 +335,127 @@ module Fetcher
         { "usuario_id" => usuario_id.to_s }
       rescue SafeHttpClient::Error, SsrfGuard::Blocked => e
         falha_de_rede!(e, "friendships/create")
+      end
+
+      # ── DESFAZER: a única mitigação que existe quando um sweep erra a seleção ────────────
+      #
+      # O canal escreve (`curtir`, `seguir`) e agora também DESFAZ o que escreveu. Sem isto, um
+      # sweep que selecionou a pessoa errada não tinha saída: a única mitigação era conviver com o
+      # erro. E o desfazer é o ÚNICO caminho barato de corrigir — apagou o post, ou a curtida está
+      # lá para sempre.
+      #
+      # Os DOIS caminhos acima já tinham todas as guardas que o desfazer precisa; aqui cada uma é
+      # a MESMA, e não uma versão frouxa do desfazer:
+      #   - `gate!` (trava local) e `graphql!`/`interpreta!(..., escrita: true)`;
+      #   - `id_utilizavel?`, a DEFINIÇÃO ÚNICA do id do X — que aqui é ENTRADA (vai nas
+      #     `variables` do GraphQL e no formulário do REST), não saída. Fora da definição é recusado
+      #     LOCAL e é `Recusado`, nunca `Incerto`: nada saiu, e a casa sabe que o X não fez nada;
+      #   - `ResponseError` para a 2xx que chegou e NÃO confirma, e `Incerto` para a falha DEPOIS do
+      #     envio — a mesma dúvida do `postar`, com o custo de repetir DELE (que aqui é o menor:
+      #     desfazer duas vezes não muda o estado final).
+      #
+      # ── O CONTRATO, lido no bundle do X (29/09/2026), não inventado ────────────────────
+      # Nada de nome de operação ou endpoint adivinhado. As quatro leituras foram pelo PRÓPRIO
+      # resolver da casa (`XQueryIdResolver`: GET do HTML de `x.com/home` e dos bundles de JS,
+      # com a sessão do jar) e nenhuma tocou escrita no X:
+      #
+      #   - `UnfavoriteTweet` EXISTE no bundle: chunk 137832,
+      #     `{queryId:"ZYKSe-w7KEslx3JhSIk5LA", operationName:"UnfavoriteTweet",
+      #       operationType:"mutation", metadata:{featureSwitches:[],fieldToggles:[]}}`. O
+      #     `queryId` é resolvido por NOME em runtime (como as outras mutações — o id do X
+      #     rotaciona a cada deploy), então o valor medido entra só como evidência de que a
+      #     operação existe, e o cache de 404/422 continua igual.
+      #   - As `variables` são `{ "tweet_id" => <id> }` — as MESMAS do `FavoriteTweet`: no bundle,
+      #     `unlike(e,r){…t.graphQL(W(), { tweet_id: n, …})}` ao lado de
+      #     `like(e,r){…t.graphQL(R(), { tweet_id: n, …})}`. E como os `featureSwitches` da
+      #     operação são VAZIOS no bundle, nada além das `variables` é enviado.
+      #   - A confirmação é `data.unfavorite_tweet == "Done"`: é o que o PRÓPRIO cliente do X
+      #     compara (`"Done"!==e?.unfavorite_tweet`, "GQL Favorites: Failed to unfavorite tweet"),
+      #     o espelho exato do `"Done"` do `favorite_tweet` que o `curtir` já conferia.
+      #   - O `unfollow` é REST: `e.post("friendships/destroy", {…user_id:n,…}, {}, i)`, e o
+      #     cliente versiona o nome em `/1.1/` fechando com `.json` (`post(e,t,r,i,n=".json")`).
+      #
+      # ── O QUE A CASA NÃO AFIRMA ──────────────────────────────────────────────────────
+      # Nenhuma escrita real foi feita no X, então duas coisas continuam NÃO medidas: o texto
+      # exato das recusas específicas do desfazer, e se o `friendships/destroy` responde além do
+      # `id_str` do usuário. O teste usa a resposta espelhada do `friendships/create` (a mesma
+      # família, e o `unfollow` do bundle reaproveita o MESMO parser `p` do `follow`), e a
+      # conferência é a mesma do `seguir`: o `id_str` tem de ser o usuário pedido.
+      def descurtir(id:)
+        alvo = checa_id_de_desfazer!(id)
+        dados = begin
+          graphql!(OPERACAO_DESFAZER_CURTIDA, { "tweet_id" => alvo })
+        rescue Incerto => e
+          raise e.class, traduz_aviso_de_desfazer(e.message)
+        end
+        confirmacao = dig_seguro(dados, "data", "unfavorite_tweet")
+        # A 2xx chegou DEPOIS do envio, então `nil`/valor inesperado aqui não é "falhou": é a mesma
+        # dúvida da falha de rede, e `dig_seguro` garante que nenhum corpo de tipo inesperado
+        # levante `TypeError` cru (achado 2 da r4) — o desfecho é sempre erro tipado do canal.
+        raise Incerto, "#{OPERACAO_DESFAZER_CURTIDA}: 2xx sem confirmacao (unfavorite_tweet=#{confirmacao.inspect}); " \
+                       "#{CUSTO_REPETIR_DESFAZER}; #{AVISO_PODE_TER_SAIDO_DESFAZER}" unless confirmacao == "Done"
+
+        { "id" => alvo }
+      end
+
+      def deseguir(usuario_id:)
+        alvo = checa_id_de_desfazer!(usuario_id)
+        gate!
+        headers = XGraphql.build_headers({}, {}, query_id: nil, operation: OPERACAO_DESFAZER_SEGUIR,
+                                                 method: "POST", path: UNFOLLOW_PATH)
+        resposta = SafeHttpClient.post("https://#{COOKIE_DOMAIN}#{UNFOLLOW_PATH}",
+                                       form: { "user_id" => alvo }, headers: headers)
+        dados = begin
+          interpreta!(resposta, OPERACAO_DESFAZER_SEGUIR, escrita: true)
+        rescue Incerto => e
+          raise e.class, traduz_aviso_de_desfazer(e.message)
+        end
+        # Mesma conferência do `seguir`: um 2xx sem o usuário pedido é a DUVIDA (pode ter
+        # desfollowed outra coisa, ou o X engoliu a chamada), não uma falha — e o `id_str` errado
+        # é justamente o sinal de que algo saiu do esperado.
+        raise Incerto, "#{OPERACAO_DESFAZER_SEGUIR}: 2xx sem confirmacao do usuario #{alvo} " \
+                       "(id_str=#{dados.is_a?(Hash) ? dados["id_str"].inspect : dados.inspect}); " \
+                       "#{CUSTO_REPETIR_DESFAZER}; #{AVISO_PODE_TER_SAIDO_DESFAZER}" unless
+          dados.is_a?(Hash) && dados["id_str"].to_s == alvo
+
+        { "usuario_id" => alvo }
+      rescue SafeHttpClient::Error, SsrfGuard::Blocked => e
+        falha_de_rede!(e, OPERACAO_DESFAZER_SEGUIR)
+      end
+
+      # O `interpreta!` monta o aviso de escrita com as frases do POSTAR, e as DUAS são MENTIRA
+      # no desfazer: "repetir as cegas cria OUTRO post" (o desfazer não cria post nenhum) e
+      # "confira o POST" (no `deseguir` não existe post para conferir — o que existe é o vínculo
+      # com a conta).
+      #
+      # A tradução TROCA as duas frases pelo valor exato das constantes em vez de ACRESCENTAR as
+      # do desfazer depois: acrescentar deixaria a frase falsa logo acima da verdadeira na mesma
+      # linha, e quem lê na hora de decidir lê a primeira (foi o que a primeira rodada GREEN
+      # mostrou). O resto da mensagem (o nome da operação, "resposta 2xx sem JSON utilizavel") é
+      # verdade e fica.
+      #
+      # O `gsub` casa pelo VALOR das constantes, o que amarra a prosa ao código: se o
+      # `interpreta!` mudar a frase, a troca deixa de casar e o teste do aviso falso volta a
+      # falhar em vez de passar calado.
+      def traduz_aviso_de_desfazer(mensagem)
+        mensagem.gsub(CUSTO_REPETIR_POSTAR, CUSTO_REPETIR_DESFAZER)
+                .gsub(AVISO_PODE_TER_SAIDO, AVISO_PODE_TER_SAIDO_DESFAZER)
+      end
+
+      # O id do X é ENTRADA no desfazer: ele vai para as `variables` do GraphQL e para o
+      # formulário do REST. A DEFINIÇÃO é a de sempre (`id_utilizavel?`, snowflake de 64 bits sem
+      # sinal, > 0) e não uma lista nova: o que muda é a CLASSE do desfecho, e por quê.
+      #
+      # No `postar` o id vem do X (saída) e um id ruim é `Incerto`, porque o X pode ter publicado
+      # mesmo assim. Aqui o id vem do OPERADOR (entrada), a casa o confere ANTES da rede, e recusa
+      # com `Recusado`: nada saiu, e a casa sabe que o X não fez nada. `Incerto` aqui seria
+      # afirmar a dúvida que acabamos de desfazer.
+      def checa_id_de_desfazer!(id)
+        alvo = id.is_a?(Integer) ? id : id.to_s
+        raise Recusado, "id invalido: #{id.inspect} — o desfazer quer o id NUMERICO do X " \
+                        "(o mesmo das outras escritas), e nao um screen_name" unless id_utilizavel?(alvo)
+
+        alvo.to_s
       end
 
       def graphql!(operacao, variaveis, features: nil)
