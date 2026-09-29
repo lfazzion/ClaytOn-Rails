@@ -80,6 +80,36 @@ module Fetcher
 
       module_function
 
+      # ── O QUE É "ID UTILIZÁVEL" (a definição fechada, e ela mora AQUI, não em cada fluxo) ──
+      #
+      # Um id do X só serve se dá para ABRIR o post com ele. Quatro formas são recusadas, e as
+      # quatro já caíram nesta casa em formas diferentes (a r1 achou `tweet_results` vazio, a r2
+      # achou `rest_id: ""`), então a lista é fechada e nomeada aqui:
+      #
+      #   1. AUSENTE  — o `result` não tem `rest_id`, ou o `tweet_results` inteiro não veio;
+      #   2. VAZIO    — `""`; em Ruby `""` é truthy, então a condição antiga (`id.nil?`) aceitava
+      #      isto como SUCESSO e montava `https://x.com/i/status/` (uma url que parece post);
+      #   3. SÓ ESPAÇOS — `"   "`, que passa por `to_s` e vira url idem;
+      #   4. ZERO     — o inteiro `0` (truthy, e monta `/i/status/0`, que também parece url).
+      #      A string `"0"` cai na mesma regra: id do X é a sequência de dígitos do snowflake,
+      #      então zero não é post de ninguém. Isto é um SUPERSET do pedido da r2 (que pedia o
+      #      inteiro `0`), e a casa não rejeita id real nenhum com ele.
+      #
+      # Tudo que não for utilizável é `Incerto` — NUNCA sucesso — porque a 2xx já prova que o
+      # pedido chegou ao X (a regra de cima). Recusar aqui não é dizer "falhou": é dizer "não
+      # tenho como dizer, confira antes de repetir".
+      def id_utilizavel?(id)
+        return false if id.nil?
+        return false if id.is_a?(Integer) && id.zero?
+
+        texto = id.to_s.strip
+        return false if texto.empty?
+
+        # `to_i` de um id do X é o próprio id (só dígitos), então isto é "não é zero". A string
+        # `"0"` e o inteiro `0` caem aqui; nenhum id real cai.
+        !texto.to_i.zero?
+      end
+
       def postar(texto:, em_resposta_a: nil)
         texto = texto.to_s.strip
         raise Recusado, "texto vazio" if texto.empty?
@@ -100,9 +130,13 @@ module Fetcher
         # 2xx prova que o pedido chegou, e sem o `tweet_results` a casa não sabe se o post saiu —
         # então sai como Incerto, com o aviso de conferir. Repetir às cegas aqui criava OUTRO
         # post do mesmo texto no X.
+        #
+        # A condição é `id_utilizavel?` e NÃO `id.nil?`: em Ruby `""`, `"   "` e `0` são truthy,
+        # e qualquer um dos três montava uma url de aparência válida (`/i/status/`, `/i/status/0`)
+        # e saía como SUCESSO. A definição fechada está em `id_utilizavel?`.
         id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
-        raise Incerto, "CreateTweet: #{CUSTO_REPETIR_POSTAR} (#{resultados.inspect}); #{AVISO_PODE_TER_SAIDO}" if
-          id.nil?
+        raise Incerto, "CreateTweet: #{CUSTO_REPETIR_POSTAR} (rest_id=#{id.inspect}); #{AVISO_PODE_TER_SAIDO}" unless
+          id_utilizavel?(id)
 
         { "id" => id.to_s, "url" => "https://x.com/i/status/#{id}" }
       end
@@ -122,9 +156,12 @@ module Fetcher
         resultados = dados.dig("data", "create_retweet", "retweet_results")
         # Mesma barreira do `postar`: `retweet_results: {}` (ou sem `rest_id`) com 2xx é o X
         # engolindo a chamada, não o X dizendo que não repostou. Repetir aqui refaz o repost.
+        # E a MESMA definição de id utilizável do `postar` (`id_utilizavel?`): o `rest_id: ""`
+        # que o X devolveu era aceito como sucesso e o `repostar` devolvia o id do ARGUMENTO
+        # como se o repost tivesse saído.
         repost_id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
-        raise Incerto, "CreateRetweet: repetir as cegas refaz o repost (#{resultados.inspect}); " \
-                       "#{AVISO_PODE_TER_SAIDO}" if repost_id.nil?
+        raise Incerto, "CreateRetweet: repetir as cegas refaz o repost (rest_id=#{repost_id.inspect}); " \
+                       "#{AVISO_PODE_TER_SAIDO}" unless id_utilizavel?(repost_id)
 
         { "id" => id.to_s }
       end

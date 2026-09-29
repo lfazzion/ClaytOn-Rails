@@ -127,8 +127,15 @@ module Fetcher
         # saído") e mesmo assim a mensagem dizia só "post suprimido", mandando o operador
         # repetir — e repetir às cegas edita DUAS vezes, criando OUTRA VERSÃO do post (cada
         # edição gasta uma das `.allowed` da janela do Premium).
-        incerto_de_edicao!(id, "X nao devolveu rest_id do texto novo, entao o post #{id} " \
-                               "pode JA ter sido editado (veio #{resultados.inspect})") if id_novo.nil?
+        #
+        # A quarta forma é o `rest_id` que VEM mas não serve — `""`, `"   "` e `0`: a condição
+        # antiga era só `id_novo.nil?`, então os três passavam como SUCESSO e a edição devolvia
+        # `url` de aparência válida (`/i/status/`, `/i/status/0`). Aqui a condição é a definição
+        # ÚNICA da casa, `XEscrita.id_utilizavel?`, e a forma devolvida vai na mensagem (quem
+        # for conferir o post precisa saber que o X devolveu vazio, e não que não devolveu).
+        incerto_de_edicao!(id, "X nao devolveu rest_id utilizavel do texto novo (rest_id=#{id_novo.inspect}), " \
+                               "entao o post #{id} pode JA ter sido editado (veio #{resultados.inspect})") unless
+          E.id_utilizavel?(id_novo)
 
         estado = estado_edit_control(dados.dig(*CAMINHO_EDIT_CONTROL))
         {

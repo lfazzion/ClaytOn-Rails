@@ -66,10 +66,30 @@
     `tweet_results` vazio) e `#repostar`. A LEITURA (`XConta`) segue `ResponseError`: não criou
     nada no X, e avisar ali treina o operador a ignorar o aviso. `XEditar#graphql_da_edicao!`
     traduz o aviso para o custo da edição (outra versão) e cita o id a conferir.
+  - **[2026-09-28] O QUE É "ID UTILIZÁVEL" — a definição é FECHADA, e a lista é esta:**
+    um id do X só serve se dá para abrir o post com ele. São recusadas **quatro** formas, e
+    nenhuma delas pode sair como SUCESSO (todas vão `Incerto`, com o aviso de conferir):
+    1. **AUSENTE** — `result` sem `rest_id`, ou `tweet_results`/`retweet_results` inteiro ausente;
+    2. **VAZIO** — `""`; em Ruby `""` é truthy, então a condição antiga (`id.nil?`) aceitava e
+       montava `https://x.com/i/status/`, uma url que PARECE post (achado da r2, revisão `t_7e7ca818`);
+    3. **SÓ ESPAÇOS** — `"   "`, que passa por `to_s`/`strip` e vira a mesma url;
+    4. **ZERO** — inteiro `0` e string `"0"`; ambos são truthy e montam `/i/status/0`, que também
+       parece url. id do X é snowflake de dígitos, então zero não é post de ninguém.
+    A casa tem **um** lugar para essa definição: `XEscrita.id_utilizavel?(id)`, usada pelos
+    **quatro** fluxos (`postar`, responder, `repostar`, `editar` — este via `E.id_utilizavel?`).
+    Ela é um PREDICADO sobre o valor, e não uma comparação: a forma devolvida (`rest_id=""`,
+    `rest_id=0`, …) entra na mensagem do `Incerto`, porque quem for conferir o post precisa saber
+    que o X devolveu vazio, e não que o X não devolveu nada.
+    Motivo de fechar a lista: a r1 achou o buraco do `tweet_results` vazio e a r2 o do `rest_id: ""`
+    na MESMA regra — duas formas diferentes, um só conceito. Lista fechada + um predicado só é o que
+    impede o terceiro revisor de achar o terceiro buraco.
   - Testes que cristalizavam o comportamento VELHO e foram ajustados (o comportamento errado era
     "falhou", não "posivelmente feito"): `repostar` 2xx sem `retweet_results` era `ResponseError`
     em x_escrita_test.rb; `tweet_results: {}` na edição era `Restrito` ("post suprimido") em
     x_editar_test.rb. Motivo: nenhuma das duas mensagens mandava conferir antes de repetir.
+    Agora há também os testes da DEFINIÇÃO: uma forma por caso (ausente, `""`, `"   "`, `0` nos
+    quatro fluxos) e um caso POSITIVO com id real, para a regra não virar "recusa tudo" — sem ele
+    os testes de recusa passariam com uma definição que quebrasse o caminho feliz.
 - **[2026-08-31]** Feature — Busca X via GraphQL (`Fetcher::Channels::XGraphql`).
   - `SearchTimeline` guest não funciona (exige sessão do dono via CookieJar auth_token+ct0 + header x-client-transaction-id assinado; sem ele o X devolve 404 vazio anti-bot).
   - Busca por assunto (`X.search`) agora usa HTTP GraphQL direto com paginação por cursor (máx 3 páginas, dedupe por permalink).
@@ -308,6 +328,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
+| 2026-09-28 | [2026-09-28, card t_092bdaae] Fecha o REPROVADO da r2 (revisão `t_7e7ca818`): "id utilizável" passa a ser uma DEFINIÇÃO FECHADA, num predicado só — `XEscrita.id_utilizavel?(id)` — em vez da comparação `id.nil?` espalhada em três pontos. As quatro formas recusadas são ausente, `""`, `"   "` e zero (inteiro `0` e string `"0"`); todas vão `Incerto` com o aviso de conferir, nos quatro fluxos (`postar`, responder, `repostar`, `editar`). **Motivo:** em Ruby `""`, `"   "` e `0` são truthy, então o `postar` montava `https://x.com/i/status/` e a edição `/i/status/` ou `/i/status/0` e saíam como SUCESSO, afirmando um sucesso que o X não confirmou. A r1 e a r2 acharam buracos diferentes na MESMA regra; lista fechada + predicado único é o que impede o terceiro. A forma devolvida entra na mensagem do `Incerto`. | Padrões Sistêmicos Ratificados |
 | 2026-09-28 | Regra da casa "escrita 2xx sem id utilizável = possivelmente feito; conferir antes de repetir" (card t_dabd8768, fechando o REPROVADO do editar): `XEscrita` 2xx sem JSON/sem `rest_id`/`tweet_results` vazio e `XEditar` 2xx sem id passam a sair como `Incerto` com o aviso e o custo de repetir, no postar, responder, repostar e editar. **Motivo:** antes, dois desses ramos diziam "falhou"/"post suprimido" sem aviso, e repetir às cegas criava outro post ou outra versão do post. Registrou-se também quais testes cristalizavam o comportamento velho (`repostar` e `tweet_results: {}` na edição) e por que foram ajustados. | Padrões Sistêmicos Ratificados |
 | 2026-09-26 | Causa medida do card t_f63b3613: por que o canal do Reddit navegou old.reddit 65x em 90 min num alvo que responde 403 em 0,025s. A regra 4 do AGENTS.md (backoff 6-12h) está INERTE nesse caminho por três furos independentes — `RateLimitHandler` com ZERO call sites em `lib/fetcher`, `BotDetection.cooldown!` lido só por `PageFetcher#call` (que o canal não usa), e o 403 real chegando como `RenderTimeout(35s)` em 6/6 chamadas, que não casa com nenhum padrão de backoff. **Ainda não corrigido** (o card mandou medir a causa primeiro). Registrado também o achado que corrige um FATO do card: o Chrome do container não tem `--proxy-server` e o bloqueio é do IP da VM, não do `SCRAPING_PROXY`. 12 provas em `scripts/proofs/`, commit `6980313`. | Lições Aprendidas de Bugs Recorrentes |
 | 2026-09-26 | Quatro bloqueantes da revisão A do #205 fechados (card t_ab1dd082) — detalhado na seção de Lições Aprendidas. |

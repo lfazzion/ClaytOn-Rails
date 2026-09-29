@@ -254,6 +254,56 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
     assert_equal 1, classes.uniq.length
   end
 
+  # ── "ID UTILIZÁVEL": a definicao fechada, uma forma por caso (o buraco da r2) ────
+  #
+  # `XEditar` tinha a mesma condicao so-`nil?` do `postar`: com `rest_id: ""` a edicao devolvia
+  # `{"id" => "", "url" => "https://x.com/i/status/"}` e SAIA COMO SUCESSO. As quatro formas
+  # recusadas sao as de `XEscrita.id_utilizavel?`: ausente, vazia, so espacos e o inteiro `0`.
+  FORMAS_NAO_UTILIZAVEIS = {
+    "rest_id ausente" => {},
+    "rest_id vazio" => { "rest_id" => "" },
+    "rest_id so espacos" => { "rest_id" => "   " },
+    "rest_id inteiro 0" => { "rest_id" => 0 }
+  }.freeze
+
+  def corpo_com_rest_id(result)
+    JSON.generate("data" => { "create_tweet" => { "tweet_results" => { "result" => result } } })
+  end
+
+  test "editar: cada forma de id novo nao utilizavel e Incerto, e NUNCA sucesso" do
+    FORMAS_NAO_UTILIZAVEIS.each do |nome, result|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_com_rest_id(result), headers: {}))
+      erro = assert_raises(E::Incerto, "editar #{nome}") { X.editar(id: "111", texto: "oi") }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "editar #{nome}"
+      assert_includes erro.message, E::CUSTO_REPETIR_EDITAR, "editar #{nome}"
+      assert_includes erro.message, "conferir o post 111", "editar #{nome}"
+      refute_kind_of E::Restrito, erro, "editar #{nome} nao pode dizer so 'suprimido'"
+    end
+  end
+
+  # O caminho feliz da edicao nao pode quebrar: id real continua sucesso, e a url sai do id NOVO
+  # (nao do id pedido). Sem este teste os de cima passariam com uma regra que recusasse tudo.
+  test "com id novo real a edicao continua sucesso, e a url sai do id novo" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: resposta_edicao("2104299999999999999", "111"),
+                                             headers: {}))
+    saida = X.editar(id: "111", texto: "oi")
+    assert_equal "2104299999999999999", saida["id"]
+    assert_equal "111", saida["id_anterior"]
+    assert_equal "https://x.com/i/status/2104299999999999999", saida["url"]
+  end
+
+  # O aviso da edicao tem de mostrar a FORMA devolvida, e dizer o que a casa faz com ela: sem o
+  # id novo a `url` nao pode ser montada (url com id vazio parece um link de verdade).
+  test "o Incerto da edicao mostra a forma do id devolvido e nao devolve url" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: corpo_com_rest_id("rest_id" => "   "), headers: {}))
+    erro = assert_raises(E::Incerto) { X.editar(id: "111", texto: "oi") }
+    assert_includes erro.message, 'rest_id="   "'
+    assert_match(/pode JA ter sido editado/, erro.message)
+  end
+
   # ── queryId velho: o mecanismo do repo, sem id fixo ──────────────────────────
   test "404 ou 422 redescobre o queryId uma vez e repete com o id novo" do
     [404, 422].each do |status|

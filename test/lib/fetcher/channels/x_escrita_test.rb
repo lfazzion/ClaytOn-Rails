@@ -256,6 +256,82 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     end
   end
 
+  # ── "ID UTILIZÁVEL": a definição fechada, uma forma por caso (o buraco da r2) ────
+  #
+  # A condição antiga era só `id.nil?`, e em Ruby `""` é truthy: então o `postar` montava
+  # `https://x.com/i/status/` e devolvia SUCESSO, o `repostar` devolvia "feito" e a edição
+  # devolvia uma url vazia. As QUATRO formas recusadas sao as do `XEscrita.id_utilizavel?`:
+  # ausente, vazia, só espaços e o inteiro `0` (que é truthy e monta `/i/status/0`, que PARECE
+  # uma url válida).
+  FORMAS_NAO_UTILIZAVEIS = {
+    "rest_id ausente" => {},
+    "rest_id vazio" => { "rest_id" => "" },
+    "rest_id so espacos" => { "rest_id" => "   " },
+    "rest_id inteiro 0" => { "rest_id" => 0 }
+  }.freeze
+  # A forma boa: o `rest_id` real que o X devolve (19 dígitos, string).
+  ID_REAL = "2104291497428345283"
+
+  def corpo_tweet(result)
+    JSON.generate("data" => { "create_tweet" => { "tweet_results" => { "result" => result } } })
+  end
+
+  def corpo_repost(result)
+    JSON.generate("data" => { "create_retweet" => { "retweet_results" => { "result" => result } } })
+  end
+
+  test "postar e responder: cada forma de id nao utilizavel e Incerto, e NUNCA sucesso" do
+    FORMAS_NAO_UTILIZAVEIS.each do |nome, result|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo_tweet(result), headers: {}))
+      [{}, { em_resposta_a: "42" }].each do |extra|
+        erro = assert_raises(E::Incerto, "postar #{nome} #{extra}") { E.postar(texto: "oi", **extra) }
+        assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "postar #{nome} #{extra}"
+        assert_includes erro.message, E::CUSTO_REPETIR_POSTAR, "postar #{nome} #{extra}"
+        refute_kind_of E::Restrito, erro, "postar #{nome} #{extra} nao pode dizer so 'suprimido'"
+      end
+    end
+  end
+
+  test "repostar: cada forma de id do repost nao utilizavel e Incerto, e NUNCA sucesso" do
+    FORMAS_NAO_UTILIZAVEIS.each do |nome, result|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo_repost(result), headers: {}))
+      erro = assert_raises(E::Incerto, "repostar #{nome}") { E.repostar(id: ID_REAL) }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "repostar #{nome}"
+      refute_kind_of E::Restrito, erro, "repostar #{nome}"
+    end
+  end
+
+  # O caminho feliz nao pode quebrar: id real continua SUCESSO, com a url montada. Sem isto os
+  # testes acima passariam tambem com uma regra que recusasse tudo.
+  test "com id real o postar e o repostar continuam sucesso" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: corpo_tweet("rest_id" => ID_REAL), headers: {}))
+    assert_equal({ "id" => ID_REAL, "url" => "https://x.com/i/status/#{ID_REAL}" }, E.postar(texto: "oi"))
+
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: corpo_repost("rest_id" => "2104297723893571643"),
+                                             headers: {}))
+    assert_equal({ "id" => ID_REAL }, E.repostar(id: ID_REAL))
+  end
+
+  # A DEFINICAO em si, para o proximo revisor nao ter que adivinhar o limite: as quatro formas
+  # recusadas recusam, e o id real passa.
+  test "a definicao de id utilizavel recusa as quatro formas e aceita o id real" do
+    FORMAS_NAO_UTILIZAVEIS.each do |nome, result|
+      refute E.id_utilizavel?(result["rest_id"]), "#{nome} (#{result['rest_id'].inspect}) passou como utilizavel"
+    end
+    assert E.id_utilizavel?(ID_REAL)
+  end
+
+  # O aviso precisa carregar a FORMA que o X mandou: se a casa so diz "sem id", quem for conferir
+  # o post no X nao tem como saber que o X devolveu `""` em vez de nao devolver nada.
+  test "o Incerto de id nao utilizavel mostra a forma que o X devolveu" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: corpo_tweet("rest_id" => ""), headers: {}))
+    erro = assert_raises(E::Incerto) { E.postar(texto: "oi") }
+    assert_includes erro.message, 'rest_id=""'
+  end
+
   # O conserto e na camada COMPARTILHADA, entao vale para toda escrita, nao so para o postar:
   # aqui o `curtir` e o exemplo, e o aviso e o mesmo.
   test "o aviso e o mesmo em qualquer escrita 2xx sem id, e nao so no postar" do
