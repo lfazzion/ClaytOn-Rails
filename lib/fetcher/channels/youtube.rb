@@ -59,7 +59,7 @@ module Fetcher
       PASSE_1_LANGS  = "pt-BR,pt,en,en-US,en-GB,en-orig,es,fr,de,it,ja"
       # Seleção de campos do yt-dlp: os mesmos dados úteis do info.json (14,6 MB
       # neste vídeo, quase tudo `automatic_captions`) em ~90 KB por stdout.
-      INFO_TEMPLATE  = "%(.{id,title,channel,uploader,subtitles})j"
+      INFO_TEMPLATE  = "%(.{id,title,channel,uploader,subtitles,description,chapters,duration})j"
       # Vem do registro único em `CookieJar::AUTH_SENTINELS`, e não de uma cópia
       # aqui: os DOIS caminhos de persistência (yt-dlp e navegador) precisam da
       # mesma lista, e manter duas cópias é como o bug de 05/08 nasceu. `fetch`
@@ -199,6 +199,7 @@ module Fetcher
           id = video_id!(url)
           link = "https://www.youtube.com/watch?v=#{id}"
           cookies, origem = SessionCookies.for(COOKIE_DOMAIN)
+          info = nil
           r = Dir.mktmpdir("ytdlp") do |dir|
             info = CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) do |cookie_path|
               resultado = run(link, dir, cookie_path, mark_watched: true)
@@ -212,7 +213,11 @@ module Fetcher
           end
           m = r[:metadata]
           { "id" => m["video_id"].presence || id, "titulo" => r[:title], "canal" => m["channel"],
-            "idioma" => m["lang"], "automatica" => m["auto_generated"], "texto" => r[:content] }
+            "idioma" => m["lang"], "automatica" => m["auto_generated"], "texto" => r[:content],
+            # A página do porteiro leva descrição e capítulos junto do texto: quem "assiste" precisa do contexto que o
+            # autor escreveu. nil (e não "" / 0) quando o yt-dlp não trouxe: ausente != vazio. Sem capítulos é lista
+            # vazia de verdade — o vídeo simplesmente não os tem.
+            "descricao" => info["description"].presence, "capitulos" => capitulos_do(info), "duracao" => duracao_do(info) }
         end
 
         # Item de `search`/`feed` (forma interna) -> forma do agente.
@@ -223,6 +228,19 @@ module Fetcher
         end
 
         private
+
+        def capitulos_do(info)
+          Array(info["chapters"]).filter_map do |c|
+            next unless c.is_a?(Hash) && c["start_time"].is_a?(Numeric)
+
+            { "inicio" => c["start_time"].floor, "titulo" => c["title"].to_s }
+          end
+        end
+
+        def duracao_do(info)
+          d = info["duration"]
+          d.floor if d.is_a?(Numeric)
+        end
 
         def resultados(termo, n, cookie_path)
           lista("ytsearch#{n}:#{termo}", nil, cookie_path)

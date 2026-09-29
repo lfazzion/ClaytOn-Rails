@@ -3,7 +3,7 @@
 # YouTube por linha de comando para o porteiro do experimento-x (só leitura + curtir; nada de comentar/postar).
 #   bin/rails yt:feed [LIMITE=20]                -> {"videos": [{"id","titulo","canal","duracao","url"}]}
 #   bin/rails yt:buscar CONSULTA=<texto> [LIMITE=10] -> {"videos": [...]}
-#   bin/rails yt:assistir ID=<id|link>           -> {"id","titulo","canal","idioma","automatica","texto"}
+#   bin/rails yt:assistir ID=<id|link>           -> {"id","titulo","canal","idioma","automatica","texto","descricao","capitulos","duracao"}
 #   bin/rails yt:curtir ID=<id|link>             -> {"id"}
 namespace :yt do
   desc "Página inicial de recomendações da conta: [LIMITE=20]"

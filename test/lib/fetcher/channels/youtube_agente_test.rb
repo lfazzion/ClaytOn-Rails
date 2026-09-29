@@ -76,6 +76,44 @@ class Fetcher::Channels::YoutubeAgenteTest < ActiveSupport::TestCase
                                                "channel" => "C" } })
     r = Y.assistir(url: "https://youtu.be/dQw4w9WgXcQ")
     assert_equal({ "id" => "dQw4w9WgXcQ", "titulo" => "T", "canal" => "C", "idioma" => "en",
-                   "automatica" => true, "texto" => "texto da legenda" }, r)
+                   "automatica" => true, "texto" => "texto da legenda",
+                   "descricao" => nil, "capitulos" => [], "duracao" => nil }, r)
+  end
+
+  def assistir_com_info(info)
+    Y.stubs(:run).returns(info)
+    Y.stubs(:verify_session!)
+    Y.stubs(:build_from).returns({ url: "u", title: "T", content: "texto",
+                                   metadata: { "lang" => "en", "auto_generated" => false,
+                                               "video_id" => "dQw4w9WgXcQ", "channel" => "C" } })
+    Y.assistir(url: "https://youtu.be/dQw4w9WgXcQ")
+  end
+
+  test "assistir devolve descricao, capitulos (inicio inteiro) e duracao" do
+    r = assistir_com_info({ "id" => "dQw4w9WgXcQ", "description" => "linha 1\nlinha 2", "duration" => 212,
+                            "chapters" => [{ "start_time" => 0.0, "end_time" => 30.5, "title" => "Intro" },
+                                           { "start_time" => 30.9, "end_time" => 212.0, "title" => "Resto" }] })
+    assert_equal "linha 1\nlinha 2", r["descricao"]
+    assert_equal [{ "inicio" => 0, "titulo" => "Intro" }, { "inicio" => 30, "titulo" => "Resto" }], r["capitulos"]
+    assert_equal 212, r["duracao"]
+    assert_equal "texto", r["texto"]
+  end
+
+  test "assistir sem descricao/capitulos/duracao devolve nil, lista vazia e nil" do
+    r = assistir_com_info({ "id" => "dQw4w9WgXcQ" })
+    assert_nil r["descricao"]
+    assert_equal [], r["capitulos"]
+    assert_nil r["duracao"]
+    assert r.key?("descricao") && r.key?("duracao")
+  end
+
+  test "assistir com chapters null no yt-dlp devolve lista vazia" do
+    r = assistir_com_info({ "id" => "dQw4w9WgXcQ", "chapters" => nil, "duration" => 61.0 })
+    assert_equal [], r["capitulos"]
+    assert_equal 61, r["duracao"]
+  end
+
+  test "INFO_TEMPLATE pede description, chapters e duration" do
+    %w[description chapters duration].each { |campo| assert_includes Y::INFO_TEMPLATE, campo }
   end
 end
