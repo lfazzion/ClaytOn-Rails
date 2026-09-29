@@ -23,7 +23,19 @@ module Fetcher
 
     class Erro < StandardError; end
     class UrlInvalida < Erro; end
-    class Bloqueado < Erro; end
+    # `bloqueado_apos_rede` é o que a COTA do porteiro consome: `true` quando um hop já
+    # foi buscado e o que a guarda recusou foi o SALTO SEGUINTE (o `Location` de um 302
+    # apontando para dentro) — a requisição saiu, perturbou o site, e a vaga é gasta.
+    # `false` quando a URL foi recusada antes de qualquer conexão: nada saiu, a vaga volta.
+    class Bloqueado < Erro
+      attr_reader :bloqueado_apos_rede
+
+      def initialize(mensagem, bloqueado_apos_rede: false)
+        @bloqueado_apos_rede = bloqueado_apos_rede
+        super(mensagem)
+      end
+    end
+
     class TempoEsgotado < Erro; end
     class CorpoGrande < Erro; end
     class HttpErro < Erro; end
@@ -68,7 +80,15 @@ module Fetcher
     def busca(url, cliente)
       cliente.get(url)
     rescue SsrfGuard::Blocked => e
-      raise Bloqueado, "a casa não abre este endereço (#{e.reason}); só sites públicos de http/https"
+      # O motivo da SsrfGuard NOMEIA o endereço recusado ("host resolve para IP
+      # privado/interno (10.1.2.3)"), e isso NÃO vai para o agente: o número de um
+      # endereço interno é mapa da rede interna da casa, e o agente não precisa dele
+      # para corrigir o pedido. A causa segue nomeada — "endereço interno/privado" —
+      # só o valor sai.
+      raise Bloqueado.new(
+        "a casa não abre este endereço (endereço interno/privado); só sites públicos de http/https",
+        bloqueado_apos_rede: e.apos_rede
+      )
     rescue SafeHttpClient::RequestTimeout
       raise TempoEsgotado, "a página não respondeu a tempo"
     rescue SafeHttpClient::BodyTooLarge

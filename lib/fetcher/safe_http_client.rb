@@ -100,13 +100,24 @@ module Fetcher
       # a autenticação: derrubá-la aí degradaria silenciosamente para o tier
       # anônimo ou quebraria recurso privado.
       current_origin = origin_of(current)
+      # Um hop JÁ buscado. A partir do segundo, a rede foi usada: se a SsrfGuard
+      # recusar o próximo salto, o bloqueio é DEPOIS da rede (`apos_rede`), e quem
+      # decide a cota precisa saber disso (um site público que responde 302 para
+      # 127.0.0.1 já foi perturbado — a leitura não pode ser de graça).
+      rede_usada = false
 
       (MAX_REDIRECTS + 1).times do
         # Revalidação por hop: scheme, host e IP são checados de novo aqui.
-        resolution = SsrfGuard.resolve!(current)
+        begin
+          resolution = SsrfGuard.resolve!(current)
+        rescue SsrfGuard::Blocked => e
+          e.apos_rede = rede_usada
+          raise e
+        end
         seen << current
 
         hop = perform(resolution, extra_headers: headers, body: body)
+        rede_usada = true
         location = hop.headers["location"]
 
         return build_response(hop, resolution.uri.to_s) unless redirect?(hop, location)

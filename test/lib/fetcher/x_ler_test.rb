@@ -26,6 +26,32 @@ class Fetcher::XLerTest < ActiveSupport::TestCase
     Resp.new(status: status, final_url: final, content_type: tipo, body: body, headers: headers)
   end
 
+  # Cliente REAL (`SafeHttpClient`) para o caminho que o cliente falso não alcança:
+  # site público que responde 302 para 127.0.0.1. É aqui que nasce a distinção entre
+  # "bloqueou antes de pedir qualquer coisa" e "pediu, e o redirecionamento foi recusado" —
+  # o primeiro hop é buscado de verdade, e o segundo morre na SsrfGuard.
+  class ClienteReal
+    PUBLIC_IP = "93.184.216.34"
+
+    attr_reader :pedidas
+
+    def initialize
+      @pedidas = []
+    end
+
+    def get(url)
+      @pedidas << url
+      Fetcher::SafeHttpClient.get(url)
+    end
+  end
+
+  def setup
+    super
+    Fetcher::SsrfGuard.stubs(:resolve_all).returns([ClienteReal::PUBLIC_IP])
+    stub_request(:get, "http://a2.test/")
+      .to_return(status: 302, headers: { "Location" => "http://127.0.0.1/x" })
+  end
+
   HTML = "<html><head><title>  Meu  Paper </title></head><body><nav>menu</nav><h1>Ola</h1><p>Texto do paper.</p>" \
          "<script>segredo()</script></body></html>"
 
@@ -68,6 +94,33 @@ class Fetcher::XLerTest < ActiveSupport::TestCase
     cliente = Cliente.new(erro: Fetcher::SsrfGuard::Blocked.new("IP 127.0.0.1 é interno"))
     e = assert_raises(Fetcher::XLer::Bloqueado) { Fetcher::XLer.ler(url: "http://localhost/", cliente: cliente) }
     assert_includes e.message, "não abre este endereço"
+  end
+
+  # ---- a distinção de que a COTA depende: houve requisição de rede antes do bloqueio?
+  #
+  # `Bloqueado` chega ao porteiro como `{erro, tipo}` e o porteiro devolve a vaga da cota
+  # quando a culpa é do PEDIDO (nada saiu). Num site público que responde 302 para
+  # 127.0.0.1 a requisição ao site JÁ SAIU: devolver a vaga ali deixava o laço de
+  # "abrir até o teto" sem teto (21 chamadas ao Rails, zero contadas). O nome do caso
+  # tem de travelar até o porteiro, e é `bloqueado_apos_rede`.
+  test "bloqueio que aconteceu antes de pedir rede é marcado (bloqueado_apos_rede = false)" do
+    cliente = Cliente.new(erro: Fetcher::SsrfGuard::Blocked.new("host privado/interno (127.0.0.1)"))
+    e = assert_raises(Fetcher::XLer::Bloqueado) { Fetcher::XLer.ler(url: "http://localhost/", cliente: cliente) }
+    assert_equal false, e.bloqueado_apos_rede
+  end
+
+  test "bloqueio em hop posterior (302 para IP interno) é marcado como bloqueio DEPOIS da rede" do
+    cliente = ClienteReal.new
+    e = assert_raises(Fetcher::XLer::Bloqueado) { Fetcher::XLer.ler(url: "http://a2.test/", cliente: cliente) }
+    assert_equal true, e.bloqueado_apos_rede
+    assert_equal ["http://a2.test/"], cliente.pedidas
+  end
+
+  test "a mensagem de Bloqueado NAO entrega o endereco interno, mas diz que é interno" do
+    cliente = Cliente.new(erro: Fetcher::SsrfGuard::Blocked.new("host resolve para IP privado/interno (10.1.2.3)"))
+    e = assert_raises(Fetcher::XLer::Bloqueado) { Fetcher::XLer.ler(url: "http://interno.test/", cliente: cliente) }
+    refute_includes e.message, "10.1.2.3"
+    assert_includes e.message, "interno"
   end
 
   test "timeout, corpo grande, redirect e falha de rede viram erro legivel sem a mensagem crua" do
