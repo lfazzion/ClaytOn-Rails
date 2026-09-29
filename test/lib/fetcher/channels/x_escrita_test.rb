@@ -859,15 +859,47 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     end
   end
 
+  # A guarda é conferida no OBJETO QUE CHEGOU, e não na impressão dele. Um objeto que só vira
+  # snowflake quando impresso (`to_s` sobrescrito) passaria por uma checagem feita DEPOIS da
+  # conversão — e a casa mandaria ao X um id que ela não conferiu. `id_utilizavel?` aceita só
+  # `Integer` e `String`, então a recusa é a mesma dos demais ids fora da definição: local,
+  # antes da rede, e `Recusado`.
+  #
+  # O dublê responde PRONTO para o caminho feliz de propósito: se a guarda deixar passar, o
+  # `descurtir`/`deseguir` volta com sucesso e é a ASSERÇÃO que quebra — não um erro de dublê,
+  # que mediria o instrumento em vez do código.
+  test "id que so vira snowflake no to_s e recusado antes da rede" do
+    disfarce = Class.new do
+      def initialize(bruto) = @bruto = bruto
+      def to_s = @bruto
+    end
+    [ID_REAL, TETO.to_s].each do |bruto|
+      falso_id = disfarce.new(bruto)
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo_desfazer("Done"), headers: {}))
+      erro = assert_raises(E::Recusado, "descurtir com to_s de #{bruto}") { E.descurtir(id: falso_id) }
+      assert_match(/id invalido/, erro.message, "descurtir com to_s de #{bruto}")
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: { "id_str" => bruto }.to_json,
+                                                            headers: {}))
+      erro = assert_raises(E::Recusado, "deseguir com to_s de #{bruto}") { E.deseguir(usuario_id: falso_id) }
+      assert_match(/id invalido/, erro.message, "deseguir com to_s de #{bruto}")
+    end
+  end
+
   # Sem isto o teste acima passaria com uma regra que recusa TUDO: o caminho feliz continua
   # (“id utilizável não é o mesmo que nenhum id serve”).
+  #
+  # Cada iteração usa o id DA VEZ nos DOIS caminhos, e o dublê do `deseguir` responde com o
+  # `id_str` desse id: com o `id_str` fixo da fixture, a conferência passaria com qualquer alvo
+  # e o laço não mediria nada do `deseguir` além de repetir `UNFOLLOW_ID` três vezes.
   test "o caminho feliz do desfazer continua: id real e id no teto saem como sucesso" do
     [ID_REAL, TETO.to_s, ID_REAL.to_i].each do |bom|
       Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo_desfazer("Done"), headers: {}))
       assert_equal({ "id" => bom.to_s }, E.descurtir(id: bom), "descurtir #{bom.inspect}")
-      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: fixture("friendships_destroy_ok.json"),
-                                                            headers: {}))
-      assert_equal({ "usuario_id" => UNFOLLOW_ID }, E.deseguir(usuario_id: UNFOLLOW_ID), "deseguir #{bom.inspect}")
+      Fetcher::SafeHttpClient.stubs(:post).returns(
+        Resp.new(status: 200, body: JSON.parse(fixture("friendships_destroy_ok.json"))
+                                            .merge("id_str" => bom.to_s).to_json, headers: {})
+      )
+      assert_equal({ "usuario_id" => bom.to_s }, E.deseguir(usuario_id: bom), "deseguir #{bom.inspect}")
     end
   end
 

@@ -87,8 +87,17 @@ class RefreshXQueryIdsJobTest < ActiveJob::TestCase
     any.stubs(:fetch_bundle).returns(extract ? @bundle_js : '')
   end
 
+  # O `descurtir` resolve o `queryId` do `UnfavoriteTweet` por nome em runtime, então a
+  # operação PRECISA entrar na lista do refresh: fora dela, o redescovery de 404/422 só saem
+  # pelo cache miss do primeiro uso, e uma rotação de `queryId` do X só seria percebida na
+  # primeira chamada de cada 24 h.
+  test "o refresh proativo cobre a operacao do descurtir" do
+    assert_includes OPS, "UnfavoriteTweet",
+                    "sem refresh proativo, o primeiro descurtir apos a rotacao do queryId so se recupera pelo retry"
+  end
+
   test "chama resolver com force: true para cada operacao (busca, escrita, conta e feed)" do
-    assert_equal %w[SearchTimeline CreateTweet FavoriteTweet CreateRetweet DeleteTweet
+    assert_equal %w[SearchTimeline CreateTweet FavoriteTweet CreateRetweet DeleteTweet UnfavoriteTweet
                     UserByScreenName UserTweetsAndReplies HomeTimeline HomeLatestTimeline], OPS
     resolver = mock
     Fetcher::XQueryIdResolver.expects(:new).returns(resolver)

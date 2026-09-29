@@ -450,12 +450,16 @@ module Fetcher
       # mesmo assim. Aqui o id vem do OPERADOR (entrada), a casa o confere ANTES da rede, e recusa
       # com `Recusado`: nada saiu, e a casa sabe que o X não fez nada. `Incerto` aqui seria
       # afirmar a dúvida que acabamos de desfazer.
+      # A guarda olha o OBJETO QUE CHEGOU, e não a impressão dele. Converter antes de conferir
+      # trocaria a definição do canal por uma regra frouxa: `id.to_s` de um objeto que só vira
+      # snowflake quando impresso entraria como `String` e passaria, e a casa mandaria ao X um id
+      # que ela não conferiu. `id_utilizavel?` aceita `Integer` e `String` e nada mais — então a
+      # forma do id é conferida aqui, e a conversão vem DEPOIS, só para o envio.
       def checa_id_de_desfazer!(id)
-        alvo = id.is_a?(Integer) ? id : id.to_s
         raise Recusado, "id invalido: #{id.inspect} — o desfazer quer o id NUMERICO do X " \
-                        "(o mesmo das outras escritas), e nao um screen_name" unless id_utilizavel?(alvo)
+                        "(o mesmo das outras escritas), e nao um screen_name" unless id_utilizavel?(id)
 
-        alvo.to_s
+        id.to_s
       end
 
       def graphql!(operacao, variaveis, features: nil)
