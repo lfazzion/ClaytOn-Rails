@@ -256,18 +256,43 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     end
   end
 
-  # ── "ID UTILIZÁVEL": a definição fechada, uma forma por caso (o buraco da r2) ────
+  # ── "ID UTILIZÁVEL": a definição POSITIVA (a forma do id), não uma lista de proibidos ────
   #
-  # A condição antiga era só `id.nil?`, e em Ruby `""` é truthy: então o `postar` montava
-  # `https://x.com/i/status/` e devolvia SUCESSO, o `repostar` devolvia "feito" e a edição
-  # devolvia uma url vazia. As QUATRO formas recusadas sao as do `XEscrita.id_utilizavel?`:
-  # ausente, vazia, só espaços e o inteiro `0` (que é truthy e monta `/i/status/0`, que PARECE
-  # uma url válida).
+  # A r1 achou `tweet_results` vazio, a r2 achou `rest_id: ""` e a r3 (revisão `t_3581f942`)
+  # achou OITO formas a mais que chegavam ao SUCESSO dos quatro fluxos. As três rodadas
+  # quebraram a MESMA regra, e a causa está no COMO ela foi escrita: como lista do que é
+  # PROIBIDO (ausente, `""`, `"   "`, zero). Lista do que é proibido nunca fecha — cada rodada
+  # acha uma forma fora da lista. A inversão é a regra: o id do X é um SNOWFLAKE, ou seja,
+  # SÓ DÍGITOS com valor MAIOR QUE ZERO, e nada mais entra.
+  #
+  # As 8 formas medidas pela r3 estão aqui nominalmente, mas elas não são casos especiais: são
+  # consequência de não terem a forma do snowflake (sinal, ponto, letra, espaço, pontuação) ou de
+  # não serem nem número (float, booleano).
   FORMAS_NAO_UTILIZAVEIS = {
+    # ── as OITO medidas pela revisão da r3 ──
+    "rest_id inteiro negativo" => { "rest_id" => -1 },
+    "rest_id negativo em string" => { "rest_id" => "-1" },
+    "rest_id decimal em string" => { "rest_id" => "1.5" },
+    "rest_id com letra" => { "rest_id" => "123abc" },
+    "rest_id com espaco no meio" => { "rest_id" => "12 34" },
+    "rest_id com barra" => { "rest_id" => "123/evil" },
+    "rest_id com query string" => { "rest_id" => "123?x=1" },
+    "rest_id float" => { "rest_id" => 1.5 },
+    # ── as QUATRO da r2, que continuam fora por ausentes/vazias/zero ──
     "rest_id ausente" => {},
     "rest_id vazio" => { "rest_id" => "" },
     "rest_id so espacos" => { "rest_id" => "   " },
-    "rest_id inteiro 0" => { "rest_id" => 0 }
+    "rest_id inteiro 0" => { "rest_id" => 0 },
+    # ── a borda escolhida: zero escrito, o sinal que some no `to_i`, espaço nas pontas,
+    #    quebra de linha no fim (`\z`, e nao `\Z`), e os tipos que o JSON traz e nao sao numero ──
+    "rest_id string 0" => { "rest_id" => "0" },
+    "rest_id string 00" => { "rest_id" => "00" },
+    "rest_id string -0" => { "rest_id" => "-0" },
+    "rest_id com espaco nas pontas" => { "rest_id" => " 123 " },
+    "rest_id com quebra de linha ao fim" => { "rest_id" => "123\n" },
+    "rest_id booleano" => { "rest_id" => true },
+    "rest_id lista" => { "rest_id" => [] },
+    "rest_id objeto" => { "rest_id" => {} }
   }.freeze
   # A forma boa: o `rest_id` real que o X devolve (19 dígitos, string).
   ID_REAL = "2104291497428345283"
@@ -314,13 +339,37 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     assert_equal({ "id" => ID_REAL }, E.repostar(id: ID_REAL))
   end
 
-  # A DEFINICAO em si, para o proximo revisor nao ter que adivinhar o limite: as quatro formas
-  # recusadas recusam, e o id real passa.
-  test "a definicao de id utilizavel recusa as quatro formas e aceita o id real" do
+  # A DEFINICAO em si, escrita POSITIVA, para o proximo revisor nao ter que adivinhar o limite:
+  # entra o que tem a FORMA do snowflake (so digitos, valor > 0) e sai tudo o mais. O teste
+  # mede as duas pontas da definicao, e nao a lista do que e proibido.
+  test "a definicao de id utilizavel aceita so a forma do snowflake: digitos com valor > 0" do
     FORMAS_NAO_UTILIZAVEIS.each do |nome, result|
       refute E.id_utilizavel?(result["rest_id"]), "#{nome} (#{result['rest_id'].inspect}) passou como utilizavel"
     end
+    # o caminho feliz, nas duas formas em que o id real chega: a string que o X devolve e o inteiro
     assert E.id_utilizavel?(ID_REAL)
+    assert E.id_utilizavel?(ID_REAL.to_i)
+  end
+
+  # A varredura e POSITIVA de verdade: nenhuma string com sinal, ponto, letra, espaco ou
+  # pontuacao entra, e nenhum valor que nao seja inteiro > 0. Este e o teste que fecha a regra
+  # para a proxima rodada sem precisar de exemplo novo.
+  test "nenhuma forma que nao seja snowflake entra: nem sinal, ponto, letra, espaco ou pontuacao" do
+    ["-1", "+1", "1.0", "1.5", ".5", "1e3", "0x10", "123abc", "abc123", "12 34", " 12", "12 ",
+     "123/evil", "123?x=1", "123#f", "1,5", "123;", "123\n", "\t123", "1 OR 1=1"].each do |mau|
+      refute E.id_utilizavel?(mau), "#{mau.inspect} passou como utilizavel"
+    end
+    [0, -1, 1.5, 0.0, 1e3, true, false, nil, [], {}, :"123", 2104291497428345283.0].each do |mau|
+      refute E.id_utilizavel?(mau), "#{mau.inspect} passou como utilizavel"
+    end
+  end
+
+  # O que o predicado FECHA e a forma; e essa forma e a que a url usa. Um id nao utilizavel nunca
+  # pode virar `/i/status/<algo>`: essa url PARECE post, e e o que induz o operador a repetir.
+  test "um id nao utilizavel nunca monta uma url de status que pareca post" do
+    ["", "   ", "0", "1.5", "123abc", "12 34", "123/evil", "123?x=1"].each do |mau|
+      refute E.id_utilizavel?(mau), "id #{mau.inspect} passou como utilizavel"
+    end
   end
 
   # O aviso precisa carregar a FORMA que o X mandou: se a casa so diz "sem id", quem for conferir

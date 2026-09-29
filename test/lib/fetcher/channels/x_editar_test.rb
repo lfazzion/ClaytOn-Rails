@@ -254,16 +254,45 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
     assert_equal 1, classes.uniq.length
   end
 
-  # ── "ID UTILIZÁVEL": a definicao fechada, uma forma por caso (o buraco da r2) ────
+  # ── "ID UTILIZÁVEL": a definição POSITIVA (a forma do id), não uma lista de proibidos ────
   #
   # `XEditar` tinha a mesma condicao so-`nil?` do `postar`: com `rest_id: ""` a edicao devolvia
-  # `{"id" => "", "url" => "https://x.com/i/status/"}` e SAIA COMO SUCESSO. As quatro formas
-  # recusadas sao as de `XEscrita.id_utilizavel?`: ausente, vazia, so espacos e o inteiro `0`.
+  # `{"id" => "", "url" => "https://x.com/i/status/"}` e SAIA COMO SUCESSO. A r1 achou o
+  # `tweet_results` vazio, a r2 o `rest_id: ""` e a r3 (revisao `t_3581f942`) OITO formas a mais
+  # que chegavam ao SUCESSO tambem aqui. As tres rodadas quebraram a MESMA regra, e a causa esta
+  # no COMO ela foi escrita: como lista do que e PROIBIDO (ausente, `""`, `"   "`, zero). Lista
+  # do que e proibido nunca fecha — cada rodada acha uma forma fora da lista. A inversao e a
+  # regra: o id do X e um SNOWFLAKE, so DIGITOS com valor MAIOR QUE ZERO, e nada mais entra.
+  #
+  # A edicao e o fluxo que mais sofre de id nao utilizavel: ela tem DOIS ids (o pedido e o novo)
+  # e monta a `url` a partir do novo, entao o que nao tem a forma do snowflake viraria
+  # `/i/status/<lixo>` — uma url que PARECE post e induz a repetir a edicao (que cria OUTRA
+  # versao do mesmo post, gastando a janela do Premium).
   FORMAS_NAO_UTILIZAVEIS = {
+    # ── as OITO medidas pela revisao da r3 ──
+    "rest_id inteiro negativo" => { "rest_id" => -1 },
+    "rest_id negativo em string" => { "rest_id" => "-1" },
+    "rest_id decimal em string" => { "rest_id" => "1.5" },
+    "rest_id com letra" => { "rest_id" => "123abc" },
+    "rest_id com espaco no meio" => { "rest_id" => "12 34" },
+    "rest_id com barra" => { "rest_id" => "123/evil" },
+    "rest_id com query string" => { "rest_id" => "123?x=1" },
+    "rest_id float" => { "rest_id" => 1.5 },
+    # ── as QUATRO da r2, que continuam fora por ausentes/vazias/zero ──
     "rest_id ausente" => {},
     "rest_id vazio" => { "rest_id" => "" },
     "rest_id so espacos" => { "rest_id" => "   " },
-    "rest_id inteiro 0" => { "rest_id" => 0 }
+    "rest_id inteiro 0" => { "rest_id" => 0 },
+    # ── a borda escolhida: zero escrito, o sinal que some no `to_i`, espaco nas pontas,
+    #    quebra de linha no fim (`\z`, e nao `\Z`), e os tipos que o JSON traz e nao sao numero ──
+    "rest_id string 0" => { "rest_id" => "0" },
+    "rest_id string 00" => { "rest_id" => "00" },
+    "rest_id string -0" => { "rest_id" => "-0" },
+    "rest_id com espaco nas pontas" => { "rest_id" => " 123 " },
+    "rest_id com quebra de linha ao fim" => { "rest_id" => "123\n" },
+    "rest_id booleano" => { "rest_id" => true },
+    "rest_id lista" => { "rest_id" => [] },
+    "rest_id objeto" => { "rest_id" => {} }
   }.freeze
 
   def corpo_com_rest_id(result)
@@ -292,6 +321,32 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
     assert_equal "2104299999999999999", saida["id"]
     assert_equal "111", saida["id_anterior"]
     assert_equal "https://x.com/i/status/2104299999999999999", saida["url"]
+  end
+
+  # O QUE A r3 ACHOU: as formas que nao tem a forma do snowflake chegavam ao SUCESSO da edicao e
+  # montavam uma `url` de status com lixo dentro (`/i/status/1.5`, `/i/status/123/evil` — esta
+  # ultima ainda vira OUTRO caminho na url). Alem de recusar, a edicao nao pode devolver `url`
+  # nenhuma: sem id novo nao ha post novo, e uma url que parece post e o que faz o operador
+  # repetir a edicao (o que cria OUTRA versao e gasta a janela do Premium).
+  test "as oito formas da r3 nao voltam como sucesso nem viram url de status" do
+    ["-1", "1.5", "123abc", "12 34", "123/evil", "123?x=1"].each do |mau|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_com_rest_id("rest_id" => mau), headers: {}))
+      erro = assert_raises(E::Incerto, "rest_id #{mau.inspect} saiu como sucesso") { X.editar(id: "111", texto: "oi") }
+      assert_includes erro.message, mau.inspect, "o aviso tem de mostrar a forma que o X devolveu"
+      refute_match(%r{https://x\.com/i/status/}, erro.message, "o aviso nao pode oferecer url de status")
+    end
+  end
+
+  # A mesma coisa para os valores que o JSON traz e NAO sao numero (float, booleano, lista,
+  # objeto): o `to_s` deles viraria url de qualquer jeito (`true`, `1.5`, `[]`, `{}`).
+  test "rest_id que nao e numero (float, booleano, lista, objeto) tambem vira Incerto" do
+    [1.5, true, false, [], {}].each do |mau|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_com_rest_id("rest_id" => mau), headers: {}))
+      erro = assert_raises(E::Incerto, "rest_id #{mau.inspect} saiu como sucesso") { X.editar(id: "111", texto: "oi") }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "rest_id #{mau.inspect}"
+    end
   end
 
   # O aviso da edicao tem de mostrar a FORMA devolvida, e dizer o que a casa faz com ela: sem o

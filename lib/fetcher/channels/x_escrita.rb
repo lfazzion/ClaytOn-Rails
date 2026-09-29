@@ -80,34 +80,53 @@ module Fetcher
 
       module_function
 
-      # ── O QUE É "ID UTILIZÁVEL" (a definição fechada, e ela mora AQUI, não em cada fluxo) ──
+      # ── O QUE É "ID UTILIZÁVEL" (a definição, e ela mora AQUI, não em cada fluxo) ──
       #
-      # Um id do X só serve se dá para ABRIR o post com ele. Quatro formas são recusadas, e as
-      # quatro já caíram nesta casa em formas diferentes (a r1 achou `tweet_results` vazio, a r2
-      # achou `rest_id: ""`), então a lista é fechada e nomeada aqui:
+      # A DEFINIÇÃO, escrita POSITIVA — a FORMA do id, e não uma lista do que é proibido:
       #
-      #   1. AUSENTE  — o `result` não tem `rest_id`, ou o `tweet_results` inteiro não veio;
-      #   2. VAZIO    — `""`; em Ruby `""` é truthy, então a condição antiga (`id.nil?`) aceitava
-      #      isto como SUCESSO e montava `https://x.com/i/status/` (uma url que parece post);
-      #   3. SÓ ESPAÇOS — `"   "`, que passa por `to_s` e vira url idem;
-      #   4. ZERO     — o inteiro `0` (truthy, e monta `/i/status/0`, que também parece url).
-      #      A string `"0"` cai na mesma regra: id do X é a sequência de dígitos do snowflake,
-      #      então zero não é post de ninguém. Isto é um SUPERSET do pedido da r2 (que pedia o
-      #      inteiro `0`), e a casa não rejeita id real nenhum com ele.
+      #   **um id do X é um snowflake: SÓ DÍGITOS, com valor MAIOR QUE ZERO. Nada mais entra.**
+      #
+      # Ou seja, o que entra é: um `Integer` maior que zero, ou uma `String` que case
+      # `/\A\d+\z/` E valha mais que zero. Tudo o mais é recusado — float, `true`/`false`, array,
+      # hash, `nil`, e qualquer string com sinal, ponto, letra, espaço ou pontuação.
+      #
+      # ── POR QUE POSITIVA, E NÃO A LISTA DO QUE É PROIBIDO ──
+      # Esta regra já foi quebrada em TRÊS revisões seguidas, e a causa nunca foi um caso
+      # faltando: foi o COMO ela estava escrita. A r1 achou `tweet_results` vazio, a r2 achou
+      # `rest_id: ""` e a r3 (revisão `t_3581f942`) achou OITO formas a mais chegando ao SUCESSO
+      # dos quatro fluxos: `-1`, `"-1"`, `"1.5"`, `"123abc"`, `"12 34"`, `"123/evil"`,
+      # `"123?x=1"` e o float `1.5`. Cada uma era acrescentada à lista de proibidos, e a rodada
+      # seguinte achava outra fora dela.
+      #
+      # **Lista do que é proibido nunca fecha** — sempre resta uma forma que ninguém pensou. Por
+      # isso a lista saiu, e no lugar dela fica a forma POSITIVA: o snowflake é a especificação
+      # do id do X, e o teste de conformidade com ela é fechado por construção. As oito formas
+      # do laudo não são oito casos especiais: são consequência de não terem a forma do
+      # snowflake (sinal, ponto, letra, espaço, pontuação) ou de nem serem número (float).
+      #
+      # ── POR QUE `to_i` NÃO PODE VALIDAR A FORMA (o bug medido) ──
+      # A versão anterior dizia `!texto.to_i.zero?`, e `to_i` NÃO valida forma: ele lê o PREFIXO
+      # numérico e ignora o resto. Por isso `"123abc".to_i == 123`, `"1.5".to_i == 1`,
+      # `"12 34".to_i == 12` e `"-1".to_i == -1` — todos passavam como SUCESSO, e o `postar`
+      # montava `https://x.com/i/status/123abc` (ou `/i/status/1.5`), que PARECE um post. O
+      # `to_i` serve aqui só para o SEGUNDO critério (o valor > 0), nunca para o primeiro (a forma).
+      #
+      # A âncora é `\A`/`\z` e não `\A`/`\Z`: `\Z` aceita a quebra de linha final, então
+      # `"123\n"` — que `to_i` lê como `123` — passaria. E a string NÃO é `strip`ada antes do
+      # teste: `" 123 "` não é snowflake, e `strip` aqui esconderia isso (o `strip` fica para o
+      # `checa_id` da edição, que é entrada de terminal e tem outra mensagem de erro).
       #
       # Tudo que não for utilizável é `Incerto` — NUNCA sucesso — porque a 2xx já prova que o
       # pedido chegou ao X (a regra de cima). Recusar aqui não é dizer "falhou": é dizer "não
       # tenho como dizer, confira antes de repetir".
       def id_utilizavel?(id)
-        return false if id.nil?
-        return false if id.is_a?(Integer) && id.zero?
+        # snowflake de verdade: `Integer` > 0. Um float NÃO entra mesmo que valha 1.5 — o id
+        # do X é inteiro, e aceitar float é aceitar um id que o X nunca emitiu.
+        return id.positive? if id.is_a?(Integer)
 
-        texto = id.to_s.strip
-        return false if texto.empty?
-
-        # `to_i` de um id do X é o próprio id (só dígitos), então isto é "não é zero". A string
-        # `"0"` e o inteiro `0` caem aqui; nenhum id real cai.
-        !texto.to_i.zero?
+        # String: os DOIS critérios, na ordem. Primeiro a forma (`\A\d+\z`), que é o que fecha
+        # sinal/ponto/letra/espaço/pontuação; depois o valor, que é o que fecha "0", "00" e "-0".
+        id.is_a?(String) && id.match?(/\A\d+\z/) && id.to_i.positive?
       end
 
       def postar(texto:, em_resposta_a: nil)
@@ -133,7 +152,8 @@ module Fetcher
         #
         # A condição é `id_utilizavel?` e NÃO `id.nil?`: em Ruby `""`, `"   "` e `0` são truthy,
         # e qualquer um dos três montava uma url de aparência válida (`/i/status/`, `/i/status/0`)
-        # e saía como SUCESSO. A definição fechada está em `id_utilizavel?`.
+        # e saía como SUCESSO. A DEFINIÇÃO (positiva: só dígitos com valor > 0) está em
+        # `id_utilizavel?` — e o motivo de ela ser positiva está escrito lá.
         id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
         raise Incerto, "CreateTweet: #{CUSTO_REPETIR_POSTAR} (rest_id=#{id.inspect}); #{AVISO_PODE_TER_SAIDO}" unless
           id_utilizavel?(id)
@@ -156,9 +176,9 @@ module Fetcher
         resultados = dados.dig("data", "create_retweet", "retweet_results")
         # Mesma barreira do `postar`: `retweet_results: {}` (ou sem `rest_id`) com 2xx é o X
         # engolindo a chamada, não o X dizendo que não repostou. Repetir aqui refaz o repost.
-        # E a MESMA definição de id utilizável do `postar` (`id_utilizavel?`): o `rest_id: ""`
-        # que o X devolveu era aceito como sucesso e o `repostar` devolvia o id do ARGUMENTO
-        # como se o repost tivesse saído.
+        # E a MESMA definição de id utilizável do `postar` (`id_utilizavel?`, positiva: só
+        # dígitos com valor > 0): o `rest_id: ""` que o X devolveu era aceito como sucesso, e o
+        # `repostar` devolvia o id do ARGUMENTO como se o repost tivesse saído.
         repost_id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
         raise Incerto, "CreateRetweet: repetir as cegas refaz o repost (rest_id=#{repost_id.inspect}); " \
                        "#{AVISO_PODE_TER_SAIDO}" unless id_utilizavel?(repost_id)

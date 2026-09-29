@@ -128,11 +128,14 @@ module Fetcher
         # repetir — e repetir às cegas edita DUAS vezes, criando OUTRA VERSÃO do post (cada
         # edição gasta uma das `.allowed` da janela do Premium).
         #
-        # A quarta forma é o `rest_id` que VEM mas não serve — `""`, `"   "` e `0`: a condição
-        # antiga era só `id_novo.nil?`, então os três passavam como SUCESSO e a edição devolvia
-        # `url` de aparência válida (`/i/status/`, `/i/status/0`). Aqui a condição é a definição
-        # ÚNICA da casa, `XEscrita.id_utilizavel?`, e a forma devolvida vai na mensagem (quem
-        # for conferir o post precisa saber que o X devolveu vazio, e não que não devolveu).
+        # A quarta forma é o `rest_id` que VEM mas não tem a FORMA do id do X: qualquer coisa
+        # fora do snowflake (só dígitos, valor > 0). A condição antiga era só `id_novo.nil?`, e
+        # depois a r2 corrigiu para uma lista do que é proibido (`""`, `"   "`, `0`) — mas a r3
+        # (revisão `t_3581f942`) mediu OITO formas que ainda passavam como SUCESSO e viravam
+        # `/i/status/1.5`, `/i/status/123/evil`, `/i/status/123?x=1`. A DEFINIÇÃO é a ÚNICA da
+        # casa, `XEscrita.id_utilizavel?`, escrita POSITIVA (o motivo de ser positiva e não
+        # lista está no comentário dela), e a forma devolvida vai na mensagem (quem for conferir
+        # o post precisa saber que o X devolveu `-1`, e não que não devolveu).
         incerto_de_edicao!(id, "X nao devolveu rest_id utilizavel do texto novo (rest_id=#{id_novo.inspect}), " \
                                "entao o post #{id} pode JA ter sido editado (veio #{resultados.inspect})") unless
           E.id_utilizavel?(id_novo)
