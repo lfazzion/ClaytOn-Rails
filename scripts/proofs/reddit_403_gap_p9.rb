@@ -53,7 +53,7 @@ linha "4) O recurso realmente contido: Chrome, e nao host"
 puts "  MAX_INFLIGHT_PAGES  = #{Fetcher::PageFetcher::MAX_INFLIGHT_PAGES}"
 puts "  GOTO_TIMEOUT        = #{Fetcher::PageFetcher::GOTO_TIMEOUT}s"
 puts "  OVERALL_TIMEOUT     = #{Fetcher::BrowserSession::OVERALL_TIMEOUT}s"
-puts "  -> com 35s por tentativa e o browser ocupado, o服务 enfileira. O log"
+puts "  -> com 35s por tentativa e o browser ocupado, o servico enfileira. O log"
 puts "  mostra o sintoma: '[BrowserCookies] sessao do Chrome indisponivel"
 puts "  (timeout aguardando semaforo de browser (25s))' — o gargalo e o Chrome."
 

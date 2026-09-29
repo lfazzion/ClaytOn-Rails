@@ -40,17 +40,24 @@ Rails.cache.delete(chave)
 end
 puts "  => SIM, o balde estouraria na 3a. O balde NAO e o defeito."
 
-linha "3) Mas o balde do ExtractService: o que o CHAMADOR VE quando estoura?"
+linha "3) E o balde do ExtractService, nestas 4 URLs reais?"
 Rails.cache.delete("#{Fetcher::HostRateLimiter::KEY_PREFIX}:www.reddit.com")
-URLS.each_with_index do |u, i|
+# Cada URL demora 35s (RenderTimeout), entao a janela de 60s do balde NAO fecha
+# duas chamadas: a 3a ja cai numa janela nova. Por isso o balde nao estoura aqui
+# -- e o erro que sobra nao e 'rate limit local', e o RenderTimeout.
+erros = URLS.each_with_index.map do |u, i|
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   r = Fetcher::ExtractService.call(u)
   dt = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(2)
   printf("  ##{i + 1} %6.2fs  error=%s\n", dt, r[:error].inspect)
   puts "        engine=#{r[:engine].inspect} content=#{r[:content].to_s.length} chars"
+  r[:error].to_s
 end
 puts
-puts "  (os 3 primeiros estouram o balde de 2/min: erro = 'rate limit local')"
+n_rl = erros.count { |e| e.include?("rate limit local") }
+puts "  MEDIDO: #{n_rl}/4 voltaram 'rate limit local' (balde nao estourou: 35s por"
+puts "  chamada > janela de 60s) e #{erros.count { |e| e.include?("tempo de render") }}/4"
+puts "  voltaram RenderTimeout. NENHUM dos dois e o sinal de bloqueio."
 
 linha "4) Onde esse erro foi? Alguem logou?"
 puts "  ExtractService#failure (extract_service.rb:453-465) monta o hash e"

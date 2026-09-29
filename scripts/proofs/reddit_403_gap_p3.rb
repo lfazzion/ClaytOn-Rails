@@ -60,9 +60,14 @@ puts "  corpo tem 'whoa there'? #{body.downcase.include?('whoa there')}"
 puts "  corpo tem 'blocked due to a network policy'? #{body.downcase.include?('blocked due to a network policy')}"
 
 linha "2) Entao o que o Reddit devolve e como o codigo o leria?"
-puts "  HTTP #{res.code} + <title>Blocked</title> — o titulo NAO esta em BLOCK_TITLES"
-puts "  (#{Fetcher::BotDetection::BLOCK_TITLES.inspect}) e o corpo NAO tem nenhum dos"
-puts "  marcadores do canal. Para BotDetection.blocked? isso e uma PAGINA NORMAL."
+# O titulo NAO esta em BLOCK_TITLES e o corpo TEM os marcadores do CANAL -- sao
+# listas diferentes, e e' por isso que o veredito precisa dizer qual delas conta.
+puts "  HTTP #{res.code} + <title>Blocked</title>"
+puts "  BotDetection.blocked? olha BLOCK_TITLES = #{Fetcher::BotDetection::BLOCK_TITLES.inspect}"
+puts "  'Blocked' esta nessa lista? #{Fetcher::BotDetection::BLOCK_TITLES.any? { |t| t.include?('blocked') }}"
+puts "  ...e o corpo tem os marcadores do CANAL (BLOCKED_PAGE_MARKERS), que sao"
+puts "  uma lista SEPARADA. Para o BotDetection isso e uma PAGINA NORMAL — ele"
+puts "  so veria o 403 pelo status, e o status e' do HTTP cru (p2), nao do CDP."
 
 fake = Struct.new(:status, :title, :body, :current_url).new(res.code, "Blocked", body, ALVO)
 puts "  BotDetection.blocked?(pagina com status=#{res.code}) = #{Fetcher::BotDetection.blocked?(fake)}"
