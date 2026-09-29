@@ -278,6 +278,13 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
     "rest_id com barra" => { "rest_id" => "123/evil" },
     "rest_id com query string" => { "rest_id" => "123?x=1" },
     "rest_id float" => { "rest_id" => 1.5 },
+    # ── a NONA, medida pela r4: FORA da faixa de 64 bits sem sinal ──
+    # Forma certa (só dígitos, > 0) e ainda assim não é um id que o X emitiu: snowflake é um
+    # inteiro de 64 bits sem sinal, e 2^64 é o valor mais uma vez. Saía como SUCESSO e montava
+    # `/i/status/18446744073709551616` na edição — url que PARECE post e induz a repetir a
+    # edição (que cria OUTRA versão e gasta a janela do Premium).
+    "rest_id inteiro 2^64" => { "rest_id" => 2**64 },
+    "rest_id string 21 digitos" => { "rest_id" => "1#{'0' * 20}" },
     # ── as QUATRO da r2, que continuam fora por ausentes/vazias/zero ──
     "rest_id ausente" => {},
     "rest_id vazio" => { "rest_id" => "" },
@@ -357,6 +364,117 @@ class Fetcher::Channels::XEditarTest < ActiveSupport::TestCase
     erro = assert_raises(E::Incerto) { X.editar(id: "111", texto: "oi") }
     assert_includes erro.message, 'rest_id="   "'
     assert_match(/pode JA ter sido editado/, erro.message)
+  end
+
+  # ── ACHADO 1 DA r4: A FAIXA DO SNOWFLAKE (64 bits sem sinal, > 0) ──────────────
+  #
+  # A forma POSITIVA da r3 (só dígitos, valor > 0) está certa e continua; o que faltava era a
+  # FAIXA, e a faixa é parte da definição do snowflake: um id do X é um INTEIRO DE 64 BITS SEM
+  # SINAL, MAIOR QUE ZERO — de 1 a 2^64 − 1. A r4 mediu `18446744073709551616` (2^64) saindo
+  # como SUCESSO: `url` de status com esse número dentro, que PARECE post e induz a repetir a
+  # edição (OUTRA versão, gastando uma das `.allowed` da janela do Premium).
+  TETO = (2**64) - 1
+  ACIMA = 2**64
+
+  test "editar: id novo fora da faixa de 64 bits e Incerto, e nao monta url de status" do
+    [ACIMA, ACIMA.to_s, "1#{'0' * 20}"].each do |fora|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_com_rest_id("rest_id" => fora), headers: {}))
+      erro = assert_raises(E::Incerto, "editar rest_id #{fora.inspect}") { X.editar(id: "111", texto: "oi") }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "editar #{fora.inspect}"
+      assert_includes erro.message, E::CUSTO_REPETIR_EDITAR, "editar #{fora.inspect}"
+      assert_includes erro.message, "conferir o post 111", "editar #{fora.inspect}"
+      refute_match(%r{https://x\.com/i/status/}, erro.message,
+                   "o aviso nao pode oferecer url de status para #{fora.inspect}")
+    end
+  end
+
+  test "editar: id novo no teto (2^64-1) continua SUCESSO, e a url sai do id novo" do
+    [TETO, TETO.to_s].each do |no_teto|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: resposta_edicao(no_teto.to_s, "111"), headers: {}))
+      saida = X.editar(id: "111", texto: "oi")
+      assert_equal no_teto.to_s, saida["id"], "editar com id no teto #{no_teto.inspect}"
+      assert_equal "111", saida["id_anterior"]
+      assert_equal "https://x.com/i/status/#{no_teto}", saida["url"]
+    end
+  end
+
+  # ── ACHADO 2 DA r4: CORPO INESPERADO NO 2xx E INCERTO, NUNCA TypeError ────────
+  #
+  # `Hash#dig` NÃO devolve `nil` para corpo inesperado: levanta `TypeError` no primeiro nível
+  # que não é hash. Com `result` ESCALAR (`"oops"`) o `TypeError` ESCAPAVA do canal da edição
+  # como `TypeError` — e isso é pior que a ambiguidade do `Incerto`, porque quem chamou não
+  # descobre se a edição saiu. A 2xx prova que o pedido chegou ao X; a casa não sabe dizer que
+  # a edição NÃO saiu, então tem de dizer que não sabe.
+  #
+  # São DUAS camadas, e as duas são `Incerto` — o que muda é a frase, porque muda ONDE a duvida
+  # apareceu (e o que o operador precisa ler):
+  #   - corpo que nem e objeto JSON na raiz (`[]`, `"oops"`, `null`): o `interpreta!` levanta o
+  #     aviso generico de escrita, e o `graphql_da_edicao!` traduz para o custo da EDICAO;
+  #   - objeto JSON com a forma errada DENTRO: o `dig_seguro` devolve `nil`, e a edicao levanta o
+  #     `Incerto` dela, que nomeia o post a conferir e o `rest_id` que o X devolveu.
+  # Nenhuma das duas pode estourar `TypeError`, e nenhuma pode oferecer `url` de status.
+  CORPOS_INESPERADOS = {
+    "result escalar" => '{"data":{"create_tweet":{"tweet_results":{"result":"oops"}}}}',
+    "result inteiro" => '{"data":{"create_tweet":{"tweet_results":{"result":123}}}}',
+    "result lista" => '{"data":{"create_tweet":{"tweet_results":{"result":[]}}}}',
+    "result null" => '{"data":{"create_tweet":{"tweet_results":{"result":null}}}}',
+    "tweet_results escalar" => '{"data":{"create_tweet":{"tweet_results":"oops"}}}',
+    "tweet_results lista" => '{"data":{"create_tweet":{"tweet_results":[]}}}',
+    "create_tweet escalar" => '{"data":{"create_tweet":"oops"}}',
+    "data escalar" => '{"data":"oops"}',
+    "data lista" => '{"data":[]}',
+    "sem data" => '{}',
+    "create_tweet vazio" => '{"data":{"create_tweet":{}}}'
+  }.freeze
+  # A raiz que nem e objeto JSON: a duvida aparece ANTES do fluxo ver o corpo.
+  CORPOS_NAO_OBJETO_JSON = {
+    "raiz lista" => '[]',
+    "raiz escalar" => '"oops"',
+    "raiz null" => 'null',
+    "raiz nao-JSON" => "<html>erro do proxy</html>",
+    "raiz vazia" => ""
+  }.freeze
+
+  test "editar: 2xx com corpo inesperado e sempre Incerto, nunca TypeError" do
+    classes = {}
+    CORPOS_INESPERADOS.merge(CORPOS_NAO_OBJETO_JSON).each do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Incerto, "editar #{nome}") { X.editar(id: "111", texto: "oi") }
+      refute_kind_of TypeError, erro, "editar #{nome} nao pode estourar TypeError"
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "editar #{nome}"
+      assert_includes erro.message, E::CUSTO_REPETIR_EDITAR, "editar #{nome}"
+      assert_includes erro.message, "conferir o post 111", "editar #{nome}"
+      refute_kind_of E::Restrito, erro, "editar #{nome} nao pode dizer so 'suprimido'"
+      refute_match(%r{https://x\.com/i/status/}, erro.message, "editar #{nome} nao pode oferecer url de status")
+      classes[nome] = erro.class
+    end
+    # O QUE O CASO PRECISA: uma classe so. As duas camadas (dentro do JSON e na raiz) podem ter
+    # frase diferente, mas o desfecho e o mesmo `Incerto` — quem chamou trata igual.
+    assert_equal [E::Incerto], classes.values.uniq, "corpo inesperado nao pode virar outra classe: #{classes.inspect}"
+  end
+
+  # O `dig_seguro` como a edicao usa: `result` escalar tem de virar `nil` (e nao `TypeError`),
+  # e o `edit_control` de tipo errado tem de virar `nil` no estado — nunca um estado inventado.
+  test "editar: dig_seguro no meio do caminho nao estoura, e o estado nao e inventado" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: '{"data":{"create_tweet":{"tweet_results":{"result":"oops"}}}}',
+                                             headers: {}))
+    erro = assert_raises(E::Incerto) { X.editar(id: "111", texto: "oi") }
+    assert_includes erro.message, "rest_id=nil"
+    assert_includes erro.message, "conferir o post 111"
+    # `edit_control` de tipo inesperado no caminho feliz: os ids saem, o estado sai nil. O corpo
+    # e montado a mao porque o `resposta_edicao` sempre poe o `edit_control` DEPOIS do `extra`
+    # — o que nao deixa substituir o campo por um valor de tipo errado.
+    corpo = JSON.generate("data" => { "create_tweet" => { "tweet_results" => { "result" => {
+      "rest_id" => "2104299999999999999", "edit_control" => "oops"
+    } } } })
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+    saida = X.editar(id: "111", texto: "oi")
+    assert_equal "2104299999999999999", saida["id"]
+    assert_equal({ "versoes" => nil, "edicoes_restantes" => nil, "editavel_ate_ms" => nil },
+                 saida.slice("versoes", "edicoes_restantes", "editavel_ate_ms"))
   end
 
   # ── queryId velho: o mecanismo do repo, sem id fixo ──────────────────────────

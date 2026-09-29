@@ -116,8 +116,8 @@ module Fetcher
           "semantic_annotation_ids" => []
         }
         dados = graphql_da_edicao!(id, variaveis)
-        resultados = dados.dig("data", "create_tweet", "tweet_results")
-        id_novo = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
+        resultados = dig_seguro(dados, "data", "create_tweet", "tweet_results")
+        id_novo = dig_seguro(resultados, "result", "rest_id")
         # 2xx SEM id utilizável é o caminho que CHEGOU ao X e não confirma. São três formas do
         # MESMO caso, e as três são `Incerto` (e não "falhou", e não "post suprimido"):
         #   - corpo que nem é JSON           → levantado no `XEscrita#interpreta!`, com o aviso;
@@ -129,18 +129,25 @@ module Fetcher
         # edição gasta uma das `.allowed` da janela do Premium).
         #
         # A quarta forma é o `rest_id` que VEM mas não tem a FORMA do id do X: qualquer coisa
-        # fora do snowflake (só dígitos, valor > 0). A condição antiga era só `id_novo.nil?`, e
-        # depois a r2 corrigiu para uma lista do que é proibido (`""`, `"   "`, `0`) — mas a r3
-        # (revisão `t_3581f942`) mediu OITO formas que ainda passavam como SUCESSO e viravam
-        # `/i/status/1.5`, `/i/status/123/evil`, `/i/status/123?x=1`. A DEFINIÇÃO é a ÚNICA da
-        # casa, `XEscrita.id_utilizavel?`, escrita POSITIVA (o motivo de ser positiva e não
-        # lista está no comentário dela), e a forma devolvida vai na mensagem (quem for conferir
-        # o post precisa saber que o X devolveu `-1`, e não que não devolveu).
+        # fora do snowflake (inteiro de 64 bits sem sinal, > 0). A condição antiga era só
+        # `id_novo.nil?`, e depois a r2 corrigiu para uma lista do que é proibido (`""`,
+        # `"   "`, `0`) — mas a r3 (revisão `t_3581f942`) mediu OITO formas que ainda passavam
+        # como SUCESSO e viravam `/i/status/1.5`, `/i/status/123/evil`, `/i/status/123?x=1`, e a
+        # r4 mediu a nona: `2^64` (fora da faixa de 64 bits), que virava
+        # `/i/status/18446744073709551616`. A DEFINIÇÃO é a ÚNICA da casa,
+        # `XEscrita.id_utilizavel?`, escrita POSITIVA (o motivo de ser positiva e não lista
+        # está no comentário dela), e a forma devolvida vai na mensagem (quem for conferir o post
+        # precisa saber que o X devolveu `-1`, e não que não devolveu).
+        #
+        # A quinta forma é o corpo de TIPO inesperado — `result` escalar (`"oops"`), lista no
+        # lugar de hash — que estourava `TypeError` no `Hash#dig` e ESCAPAVA do canal como
+        # `TypeError` (achado 2 da r4). Aqui é `dig_seguro`, e o desfecho é o mesmo `Incerto`:
+        # quem chamou tem de saber que a casa não sabe se a edição saiu.
         incerto_de_edicao!(id, "X nao devolveu rest_id utilizavel do texto novo (rest_id=#{id_novo.inspect}), " \
                                "entao o post #{id} pode JA ter sido editado (veio #{resultados.inspect})") unless
           E.id_utilizavel?(id_novo)
 
-        estado = estado_edit_control(dados.dig(*CAMINHO_EDIT_CONTROL))
+        estado = estado_edit_control(E.dig_seguro(dados, *CAMINHO_EDIT_CONTROL))
         {
           "id" => id_novo.to_s,
           "id_anterior" => id,
@@ -166,6 +173,13 @@ module Fetcher
       end
 
       def custo_repetir_editar(id) = "#{E::CUSTO_REPETIR_EDITAR} (conferir o post #{id})"
+
+      # O `dig` que NÃO estoura, que é a DEFINIÇÃO DA CASA (mora no `XEscrita` e é usada pelos
+      # quatro fluxos): um 2xx com `result` escalar ou lista no lugar de hash levantava
+      # `TypeError` no `Hash#dig` e ESCAPAVA do canal (achado 2 da r4). Aqui o valor inesperado
+      # vira `nil`, e o `nil` cai no `Incerto` de baixo — que é a resposta certa, porque a 2xx
+      # prova que o pedido chegou ao X e a casa não tem como dizer que a edição NÃO saiu.
+      def dig_seguro(objeto, *caminho) = E.dig_seguro(objeto, *caminho)
 
       # O `edit_control` que volta na mutação tem TRÊS formas no cliente do X, e o próprio
       # bundle as normaliza para uma só (main.d0bb33e09c6a2565a.js, medido):

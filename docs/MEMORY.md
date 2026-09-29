@@ -68,38 +68,71 @@
     traduz o aviso para o custo da edição (outra versão) e cita o id a conferir.
   - **[2026-09-29] O QUE É "ID UTILIZÁVEL" — definição POSITIVA: a FORMA do id, e nada mais.**
     A regra é, inteira, esta:
-    > **um id do X é um snowflake: SÓ DÍGITOS, com valor MAIOR QUE ZERO. Nada mais entra.**
-    Ou seja, entra um `Integer` > 0, ou uma `String` que case `/\A\d+\z/` **e** valha > 0.
-    Fora: float, `true`/`false`, array, hash, `nil`, e qualquer string com sinal, ponto, letra,
-    espaço ou pontuação. Nada disso pode sair como SUCESSO — tudo vai `Incerto`, com o aviso de
-    conferir antes de repetir.
+    > **um id do X é um snowflake: um INTEIRO DE 64 BITS SEM SINAL, MAIOR QUE ZERO.**
+    Ou seja, o valor tem de caber entre **1 e 18446744073709551615 (2^64 − 1)**, em `Integer` ou
+    em `String` de dígitos (até 20; com 20, o valor tem de caber no teto). Fora: float,
+    `true`/`false`, array, hash, `nil`, qualquer string com sinal/ponto/letra/espaço/pontuação, e
+    qualquer valor ACIMA de 2^64 − 1. Nada disso pode sair como SUCESSO — tudo vai `Incerto`,
+    com o aviso de conferir antes de repetir.
     - Onde mora: `XEscrita.id_utilizavel?(id)`, o **único** ponto da definição, usada pelos
-      **quatro** fluxos (`postar`, responder, `repostar`, `editar` — este via `E.id_utilizavel?`).
-      A forma devolvida entra na mensagem do `Incerto`, porque quem for conferir o post precisa
-      saber que o X devolveu `-1`, e não que o X não devolveu nada.
-    - **POR QUE POSITIVA, E NÃO LISTA DO QUE É PROIBIDO (a lição das três rodadas).** Esta regra
-      foi quebrada em TRÊS revisões seguidas, e a causa nunca foi um caso faltando: foi o COMO
+      **quatro** fluxos (`postar`, responder, `repostar`, `editar` — este via `E.id_utilizavel?`),
+      com o teto na constante `XEscrita::TETO_SNOWFLAKE` (2^64 − 1). A forma devolvida entra na
+      mensagem do `Incerto`, porque quem for conferir o post precisa saber que o X devolveu
+      `-1`, e não que o X não devolveu nada.
+    - **A FAIXA, e por que ela faz parte da definição (achado 1 da r4, revisão sobre `8a95260`).**
+      A r3 trocou a lista de proibidos pela FORMA POSITIVA (só dígitos, valor > 0) — e isso
+      continua certo. O que faltava era a FAIXA, e ela é parte da definição do snowflake: um
+      inteiro de 64 bits **sem sinal**. A r4 mediu `18446744073709551616` (2^64) saindo como
+      SUCESSO nos quatro fluxos, montando `/i/status/18446744073709551616` — o número tem a
+      FORMA certa e ainda assim **não é um id que o X emitiu**: forma não é o mesmo que faixa.
+      Vale para `Integer` e para `String`; a string de 20 dígitos tem de CABER no teto
+      (10^20 > 2^64 − 1).
+    - **POR QUE POSITIVA, E NÃO LISTA DO QUE É PROIBIDO (a lição das quatro rodadas).** Esta regra
+      foi quebrada em QUATRO revisões seguidas, e a causa nunca foi um caso faltando: foi o COMO
       ela estava escrita. A r1 achou `tweet_results` vazio, a r2 achou `rest_id: ""` (revisão
-      `t_7e7ca818`) e a r3 achou **OITO** formas a mais chegando ao SUCESSO dos quatro fluxos
+      `t_7e7ca818`), a r3 achou **OITO** formas a mais chegando ao SUCESSO dos quatro fluxos
       (revisão `t_3581f942`): `-1`, `"-1"`, `"1.5"`, `"123abc"`, `"12 34"`, `"123/evil"`,
-      `"123?x=1"` e o float `1.5`. Cada uma era acrescentada à lista de proibidos, e a rodada
-      seguinte achava outra fora dela. **Lista do que é proibido nunca fecha** — sempre resta
-      uma forma que ninguém pensou. Com a forma POSITIVA, o teste de conformidade é fechado por
-      construção, e as oito formas do laudo deixam de ser oito casos especiais: são consequência
-      de não terem a forma do snowflake ou de nem serem número.
+      `"123?x=1"` e o float `1.5`; e a r4 achou a **nona**: `2^64`, fora da faixa. Cada uma era
+      acrescentada à lista de proibidos, e a rodada seguinte achava outra fora dela. **Lista do
+      que é proibido nunca fecha** — sempre resta uma forma que ninguém pensou. Com a
+      ESPECIFICAÇÃO do id (forma E faixa), o teste de conformidade é fechado por construção, e as
+      formas do laudo deixam de ser casos especiais: são consequência de não terem a forma do
+      snowflake, de nem serem número, ou de não caberem em 64 bits.
     - **POR QUE `to_i` NÃO PODE VALIDAR A FORMA (o bug medido na r3).** A definição anterior
       dizia `!texto.to_i.zero?`, e `to_i` NÃO valida forma: lê o PREFIXO numérico e ignora o
       resto. Por isso `"123abc".to_i == 123`, `"1.5".to_i == 1`, `"12 34".to_i == 12` e
       `"-1".to_i == -1` passavam como SUCESSO, montando `/i/status/1.5` e `/i/status/123/evil`
       (esta última ainda vira outro caminho na url) — urls que PARECEM post e induzem a repetir.
-      `to_i` serve só para o SEGUNDO critério (valor > 0), nunca para o primeiro (forma). A âncora
-      é `\A`/`\z` e não `\A`/`\Z` (que aceitaria a quebra de linha final, e `"123\n".to_i == 123`),
-      e a string não é `strip`ada antes do teste (`" 123 "` não é snowflake).
-    - Testes: a varredura nos **quatro** fluxos, uma forma por linha — as 8 da r3, as 4 da r2 e
-      a borda escolhida (`"0"`, `"00"`, `"-0"`, `" 123 "`, `"123\n"`, `true`, `[]`, `{}`) — todas
-      recusadas com `Incerto`; mais os casos POSITIVOS (id real de 19 dígitos, string e inteiro,
-      continua sucesso) e um teste da varredura ampla que não depende de exemplo nomeado, para a
-      próxima rodada precisar ler a REGRA e não um caso.
+      `to_i` serve para o SEGUNDO critério (o valor e a faixa), nunca para o primeiro (a forma). A
+      âncora é `\A`/`\z` e não `\A`/`\Z` (que aceitaria a quebra de linha final, e
+      `"123\n".to_i == 123`), e a string não é `strip`ada antes do teste (`" 123 "` não é
+      snowflake).
+    - **[2026-09-29] CORPO INESPERADO NO 2xx → `Incerto`, NUNCA `TypeError` (achado 2 da r4).**
+      Qualquer 2xx cujo corpo **não** seja o formato esperado (escalar, lista, chave ausente, tipo
+      inesperado) sai como `Incerto` — "possivelmente feito, conferir antes de repetir" — nunca
+      exceção crua. A causa medida: `Hash#dig` **não** devolve `nil` para corpo inesperado, ele
+      levanta `TypeError` no primeiro nível que não é hash, e com `result` escalar (`"oops"`) o
+      `TypeError` **escapava do canal** nos quatro fluxos. Exceção que escapa é pior que
+      ambiguidade: quem chama não sabe se publicou.
+      - Onde mora: `XEscrita.dig_seguro(objeto, *caminho)`, usado por `postar`, responder,
+        `repostar`, `curtir`, `apagar` e por `XEditar#editar` (via `XEditar#dig_seguro`). Todo
+        nível do MEIO do caminho tem de ser hash; o valor FINAL sai como vier (sem conversão) e
+        quem chama valida a forma dele. `Hash#dig` NÃO pode ser usado em caminho de escrita.
+      - A leitura (`XConta`, `XArtigo`) continua `ResponseError` calado, sem aviso de conferir:
+        a diferença é o `escrita:`, não o `dig`. `curtir`/`apagar` também continuam
+        `ResponseError` (não têm ramo de sucesso sem confirmação), mas o corpo inesperado nunca
+        mais estoura `TypeError` — vira sempre erro tipado (`E::Error`).
+      - São DUAS camadas e as DUAS são `Incerto`: corpo que nem é objeto JSON na raiz
+        (`[]`, `"oops"`, `null`, HTML) é levantado no `interpreta!` com o aviso genérico de
+        escrita (traduzido para a edição); objeto JSON com a forma errada DENTRO cai no
+        `Incerto` do fluxo, que nomeia o `rest_id` devolvido e o post a conferir.
+    - Testes: a varredura nos **quatro** fluxos, uma forma por linha — as 8 da r3, a 9 da r4
+      (`2^64` e string de 21 dígitos), as 4 da r2 e a borda escolhida (`"0"`, `"00"`, `"-0"`,
+      `" 123 "`, `"123\n"`, `true`, `[]`, `{}`) — todas recusadas com `Incerto`; mais os casos
+      POSITIVOS (id real de 19 dígitos e **o teto 2^64 − 1**, string e inteiro, continua sucesso)
+      e um teste da varredura ampla que não depende de exemplo nomeado, para a próxima rodada
+      precisar ler a REGRA e não um caso. O `result` escalar, a lista e o hash sem as chaves
+      esperadas são `Incerto` nos quatro fluxos.
   - Testes que cristalizavam o comportamento VELHO e foram ajustados (o comportamento errado era
     "falhou", não "posivelmente feito"): `repostar` 2xx sem `retweet_results` era `ResponseError`
     em x_escrita_test.rb; `tweet_results: {}` na edição era `Restrito` ("post suprimido") em
@@ -345,6 +378,7 @@ rg "<palavra-chave do problema>" docs/MEMORY.md
 
 | Data | Ação | Seção Afetada |
 |------|------|---------------|
+| 2026-09-29 | [2026-09-29, card t_be2de6b0, fechando o REPROVADO da r4 — revisão `t_6e2c4f4d` sobre `8a95260`] **Achado 1 (Critical): a FAIXA do snowflake entrou na definição.** `XEscrita.id_utilizavel?` conferia só a FORMA (só dígitos, valor > 0) e aceitava `18446744073709551616` (2^64) como SUCESSO — os quatro fluxos devolviam `url` de status com esse número dentro. A DEFINIÇÃO passou a ser a especificação inteira: **um id do X é um INTEIRO DE 64 BITS SEM SINAL, MAIOR QUE ZERO**, de 1 a `TETO_SNOWFLAKE` (2^64 − 1 = 18446744073709551615), para `Integer` e para `String` (a de 20 dígitos tem de caber no teto, e 10^20 não cabe). **Motivo:** forma não é o mesmo que faixa — o número tem a forma do snowflake e ainda assim não é um id que o X emitiu; e a url `/i/status/18446744073709551616` PARECE post, que é o que induz o operador a repetir (criando OUTRO post). **Achado 2 (Important): corpo inesperado no 2xx virou `Incerto`, nunca `TypeError`.** Com `result` escalar (`"oops"`) os quatro fluxos levantavam `TypeError`, que ESCAPAVA do canal — pior que a ambiguidade, porque quem chama não descobre se publicou. A causa medida é `Hash#dig`, que não devolve `nil` para corpo inesperado e levanta `TypeError` no primeiro nível que não é hash. Entrou `XEscrita.dig_seguro(objeto, *caminho)` (todo nível do MEIO tem de ser hash; o valor FINAL sai como vier), usado por `postar`, responder, `repostar`, `curtir`, `apagar` e por `XEditar#editar` — `Hash#dig` não pode mais ser usado em caminho de escrita. A leitura (`XConta`, `XArtigo`) continua `ResponseError` calado (a diferença é o `escrita:`, não o `dig`); `curtir`/`apagar` continuam `ResponseError` por não terem ramo de sucesso sem confirmação, mas nunca mais estouram `TypeError`. Editada a entrada "[2026-09-29] O QUE É ID UTILIZÁVEL" (a frase da regra e a contagem "três rodadas" → "quatro", com a nona forma nomeada) e acrescentada a regra do corpo inesperado. Testes: as 9 formas + as 4 da r2 + a borda nos quatro fluxos, as DUAS pontas da faixa (2^64 − 1 entra, 2^64 sai `Incerto`) com o caso POSITIVO do teto, e 16 formas de corpo inesperado nos quatro fluxos. | Padrões Sistêmicos Ratificados |
 | 2026-09-29 | [2026-09-29, card t_5c0294d2, fechando o REPROVADO da r3 — revisão `t_3581f942`] A definição de "id utilizável" foi INVERTIDA: saiu a lista do que é PROIBIDO (quatro formas) e entrou a **forma positiva** do id — `XEscrita.id_utilizavel?` aceita `Integer` > 0 ou `String` que case `/\A\d+\z/` e valha > 0, e recusa TODO o resto (float, booleano, array, hash, e string com sinal/ponto/letra/espaço/pontuação). O predicado deixou de usar `to_i` para validar forma (`"123abc".to_i == 123`, `"1.5".to_i == 1` — era o buraco medido) e usa-o só para o valor > 0. **Motivo:** a mesma regra foi quebrada em TRÊS revisões seguidas (r1 `tweet_results` vazio, r2 `rest_id: ""`, r3 as oito formas acima chegando ao SUCESSO dos quatro fluxos), e a causa não era caso faltando e sim o COMO ela estava escrita: **lista do que é proibido nunca fecha**, sempre resta uma forma fora dela. Com a forma positiva o teste de conformidade é fechado por construção e as oito formas deixam de ser casos especiais. Registrado também por que a âncora é `\A`/`\z` (e não `\Z`, que aceitaria `"123\n"`) e por que a string não é `strip`ada (`" 123 "` não é snowflake). REMOVIDA a subseção "[2026-09-28] O QUE É ID UTILIZÁVEL — a definição é FECHADA, e a lista é esta" (as quatro formas numeradas e o "motivo de fechar a lista"), e o parágrafo "A casa tem um lugar para essa definição" que a repetia: os dois defendiam a lista de proibidos e passavam a contradizer a definição positiva que os substitui. O conteúdo que era verdade neles (o predicado é o ponto único, a forma devolvida entra na mensagem do `Incerto`) foi reescrito dentro da nova entrada. Testes: varredura das 8 + 4 + borda escolhida nos quatro fluxos, com caso positivo de id real. | Padrões Sistêmicos Ratificados |
 | 2026-09-28 | [2026-09-28, card t_092bdaae] Fecha o REPROVADO da r2 (revisão `t_7e7ca818`): "id utilizável" passa a ser uma DEFINIÇÃO FECHADA, num predicado só — `XEscrita.id_utilizavel?(id)` — em vez da comparação `id.nil?` espalhada em três pontos. As quatro formas recusadas são ausente, `""`, `"   "` e zero (inteiro `0` e string `"0"`); todas vão `Incerto` com o aviso de conferir, nos quatro fluxos (`postar`, responder, `repostar`, `editar`). **Motivo:** em Ruby `""`, `"   "` e `0` são truthy, então o `postar` montava `https://x.com/i/status/` e a edição `/i/status/` ou `/i/status/0` e saíam como SUCESSO, afirmando um sucesso que o X não confirmou. A r1 e a r2 acharam buracos diferentes na MESMA regra; lista fechada + predicado único é o que impede o terceiro. A forma devolvida entra na mensagem do `Incerto`. | Padrões Sistêmicos Ratificados |
 | 2026-09-28 | Regra da casa "escrita 2xx sem id utilizável = possivelmente feito; conferir antes de repetir" (card t_dabd8768, fechando o REPROVADO do editar): `XEscrita` 2xx sem JSON/sem `rest_id`/`tweet_results` vazio e `XEditar` 2xx sem id passam a sair como `Incerto` com o aviso e o custo de repetir, no postar, responder, repostar e editar. **Motivo:** antes, dois desses ramos diziam "falhou"/"post suprimido" sem aviso, e repetir às cegas criava outro post ou outra versão do post. Registrou-se também quais testes cristalizavam o comportamento velho (`repostar` e `tweet_results: {}` na edição) e por que foram ajustados. | Padrões Sistêmicos Ratificados |

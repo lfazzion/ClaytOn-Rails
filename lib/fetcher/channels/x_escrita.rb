@@ -68,6 +68,19 @@ module Fetcher
       CUSTO_REPETIR_POSTAR = "repetir as cegas cria OUTRO post"
       CUSTO_REPETIR_EDITAR = "repetir as cegas cria OUTRA versao do post (nova edicao na janela)"
 
+      # ── O TETO DO ID, e ELE FAZ PARTE DA DEFINIÇÃO ────────────────────────────
+      #
+      # A r4 (revisão sobre o commit `8a95260`) mediu que `18446744073709551616` (2^64) era
+      # aceito como SUCESSO nos quatro fluxos. A definição anterior conferia SÓ A FORMA
+      # (só dígitos, valor > 0) — e forma não é o mesmo que faixa: um id do X é um SNOWFLAKE,
+      # e snowflake é por definição um inteiro de 64 bits SEM SINAL. O valor tem de caber entre
+      # 1 e 2^64 − 1 = 18446744073709551615.
+      #
+      # Fora dessa faixa o número não é um id que o X emitiu, e a casa não pode montar
+      # `/i/status/18446744073709551616`: essa url PARECE post e é o que induz o operador a
+      # repetir (que cria OUTRO post). Vai `Incerto`, com o aviso de conferir.
+      TETO_SNOWFLAKE = (2**64) - 1
+
       class Error < ::Fetcher::Channels::Error; end
       class Recusado < Error; end
       class RateLimited < Error; end
@@ -84,49 +97,88 @@ module Fetcher
       #
       # A DEFINIÇÃO, escrita POSITIVA — a FORMA do id, e não uma lista do que é proibido:
       #
-      #   **um id do X é um snowflake: SÓ DÍGITOS, com valor MAIOR QUE ZERO. Nada mais entra.**
+      #   **um id do X é um snowflake: um INTEIRO DE 64 BITS SEM SINAL, MAIOR QUE ZERO.**
       #
-      # Ou seja, o que entra é: um `Integer` maior que zero, ou uma `String` que case
-      # `/\A\d+\z/` E valha mais que zero. Tudo o mais é recusado — float, `true`/`false`, array,
-      # hash, `nil`, e qualquer string com sinal, ponto, letra, espaço ou pontuação.
+      # Ou seja, o valor tem de caber entre 1 e `TETO_SNOWFLAKE` (2^64 − 1), em `Integer` ou
+      # em `String` de dígitos (até 20; com 20, o valor tem de caber no teto). Tudo o mais é
+      # recusado — float, `true`/`false`, array, hash, `nil`, e qualquer string com sinal,
+      # ponto, letra, espaço ou pontuação.
       #
       # ── POR QUE POSITIVA, E NÃO A LISTA DO QUE É PROIBIDO ──
-      # Esta regra já foi quebrada em TRÊS revisões seguidas, e a causa nunca foi um caso
+      # Esta regra já foi quebrada em QUATRO revisões seguidas, e a causa nunca foi um caso
       # faltando: foi o COMO ela estava escrita. A r1 achou `tweet_results` vazio, a r2 achou
-      # `rest_id: ""` e a r3 (revisão `t_3581f942`) achou OITO formas a mais chegando ao SUCESSO
+      # `rest_id: ""`, a r3 (revisão `t_3581f942`) achou OITO formas a mais chegando ao SUCESSO
       # dos quatro fluxos: `-1`, `"-1"`, `"1.5"`, `"123abc"`, `"12 34"`, `"123/evil"`,
       # `"123?x=1"` e o float `1.5`. Cada uma era acrescentada à lista de proibidos, e a rodada
-      # seguinte achava outra fora dela.
+      # seguinte achava outra fora dela. A r4 achou o resto: o TETO DE 64 BITS, que é parte da
+      # definição do snowflake e não estava no predicado — `2^64` saía como SUCESSO.
       #
       # **Lista do que é proibido nunca fecha** — sempre resta uma forma que ninguém pensou. Por
-      # isso a lista saiu, e no lugar dela fica a forma POSITIVA: o snowflake é a especificação
-      # do id do X, e o teste de conformidade com ela é fechado por construção. As oito formas
-      # do laudo não são oito casos especiais: são consequência de não terem a forma do
-      # snowflake (sinal, ponto, letra, espaço, pontuação) ou de nem serem número (float).
+      # isso a lista saiu, e no lugar dela fica a ESPECIFICAÇÃO do id do X, com a forma E a
+      # faixa: o snowflake é a especificação do id, e o teste de conformidade com ela é fechado
+      # por construção. As oito formas do laudo da r3 não são oito casos especiais: são
+      # consequência de não terem a forma do snowflake (sinal, ponto, letra, espaço,
+      # pontuação) ou de nem serem número (float).
       #
       # ── POR QUE `to_i` NÃO PODE VALIDAR A FORMA (o bug medido) ──
       # A versão anterior dizia `!texto.to_i.zero?`, e `to_i` NÃO valida forma: ele lê o PREFIXO
       # numérico e ignora o resto. Por isso `"123abc".to_i == 123`, `"1.5".to_i == 1`,
       # `"12 34".to_i == 12` e `"-1".to_i == -1` — todos passavam como SUCESSO, e o `postar`
       # montava `https://x.com/i/status/123abc` (ou `/i/status/1.5`), que PARECE um post. O
-      # `to_i` serve aqui só para o SEGUNDO critério (o valor > 0), nunca para o primeiro (a forma).
+      # `to_i` serve aqui só para o SEGUNDO critério (o valor), nunca para o primeiro (a forma).
       #
       # A âncora é `\A`/`\z` e não `\A`/`\Z`: `\Z` aceita a quebra de linha final, então
       # `"123\n"` — que `to_i` lê como `123` — passaria. E a string NÃO é `strip`ada antes do
       # teste: `" 123 "` não é snowflake, e `strip` aqui esconderia isso (o `strip` fica para o
       # `checa_id` da edição, que é entrada de terminal e tem outra mensagem de erro).
       #
+      # O `to_i` continua sendo o que fecha a faixa, porque a string de 20 dígitos tem de caber
+      # no teto: `100000000000000000000`.to_i é 10^20, que é MAIOR que 2^64 − 1. A comparação
+      # é feita no inteiro, e é a mesma dos dois lados (Integer e String) — por isso a string
+      # de 20 dígitos NÃO ganha um caminho mais permissivo que o inteiro.
+      #
       # Tudo que não for utilizável é `Incerto` — NUNCA sucesso — porque a 2xx já prova que o
       # pedido chegou ao X (a regra de cima). Recusar aqui não é dizer "falhou": é dizer "não
       # tenho como dizer, confira antes de repetir".
       def id_utilizavel?(id)
-        # snowflake de verdade: `Integer` > 0. Um float NÃO entra mesmo que valha 1.5 — o id
-        # do X é inteiro, e aceitar float é aceitar um id que o X nunca emitiu.
-        return id.positive? if id.is_a?(Integer)
+        # snowflake de verdade: `Integer` > 0 E dentro da faixa de 64 bits sem sinal. Um float
+        # NÃO entra mesmo que valha 1.5 — o id do X é inteiro, e aceitar float é aceitar um id
+        # que o X nunca emitiu.
+        return id.positive? && id <= TETO_SNOWFLAKE if id.is_a?(Integer)
 
         # String: os DOIS critérios, na ordem. Primeiro a forma (`\A\d+\z`), que é o que fecha
-        # sinal/ponto/letra/espaço/pontuação; depois o valor, que é o que fecha "0", "00" e "-0".
-        id.is_a?(String) && id.match?(/\A\d+\z/) && id.to_i.positive?
+        # sinal/ponto/letra/espaço/pontuação; depois o valor, que é o que fecha "0", "00",
+        # "-0" e o que está ACIMA de 2^64 − 1.
+        id.is_a?(String) && id.match?(/\A\d+\z/) && id.to_i.positive? && id.to_i <= TETO_SNOWFLAKE
+      end
+
+      # ── O `dig` QUE NÃO ESTOURA (o achado 2 da r4, medido) ─────────────────────
+      #
+      # `Hash#dig` NÃO devolve `nil` para corpo inesperado: ele levanta `TypeError` no primeiro
+      # nível que não é hash. Numa resposta 2xx com `result` escalar (`{"data":{"create_tweet":
+      # {"tweet_results":{"result":"oops"}}}}`), `dados.dig("data", "create_tweet",
+      # "tweet_results")` chega ao `"oops"` e o próximo `dig` estoura — e o `TypeError` ESCAPA
+      # do canal como `TypeError`, não como `Incerto`.
+      #
+      # Isso é pior que a ambiguidade que o `Incerto` representa: quem chamou não descobre se o
+      # post foi publicado. A casa não sabe se publicou, então tem de dizer que não sabe.
+      #
+      # Este é o mesmo caminho para os QUATRO fluxos (postar, responder, repostar, editar) e
+      # também para a camada compartilhada (`curtir`/`apagar`): o `dig` aqui devolve `nil` para
+      # qualquer tipo inesperado, e quem chama decide a partir do `nil`. A LEITURA
+      # (`XConta`, `XArtigo`) também usa este `dig`, e continua `ResponseError` — a diferença
+      # é o `escrita:`, não o `dig`.
+      def dig_seguro(objeto, *caminho)
+        return nil if caminho.empty?
+
+        # Todo nível do caminho tem de ser hash ANTES de descer; no fim o valor sai como vier
+        # (escalar, lista ou `nil`) e quem chama é que valida a forma dele.
+        caminho[0...-1].each do |chave|
+          return nil unless objeto.is_a?(Hash)
+
+          objeto = objeto[chave]
+        end
+        objeto.is_a?(Hash) ? objeto[caminho.last] : nil
       end
 
       def postar(texto:, em_resposta_a: nil)
@@ -144,17 +196,20 @@ module Fetcher
           variaveis["reply"] = { "in_reply_to_tweet_id" => em_resposta_a.to_s, "exclude_reply_user_ids" => [] }
         end
         dados = graphql!("CreateTweet", variaveis, features: XConversation::FEATURES)
-        resultados = dados.dig("data", "create_tweet", "tweet_results")
+        resultados = dig_seguro(dados, "data", "create_tweet", "tweet_results")
         # `tweet_results: {}` com HTTP 200: o X engoliu o post sem erro. Isto NAO e "falhou": a
         # 2xx prova que o pedido chegou, e sem o `tweet_results` a casa não sabe se o post saiu —
         # então sai como Incerto, com o aviso de conferir. Repetir às cegas aqui criava OUTRO
         # post do mesmo texto no X.
         #
-        # A condição é `id_utilizavel?` e NÃO `id.nil?`: em Ruby `""`, `"   "` e `0` são truthy,
+        # A condição é `id_utilizavel?` e NÃO `id.nil?`: em Ruby `"", "   "` e `0` são truthy,
         # e qualquer um dos três montava uma url de aparência válida (`/i/status/`, `/i/status/0`)
-        # e saía como SUCESSO. A DEFINIÇÃO (positiva: só dígitos com valor > 0) está em
+        # e saía como SUCESSO. A DEFINIÇÃO (positiva: inteiro de 64 bits sem sinal, > 0) está em
         # `id_utilizavel?` — e o motivo de ela ser positiva está escrito lá.
-        id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
+        #
+        # O `dig_seguro` é o que impede o `TypeError` de um `result` ESCALAR (`"oops"`): o
+        # `Hash#dig` estoura nesse corpo, e `Incerto` é a resposta certa (achado 2 da r4).
+        id = dig_seguro(resultados, "result", "rest_id")
         raise Incerto, "CreateTweet: #{CUSTO_REPETIR_POSTAR} (rest_id=#{id.inspect}); #{AVISO_PODE_TER_SAIDO}" unless
           id_utilizavel?(id)
 
@@ -164,7 +219,12 @@ module Fetcher
       # Forma medida em 2026-09-27: `{"data":{"favorite_tweet":"Done"}}`.
       def curtir(id:)
         dados = graphql!("FavoriteTweet", { "tweet_id" => id.to_s })
-        confirmacao = dados.dig("data", "favorite_tweet")
+        # `dig_seguro` e não `dig`: um `data` escalar/lista no 2xx virava `TypeError` cru
+        # (achado 2 da r4), e quem chamasse não saberia se o like saiu. Aqui o desfecho
+        # continua `ResponseError` — o `curtir` confere o resultado SEMPRE, não tem ramo de
+        # sucesso sem confirmação — mas a DUVIDA no formato do corpo tem de virar o erro
+        # tipado do canal, nunca uma exceção que escapa.
+        confirmacao = dig_seguro(dados, "data", "favorite_tweet")
         raise ResponseError, "FavoriteTweet sem confirmação (favorite_tweet=#{confirmacao.inspect})" unless confirmacao == "Done"
 
         { "id" => id.to_s }
@@ -173,13 +233,13 @@ module Fetcher
       # Forma medida em 2026-09-27: `data.create_retweet.retweet_results.result.rest_id` (id do repost).
       def repostar(id:)
         dados = graphql!("CreateRetweet", { "tweet_id" => id.to_s, "dark_request" => false })
-        resultados = dados.dig("data", "create_retweet", "retweet_results")
+        resultados = dig_seguro(dados, "data", "create_retweet", "retweet_results")
         # Mesma barreira do `postar`: `retweet_results: {}` (ou sem `rest_id`) com 2xx é o X
         # engolindo a chamada, não o X dizendo que não repostou. Repetir aqui refaz o repost.
-        # E a MESMA definição de id utilizável do `postar` (`id_utilizavel?`, positiva: só
-        # dígitos com valor > 0): o `rest_id: ""` que o X devolveu era aceito como sucesso, e o
-        # `repostar` devolvia o id do ARGUMENTO como se o repost tivesse saído.
-        repost_id = resultados.is_a?(Hash) ? resultados.dig("result", "rest_id") : nil
+        # E a MESMA definição de id utilizável do `postar` (`id_utilizavel?`, positiva: inteiro
+        # de 64 bits sem sinal, > 0): o `rest_id: ""` que o X devolveu era aceito como sucesso, e
+        # o `repostar` devolvia o id do ARGUMENTO como se o repost tivesse saído.
+        repost_id = dig_seguro(resultados, "result", "rest_id")
         raise Incerto, "CreateRetweet: repetir as cegas refaz o repost (rest_id=#{repost_id.inspect}); " \
                        "#{AVISO_PODE_TER_SAIDO}" unless id_utilizavel?(repost_id)
 
@@ -189,7 +249,10 @@ module Fetcher
       # Forma medida em 2026-09-27: `{"data":{"delete_tweet":{"tweet_results":{}}}}` — o `{}` é o normal aqui.
       def apagar(id:)
         dados = graphql!("DeleteTweet", { "tweet_id" => id.to_s, "dark_request" => false })
-        raise ResponseError, "DeleteTweet sem delete_tweet na resposta" unless dados.dig("data", "delete_tweet").is_a?(Hash)
+        # Mesmo `dig_seguro` do `curtir`: um `data` de tipo inesperado no 2xx virava `TypeError`
+        # cru em vez do erro tipado do canal (achado 2 da r4).
+        raise ResponseError, "DeleteTweet sem delete_tweet na resposta" unless
+          dig_seguro(dados, "data", "delete_tweet").is_a?(Hash)
 
         { "id" => id.to_s }
       end

@@ -278,6 +278,12 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     "rest_id com barra" => { "rest_id" => "123/evil" },
     "rest_id com query string" => { "rest_id" => "123?x=1" },
     "rest_id float" => { "rest_id" => 1.5 },
+    # ── a NONA, medida pela r4: FORA da faixa de 64 bits sem sinal ──
+    # A forma (só dígitos, > 0) estava certa e a FAIXA faltava: um snowflake é um inteiro de
+    # 64 bits sem sinal, então 2^64 não é um id que o X emitiu. Saía como SUCESSO e montava
+    # `/i/status/18446744073709551616` — url que PARECE post e induz a repetir.
+    "rest_id inteiro 2^64" => { "rest_id" => 2**64 },
+    "rest_id string 21 digitos" => { "rest_id" => "1#{'0' * 20}" },
     # ── as QUATRO da r2, que continuam fora por ausentes/vazias/zero ──
     "rest_id ausente" => {},
     "rest_id vazio" => { "rest_id" => "" },
@@ -296,6 +302,11 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
   }.freeze
   # A forma boa: o `rest_id` real que o X devolve (19 dígitos, string).
   ID_REAL = "2104291497428345283"
+  # ── A FAIXA, que é parte da definição do snowflake (achado 1 da r4) ──────────────
+  # Um id do X é um INTEIRO DE 64 BITS SEM SINAL, MAIOR QUE ZERO: de 1 a 2^64 − 1. O valor
+  # mais uma vez (`2^64`) não cabe em 64 bits sem sinal, então não é snowflake.
+  TETO = (2**64) - 1
+  ACIMA = 2**64
 
   def corpo_tweet(result)
     JSON.generate("data" => { "create_tweet" => { "tweet_results" => { "result" => result } } })
@@ -349,6 +360,183 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     # o caminho feliz, nas duas formas em que o id real chega: a string que o X devolve e o inteiro
     assert E.id_utilizavel?(ID_REAL)
     assert E.id_utilizavel?(ID_REAL.to_i)
+  end
+
+  # ── ACHADO 1 DA r4: A FAIXA DO SNOWFLAKE (64 bits sem sinal, > 0) ──────────────
+  #
+  # A r3 trocou a lista de proibidos pela forma POSITIVA (só dígitos, valor > 0), e isso
+  # continua certo. O que faltava era a FAIXA, e a faixa é parte da definição do snowflake:
+  # um id do X é um INTEIRO DE 64 BITS SEM SINAL, MAIOR QUE ZERO — de 1 a 2^64 − 1.
+  #
+  # A r4 mediu o buraco: `18446744073709551616` (2^64) era aceito como SUCESSO e os quatro
+  # fluxos devolviam `url` de status com esse número dentro. O número tem a FORMA certa
+  # (só dígitos, > 0) e ainda assim NÃO é um id que o X emitiu — forma não é o mesmo que faixa.
+  #
+  # Estes testes medem as DUAS pontas da faixa (o teto e o teto mais um), nos quatro fluxos, e
+  # também o lado POSITIVO do teto: 2^64 − 1 é o MAIOR id válido, e se a regra o recusasse
+  # estaríamos estreitando a definição em vez de fechá-la.
+  test "a faixa do snowflake e de 1 a 2^64-1: o teto entra e o teto mais um nao" do
+    assert E.id_utilizavel?(TETO), "2^64-1 tem de ser utilizavel (o MAIOR id valido)"
+    assert E.id_utilizavel?(TETO.to_s), "2^64-1 em string tem de ser utilizavel"
+    refute E.id_utilizavel?(ACIMA), "2^64 nao cabe em 64 bits sem sinal"
+    refute E.id_utilizavel?(ACIMA.to_s), "2^64 em string nao cabe em 64 bits sem sinal"
+    # string de 20 digitos no teto entra; a de 21 digitos (10^20) nao
+    assert E.id_utilizavel?(TETO.to_s), "20 digitos no teto entra"
+    refute E.id_utilizavel?("1#{'0' * 20}"), "21 digitos (10^20) esta acima de 2^64-1"
+    # o menor id valido continua entrando: a faixa nao estreitou a base
+    assert E.id_utilizavel?(1)
+    assert E.id_utilizavel?("1")
+  end
+
+  test "postar e responder: id fora da faixa de 64 bits e Incerto, e nunca monta url de status" do
+    [ACIMA, ACIMA.to_s, "1#{'0' * 20}"].each do |fora|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_tweet("rest_id" => fora), headers: {}))
+      [{}, { em_resposta_a: "42" }].each do |extra|
+        erro = assert_raises(E::Incerto, "postar #{fora.inspect} #{extra}") { E.postar(texto: "oi", **extra) }
+        assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "postar #{fora.inspect} #{extra}"
+        assert_includes erro.message, E::CUSTO_REPETIR_POSTAR, "postar #{fora.inspect} #{extra}"
+        refute_match(%r{https://x\.com/i/status/}, erro.message,
+                     "o aviso nao pode oferecer url de status para #{fora.inspect}")
+      end
+    end
+  end
+
+  test "postar e responder: id no teto (2^64-1) continua SUCESSO, com a url montada" do
+    [TETO, TETO.to_s].each do |no_teto|
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_tweet("rest_id" => no_teto), headers: {}))
+      assert_equal({ "id" => no_teto.to_s, "url" => "https://x.com/i/status/#{no_teto}" },
+                   E.postar(texto: "oi"), "postar com id no teto #{no_teto.inspect}")
+      Fetcher::SafeHttpClient.stubs(:post)
+                             .returns(Resp.new(status: 200, body: corpo_tweet("rest_id" => no_teto), headers: {}))
+      assert_equal no_teto.to_s, E.postar(texto: "oi", em_resposta_a: "42")["id"],
+                   "responder com id no teto #{no_teto.inspect}"
+    end
+  end
+
+  test "repostar: id fora da faixa e Incerto, e id no teto continua sucesso" do
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: corpo_repost("rest_id" => ACIMA), headers: {}))
+    erro = assert_raises(E::Incerto) { E.repostar(id: ID_REAL) }
+    assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+
+    Fetcher::SafeHttpClient.stubs(:post)
+                           .returns(Resp.new(status: 200, body: corpo_repost("rest_id" => TETO.to_s), headers: {}))
+    assert_equal({ "id" => ID_REAL }, E.repostar(id: ID_REAL))
+  end
+
+  # ── ACHADO 2 DA r4: CORPO INESPERADO NO 2xx E INCERTO, NUNCA TypeError ────────
+  #
+  # A r4 mediu que uma resposta 2xx com `result` ESCALAR (`"oops"`) levantava `TypeError` e o
+  # `TypeError` ESCAPAVA do canal — nos quatro fluxos. Isso é pior que a ambiguidade que o
+  # `Incerto` representa: quem chamou não descobre se o post foi publicado. Exceção que escapa
+  # do canal é sempre pior que "não sei": `Incerto` é a resposta certa, porque a 2xx prova que
+  # o pedido chegou ao X e a casa não tem como dizer que a ação NÃO saiu.
+  #
+  # A causa é `Hash#dig`: ele NÃO devolve `nil` para corpo inesperado, levanta `TypeError` no
+  # primeiro nível que não é hash. O conserto é o `dig_seguro`, e o teste abaixo percorre TODAS
+  # as formas de corpo inesperado em TODOS os quatro fluxos.
+  CORPOS_INESPERADOS = {
+    "result escalar" => '{"data":{"create_tweet":{"tweet_results":{"result":"oops"}}}}',
+    "result inteiro" => '{"data":{"create_tweet":{"tweet_results":{"result":123}}}}',
+    "result lista" => '{"data":{"create_tweet":{"tweet_results":{"result":[]}}}}',
+    "result null" => '{"data":{"create_tweet":{"tweet_results":{"result":null}}}}',
+    "tweet_results escalar" => '{"data":{"create_tweet":{"tweet_results":"oops"}}}',
+    "tweet_results lista" => '{"data":{"create_tweet":{"tweet_results":[]}}}',
+    "create_tweet escalar" => '{"data":{"create_tweet":"oops"}}',
+    "data escalar" => '{"data":"oops"}',
+    "data lista" => '{"data":[]}',
+    "raiz lista" => '[]',
+    "raiz escalar" => '"oops"',
+    "raiz null" => 'null',
+    "sem data" => '{}',
+    "create_tweet vazio" => '{"data":{"create_tweet":{}}}'
+  }.freeze
+
+  test "postar e responder: 2xx com corpo inesperado e Incerto nos DOIS, nunca TypeError" do
+    CORPOS_INESPERADOS.each do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      [{}, { em_resposta_a: "42" }].each do |extra|
+        erro = assert_raises(E::Incerto, "postar #{nome} #{extra}") { E.postar(texto: "oi", **extra) }
+        assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "postar #{nome} #{extra}"
+        assert_includes erro.message, E::CUSTO_REPETIR_POSTAR, "postar #{nome} #{extra}"
+        refute_kind_of E::Restrito, erro, "postar #{nome} #{extra} nao pode dizer so 'suprimido'"
+      end
+    end
+  end
+
+  test "repostar: 2xx com corpo inesperado e Incerto, nunca TypeError" do
+    CORPOS_INESPERADOS.each do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Incerto, "repostar #{nome}") { E.repostar(id: ID_REAL) }
+      assert_includes erro.message, E::AVISO_PODE_TER_SAIDO, "repostar #{nome}"
+      refute_kind_of E::Restrito, erro, "repostar #{nome}"
+    end
+  end
+
+  # O `curtir` e o `apagar` passam pelo MESMO `dig_seguro` da camada compartilhada, e nao pelo
+  # `Hash#dig` (que estourava). Eles NAO tem ramo de sucesso sem confirmacao, entao continuam
+  # `ResponseError` — o que muda e que a duvida no FORMATO do corpo vira o erro TIPADO do
+  # canal, e nao uma `TypeError` que escapa e nao diz nada sobre o que o X fez.
+  #
+  # A classe depende de ONDE a duvida aparece, e as DUAS sao erros tipados do canal:
+  #   - corpo que nem e objeto JSON na raiz (aqui `"[]"`, `'"oops"'`, `'null'`): o `interpreta!`
+  #     levanta `Incerto` ANTES do fluxo ver o corpo, porque a 2xx prova que o pedido saiu;
+  #   - corpo que E objeto JSON mas com a forma errada dentro: o `dig_seguro` devolve `nil`, e o
+  #     `curtir`/`apagar` caem no `ResponseError` de "sem confirmacao".
+  # O que o teste fecha e o que o achado 2 exige: NENHUM dos dois e `TypeError`, e todos sao
+  # `E::Error` — nada escapa do canal.
+  test "curtir e apagar com corpo inesperado nunca levantam TypeError: sempre erro tipado" do
+    CORPOS_INESPERADOS.each do |nome, corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Error, "curtir #{nome}") { E.curtir(id: ID_REAL) }
+      assert_includes erro.message, "FavoriteTweet", "curtir #{nome}"
+      refute_kind_of TypeError, erro, "curtir #{nome} nao pode estourar TypeError"
+
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      erro = assert_raises(E::Error, "apagar #{nome}") { E.apagar(id: ID_REAL) }
+      assert_includes erro.message, "DeleteTweet", "apagar #{nome}"
+      refute_kind_of TypeError, erro, "apagar #{nome} nao pode estourar TypeError"
+    end
+  end
+
+  # O `dig_seguro` em si: NENHUM caminho estoura, cada nivel do MEIO tem de ser hash, e o valor
+  # FINAL sai como vier (sem conversao) — quem chama e que valida a forma dele. Este e o teste
+  # que fecha a regra para a proxima rodada sem precisar de exemplo nomeado, mesma ideia do
+  # teste da varredura ampla do predicado.
+  test "o dig seguro nunca estoura: so o meio tem de ser hash, e o valor final sai como vier" do
+    # raiz ausente, ou nao hash, no PRIMEIRO nivel: nil
+    assert_nil E.dig_seguro(nil, "data", "create_tweet")
+    assert_nil E.dig_seguro("texto", "data", "create_tweet")
+    assert_nil E.dig_seguro([], "data", "create_tweet")
+    assert_nil E.dig_seguro({}, "data", "create_tweet")
+    # tipo errado no MEIO do caminho: nil, e nunca `TypeError` (que e o bug do `Hash#dig`)
+    assert_nil E.dig_seguro({ "data" => [] }, "data", "create_tweet")
+    assert_nil E.dig_seguro({ "data" => { "create_tweet" => [] } }, "data", "create_tweet", "tweet_results")
+    assert_nil E.dig_seguro({ "data" => {} }, "data", "create_tweet", "tweet_results")
+    # o valor FINAL sai como vier, sem conversao: quem chama e que valida a forma
+    assert_equal "oops", E.dig_seguro({ "data" => { "create_tweet" => "oops" } }, "data", "create_tweet")
+    assert_equal "oops", E.dig_seguro({ "data" => { "create_tweet" => { "tweet_results" => "oops" } } },
+                                    "data", "create_tweet", "tweet_results")
+    assert_equal [1], E.dig_seguro({ "a" => [1] }, "a")
+    # e o caminho feliz nao pode quebrar
+    assert_equal "1", E.dig_seguro({ "data" => { "create_tweet" => { "tweet_results" => { "result" => { "rest_id" => "1" } } } } },
+                                  "data", "create_tweet", "tweet_results", "result", "rest_id")
+  end
+
+  # A leitura segue LEITURA: uma 2xx que nem e objeto JSON continua `ResponseError` calado, sem
+  # o aviso de conferir (a LEITURA nao criou nada no X, entao nao ha o que conferir). A diferenca
+  # da ESCRITA e o `escrita:`, nao o `dig`.
+  test "2xx sem objeto JSON de uma LEITURA continua ResponseError, sem aviso de conferir" do
+    ['[]', '"oops"', "null", "<html>erro do proxy</html>", ""].each do |corpo|
+      resposta = Resp.new(status: 200, body: corpo, headers: {})
+      erro = assert_raises(E::ResponseError, "leitura #{corpo.inspect}") do
+        E.interpreta!(resposta, "UserByScreenName")
+      end
+      refute_kind_of E::Incerto, erro, "leitura #{corpo.inspect}"
+      refute_includes erro.message, "confira o post", "leitura #{corpo.inspect}"
+    end
   end
 
   # A varredura e POSITIVA de verdade: nenhuma string com sinal, ponto, letra, espaco ou
