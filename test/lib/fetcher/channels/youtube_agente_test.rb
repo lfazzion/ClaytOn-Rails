@@ -51,6 +51,22 @@ class Fetcher::Channels::YoutubeAgenteTest < ActiveSupport::TestCase
     assert_raises(Fetcher::CookieJar::Expired) { Y.feed(limit: 5) }
   end
 
+  test "search sem cookie de autenticacao sai Expired mesmo sem marca no stderr, nunca lista vazia" do
+    Fetcher::SessionCookies.stubs(:for).returns([[{ "name" => "PREF", "value" => "x", "domain" => ".youtube.com" },
+                                                  { "name" => "YSC", "value" => "y", "domain" => ".youtube.com" }], :jar])
+    Open3.stubs(:capture3).returns(["", "", Status.new(true)])
+    assert_raises(Fetcher::CookieJar::Expired) { Y.search(query: "x", limit: 3) }
+  end
+
+  test "para_agente so aceita id de exatamente 11 caracteres" do
+    r = Y.para_agente("url" => "https://www.youtube.com/watch?v=#{'a' * 34}", "title" => "T")
+    assert_nil r["id"]
+    ok = Y.para_agente("url" => "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=3", "title" => "T")
+    assert_equal "dQw4w9WgXcQ", ok["id"]
+    fim = Y.para_agente("url" => "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "title" => "T")
+    assert_equal "dQw4w9WgXcQ", fim["id"]
+  end
+
   test "assistir marca como assistido e devolve a forma do agente" do
     Y.expects(:run).with { |url, _dir, _cookie, mark_watched:| url.include?("dQw4w9WgXcQ") && mark_watched == true }
      .returns({ "id" => "dQw4w9WgXcQ", "title" => "T", "channel" => "C" })

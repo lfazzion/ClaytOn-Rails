@@ -136,7 +136,9 @@ module Fetcher
           raise RateLimited, COOKIE_DOMAIN if HostRateLimiter.exceeded?(COOKIE_DOMAIN, max: MAX_PER_WINDOW)
 
           cookies, = SessionCookies.for(COOKIE_DOMAIN)
-          CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) { |caminho| resultados(termo, n, caminho) }
+          CookieJar.with_netscape_file(COOKIE_DOMAIN, cookies: cookies) do |caminho|
+            resultados(termo, n, caminho).tap { verify_session!(caminho) }
+          end
         end
 
         def video_id_from(url)
@@ -215,7 +217,7 @@ module Fetcher
 
         # Item de `search`/`feed` (forma interna) -> forma do agente.
         def para_agente(item)
-          id = item["url"].to_s[/[?&]v=([A-Za-z0-9_-]{11})/, 1]
+          id = item["url"].to_s[/[?&]v=([A-Za-z0-9_-]{11})(?:&|\z)/, 1]
           { "id" => id, "titulo" => item["title"], "canal" => item["channel"],
             "duracao" => item["duration_seconds"], "url" => item["url"] }
         end
