@@ -181,6 +181,36 @@ module Fetcher
         objeto.is_a?(Hash) ? objeto[caminho.last] : nil
       end
 
+      # ── O LIMITE SIMPLES E O CAMINHO LONGO (medido no bundle do X em 29/09/2026) ──────────
+      #
+      # O `CreateTweet` recusa acima de ~280 com o código 186 mesmo na conta Premium: o texto longo
+      # vai por OUTRA operação, a `CreateNoteTweet`. O próprio cliente web decide assim
+      # (`sendTweet`: `eo.tC(e, r)` → `CreateNoteTweet`, senão `CreateTweet`): nota se houver
+      # richtext/mídia rica OU se o comprimento PONDERADO passar de 280 (`maxWeightedTweetLength`).
+      # As `variables` são as MESMAS do CreateTweet (`e_()`: tweet_text, reply, media,
+      # semantic_annotation_ids...); a resposta vem em `data.notetweet_create.tweet_results`
+      # (a do curto é `data.create_tweet.tweet_results`). As `featureSwitches` das duas operações
+      # no bundle são a mesma lista de 38 (o mesmo `XConversation::FEATURES` das duas).
+      #
+      # Peso: caractere fora dos intervalos de peso 1 do X (0-4351, 8192-8205, 8208-8223,
+      # 8242-8247) conta 2 (CJK, emoji). URL NÃO é encurtada aqui (o X conta 23): a casa só pode
+      # SUPERESTIMAR, e superestimar manda para o caminho longo, que aceita qualquer tamanho — o
+      # erro perigoso seria subestimar e o CreateTweet devolver 186.
+      LIMITE_SIMPLES = 280
+      OPERACAO_CURTA = "CreateTweet"
+      OPERACAO_LONGA = "CreateNoteTweet"
+
+      def peso_do_texto(texto)
+        texto.each_char.sum do |c|
+          o = c.ord
+          (o <= 4351 || (8192..8205).cover?(o) || (8208..8223).cover?(o) || (8242..8247).cover?(o)) ? 1 : 2
+        end
+      end
+
+      def texto_longo?(texto)
+        peso_do_texto(texto) > LIMITE_SIMPLES
+      end
+
       def postar(texto:, em_resposta_a: nil)
         texto = texto.to_s.strip
         raise Recusado, "texto vazio" if texto.empty?
@@ -195,8 +225,21 @@ module Fetcher
         if em_resposta_a
           variaveis["reply"] = { "in_reply_to_tweet_id" => em_resposta_a.to_s, "exclude_reply_user_ids" => [] }
         end
-        dados = graphql!("CreateTweet", variaveis, features: XConversation::FEATURES)
-        resultados = dig_seguro(dados, "data", "create_tweet", "tweet_results")
+        longo = texto_longo?(texto)
+        operacao = longo ? OPERACAO_LONGA : OPERACAO_CURTA
+        chave = longo ? "notetweet_create" : "create_tweet"
+        dados = begin
+          graphql!(operacao, variaveis, features: XConversation::FEATURES)
+        rescue Recusado, ResponseError => e
+          raise e unless longo
+
+          # Caminho longo recusado: legível, e o texto NUNCA é truncado nem reenviado pelo caminho
+          # curto (que cortaria/recusaria com 186). O operador decide o que fazer.
+          raise e.class, "caminho longo (#{OPERACAO_LONGA}, #{texto.length} caracteres) recusado pelo X; " \
+                         "o texto NÃO foi publicado nem truncado; encurte-o ou confira se a conta tem " \
+                         "posts longos: #{e.message}"
+        end
+        resultados = dig_seguro(dados, "data", chave, "tweet_results")
         # `tweet_results: {}` com HTTP 200: o X engoliu o post sem erro. Isto NAO e "falhou": a
         # 2xx prova que o pedido chegou, e sem o `tweet_results` a casa não sabe se o post saiu —
         # então sai como Incerto, com o aviso de conferir. Repetir às cegas aqui criava OUTRO
@@ -210,7 +253,7 @@ module Fetcher
         # O `dig_seguro` é o que impede o `TypeError` de um `result` ESCALAR (`"oops"`): o
         # `Hash#dig` estoura nesse corpo, e `Incerto` é a resposta certa (achado 2 da r4).
         id = dig_seguro(resultados, "result", "rest_id")
-        raise Incerto, "CreateTweet: #{CUSTO_REPETIR_POSTAR} (rest_id=#{id.inspect}); #{AVISO_PODE_TER_SAIDO}" unless
+        raise Incerto, "#{operacao}: #{CUSTO_REPETIR_POSTAR} (rest_id=#{id.inspect}); #{AVISO_PODE_TER_SAIDO}" unless
           id_utilizavel?(id)
 
         { "id" => id.to_s, "url" => "https://x.com/i/status/#{id}" }

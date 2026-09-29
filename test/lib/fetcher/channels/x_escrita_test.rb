@@ -71,13 +71,14 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
     assert_match(/máx\. 25000/, erro.message)
   end
 
-  # Borda de cima: a conta ficou Premium em 28/09/2026, então 25.000 é ACEITO (o X manda pro
-  # GraphQL). Com o teto antigo de 280 este teste caía no Recusado local antes de qualquer rede.
-  test "25.000 caracteres sao aceitos e chegam inteiros no tweet_text" do
-    Fetcher::SafeHttpClient.expects(:post).with do |_url, json:, headers:|
-      json["variables"]["tweet_text"] == "a" * E::MAX_CHARS && json["variables"]["tweet_text"].length == 25_000
-    end.returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
-    assert_equal "2104291497428345283", E.postar(texto: "a" * 25_000)["id"]
+  # Borda de cima: a conta ficou Premium em 28/09/2026, então 25.000 é ACEITO. Acima de 280 o
+  # caminho é o `CreateNoteTweet` (o `CreateTweet` recusa com 186 mesmo no Premium).
+  test "25.000 caracteres sao aceitos e chegam inteiros no tweet_text, pelo CreateNoteTweet" do
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, headers:|
+      url == "https://x.com/i/api/graphql/QID/CreateNoteTweet" &&
+        json["variables"]["tweet_text"] == "a" * E::MAX_CHARS && json["variables"]["tweet_text"].length == 25_000
+    end.returns(Resp.new(status: 200, body: corpo_nota(REST_ID), headers: {}))
+    assert_equal REST_ID, E.postar(texto: "a" * 25_000)["id"]
   end
 
   # O texto curto de sempre (280) continua entrando: subir o teto não pode ter quebrado o post comum.
@@ -90,6 +91,111 @@ class Fetcher::Channels::XEscritaTest < ActiveSupport::TestCase
 
   test "o teto e 25.000 e o post vai inteiro para o X" do
     assert_equal 25_000, E::MAX_CHARS
+  end
+
+  # ── Caminho longo: CreateNoteTweet (contrato lido no bundle do X, 29/09/2026) ──────────────
+  REST_ID = "2104291497428345283"
+
+  def corpo_nota(id, chave: "notetweet_create")
+    JSON.generate("data" => { chave => { "tweet_results" => { "result" => { "rest_id" => id } } } })
+  end
+
+  test "281 caracteres vao por CreateNoteTweet, 280 continuam no CreateTweet" do
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, headers:|
+      url == "https://x.com/i/api/graphql/QID/CreateNoteTweet" && json["queryId"] == "QID" &&
+        json["variables"]["tweet_text"] == "a" * 281
+    end.returns(Resp.new(status: 200, body: corpo_nota(REST_ID), headers: {}))
+    assert_equal({ "id" => REST_ID, "url" => "https://x.com/i/status/#{REST_ID}" }, E.postar(texto: "a" * 281))
+
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.end_with?("/CreateTweet") }
+                           .returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
+    assert_equal REST_ID, E.postar(texto: "a" * 280)["id"]
+  end
+
+  test "o texto longo leva as mesmas variaveis e as 38 features do CreateTweet" do
+    Fetcher::SafeHttpClient.expects(:post).with do |_url, json:, headers:|
+      v = json["variables"]
+      v["dark_request"] == false && v["media"] == { "media_entities" => [], "possibly_sensitive" => false } &&
+        v["semantic_annotation_ids"] == [] && !v.key?("reply") &&
+        json["features"] == Fetcher::Channels::XConversation::FEATURES
+    end.returns(Resp.new(status: 200, body: corpo_nota(REST_ID), headers: {}))
+    E.postar(texto: "b" * 400)
+  end
+
+  test "responder longo vai por CreateNoteTweet com o reply nas variaveis" do
+    Fetcher::SafeHttpClient.expects(:post).with do |url, json:, headers:|
+      url.end_with?("/CreateNoteTweet") &&
+        json["variables"]["reply"] == { "in_reply_to_tweet_id" => "42", "exclude_reply_user_ids" => [] }
+    end.returns(Resp.new(status: 200, body: corpo_nota(REST_ID), headers: {}))
+    assert_equal REST_ID, E.postar(texto: "c" * 500, em_resposta_a: "42")["id"]
+  end
+
+  test "responder curto continua no CreateTweet" do
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.end_with?("/CreateTweet") }
+                           .returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
+    E.postar(texto: "oi", em_resposta_a: "42")
+  end
+
+  # O X pesa CJK/emoji como 2: 141 caracteres de peso 2 = 282 > 280, e o CreateTweet daria 186.
+  test "o peso do X decide: 141 caracteres de peso 2 ja sao caminho longo, 140 nao" do
+    assert_equal 282, E.peso_do_texto("汉" * 141)
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.end_with?("/CreateNoteTweet") }
+                           .returns(Resp.new(status: 200, body: corpo_nota(REST_ID), headers: {}))
+    E.postar(texto: "汉" * 141)
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.end_with?("/CreateTweet") }
+                           .returns(Resp.new(status: 200, body: fixture("create_tweet_ok.json"), headers: {}))
+    E.postar(texto: "汉" * 140)
+  end
+
+  test "recusa 186 no caminho longo sai legivel, diz que nao publicou nem truncou, e nao cai no curto" do
+    corpo = { "errors" => [{ "message" => "Tweet needs to be a bit shorter.", "code" => 186 }] }.to_json
+    Fetcher::SafeHttpClient.expects(:post).once.with { |url, **| url.end_with?("/CreateNoteTweet") }
+                           .returns(Resp.new(status: 403, body: corpo, headers: {}))
+    erro = assert_raises(E::Recusado) { E.postar(texto: "d" * 400) }
+    assert_match(/CreateNoteTweet/, erro.message)
+    assert_match(/400 caracteres/, erro.message)
+    assert_match(/NÃO foi publicado nem truncado/, erro.message)
+    assert_match(/186/, erro.message)
+  end
+
+  test "restricao no caminho longo continua Restrito, com o codigo" do
+    corpo = { "errors" => [{ "message" => "x", "code" => 226 }] }.to_json
+    Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+    assert_raises(E::Restrito) { E.postar(texto: "e" * 400) }
+  end
+
+  test "caminho longo: 2xx sem id utilizavel e Incerto com o aviso de conferir, postar e responder" do
+    [corpo_nota(""), corpo_nota(nil), '{"data":{"notetweet_create":{"tweet_results":{}}}}',
+     '{"data":{"notetweet_create":"oops"}}', "<html>proxy</html>", corpo_nota((2**64).to_s),
+     corpo_nota(REST_ID, chave: "create_tweet")].each do |corpo|
+      Fetcher::SafeHttpClient.stubs(:post).returns(Resp.new(status: 200, body: corpo, headers: {}))
+      [{}, { em_resposta_a: "42" }].each do |extra|
+        erro = assert_raises(E::Incerto, corpo) { E.postar(texto: "f" * 400, **extra) }
+        assert_includes erro.message, E::AVISO_PODE_TER_SAIDO
+      end
+    end
+  end
+
+  test "caminho longo: timeout de leitura depois do envio vira Incerto, nao ResponseError" do
+    rede_falha!(Net::ReadTimeout, url: "https://x.com/i/api/graphql/QID/CreateNoteTweet")
+    erro = assert_raises(E::Incerto) { E.postar(texto: "g" * 400) }
+    assert_includes erro.message, "CreateNoteTweet"
+  end
+
+  test "caminho longo: queryId velho (422) redescobre CreateNoteTweet uma vez" do
+    Fetcher::XQueryIdResolver.any_instance.unstub(:resolve)
+    Fetcher::XQueryIdResolver.any_instance.stubs(:resolve).with { |op, **| op == "CreateNoteTweet" }
+                             .returns("VELHO").then.returns("NOVO")
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.include?("/VELHO/CreateNoteTweet") }
+                           .returns(Resp.new(status: 422, body: "", headers: {}))
+    Fetcher::SafeHttpClient.expects(:post).with { |url, **| url.include?("/NOVO/CreateNoteTweet") }
+                           .returns(Resp.new(status: 200, body: corpo_nota(REST_ID), headers: {}))
+    assert_equal REST_ID, E.postar(texto: "h" * 400)["id"]
+  end
+
+  test "acima de 25.000 continua recusado sem rede, tambem pelo caminho longo" do
+    Fetcher::SafeHttpClient.expects(:post).never
+    assert_raises(E::Recusado) { E.postar(texto: "i" * 25_001, em_resposta_a: "42") }
   end
 
   test "queryId nao descoberto da erro claro" do
