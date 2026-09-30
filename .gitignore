@@ -37,3 +37,7 @@ db/*.sqlite3-shm
 __pycache__/
 *.pyc
 storage/backups/
+
+# artefatos de trabalho e copias de configuracao (nunca versionar)
+.superpowers/
+docker/searxng-runtime/*.bak-*

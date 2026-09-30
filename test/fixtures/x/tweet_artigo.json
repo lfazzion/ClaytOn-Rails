@@ -1,0 +1,45 @@
+{
+ "rest_id": "2090512486738845784",
+ "core": {
+  "user_results": {
+   "result": {
+    "core": {
+     "screen_name": "conta_a"
+    }
+   }
+  }
+ },
+ "views": {
+  "count": "1414205"
+ },
+ "legacy": {
+  "full_text": "https://t.co/wBLzP25PUm",
+  "created_at": "Thu Aug 20 18:53:11 +0000 2026",
+  "entities": {
+   "urls": [
+    {
+     "display_url": "x.com/i/article/2090…",
+     "expanded_url": "https://x.com/i/article/2090496192136290304",
+     "indices": [
+      0,
+      23
+     ],
+     "url": "https://t.co/wBLzP25PUm"
+    }
+   ]
+  },
+  "favorite_count": 820,
+  "reply_count": 17,
+  "retweet_count": 79,
+  "user_id_str": "1"
+ },
+ "article": {
+  "article_results": {
+   "result": {
+    "rest_id": "2090496192136290304",
+    "title": "The Second Brain Is Not a Storage System",
+    "preview_text": "Most people who build a second brain mak"
+   }
+  }
+ }
+}

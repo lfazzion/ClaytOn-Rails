@@ -48,12 +48,12 @@ class Fetcher::Channels::XContaTest < ActiveSupport::TestCase
     Fetcher::SafeHttpClient.expects(:post).with do |url, json:, headers:|
       url == "https://x.com/i/api/graphql/QID/UserTweetsAndReplies" && json["queryId"] == "QID" &&
         json["variables"]["userId"] == "2084679070856384512" && json["variables"]["withCommunity"] == true &&
-        json["features"].is_a?(Hash)
+        json["features"]["articles_preview_enabled"] == true
     end.returns(Resp.new(status: 200, body: fixture("user_tweets_and_replies.json"), headers: {}))
     posts = C.posts(usuario_id: "2084679070856384512", limite: 5)
     assert_equal([{ "id" => "2104297723893571643", "texto" => "hello, world. second boot.",
                     "criado_em" => "2026-09-27T19:50:47Z", "impressoes" => nil, "respostas" => 0,
-                    "curtidas" => 1, "reposts" => 1 }], posts)
+                    "curtidas" => 1, "reposts" => 1, "formato" => "curto" }], posts)
   end
 
   test "posts: 404 redescobre o queryId e repete uma vez" do

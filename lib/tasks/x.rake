@@ -3,15 +3,23 @@
 # Leitura e escrita no X por linha de comando (usada pelo agente Hermes e pelo porteiro do
 # experimento-x; lógica em Fetcher::XLeitura, Fetcher::Channels::XEscrita/XConta e Fetcher::XComando).
 #   bin/rails x:buscar CONSULTAS=arquivo|- [LIMITE=20]     -> uma linha JSON por consulta
+#   bin/rails x:ler URL=<url>                                   -> {"url","titulo","texto","caracteres_total","truncado"}
 #   bin/rails x:conversa ID=<id ou link> [LIMITE=40] [FORMATO=texto|json]
 #   bin/rails x:postar TEXTO=-|arquivo [RESPOSTA_A=<id|link>]  -> {"id","url"}
 #   bin/rails x:curtir ID=<id|link>                             -> {"id"}
+#   bin/rails x:descurtir ID=<id|link>                         -> {"id"}
 #   bin/rails x:repostar ID=<id|link>                           -> {"id"}
 #   bin/rails x:apagar ID=<id|link>                             -> {"id"}
+#   bin/rails x:editar ID=<id|link> TEXTO=-|arquivo             -> {"id","id_anterior","url",...}
 #   bin/rails x:seguir USUARIO=<screen_name>                    -> {"usuario_id"}
+#   bin/rails x:deseguir USUARIO_ID=<id>                        -> {"usuario_id"}
 #   bin/rails x:perfil USUARIO=<screen_name>                    -> {"id","usuario","seguidores","seguindo","posts"}
 #   bin/rails x:posts USUARIO=<screen_name> [LIMITE=20]         -> {"posts": [...]} (posts e respostas; sem reposts)
 #   bin/rails x:feed [TIPO=para_voce|seguindo] [CURSOR=] [LIMITE=20] -> {"posts": [...], "proximo_cursor"}
+#   bin/rails x:mencoes [LIMITE=40]                             -> {"posts": [...]} (menções e respostas à conta, da aba Menções das
+#                                                                  notificações: id, autor, texto, criado_em, url, em_resposta_a, e_resposta)
+#   bin/rails x:artigo TITULO=arquivo|- CORPO=arquivo|- [VISIBILIDADE=Public] [CONVERSA=ByInvitation] [RASCUNHO=<id>]
+#                                                               -> {"id","tweet_id","url"}
 namespace :x do
   desc "Busca no X: CONSULTAS=arquivo (uma por linha; - = stdin) [LIMITE=20]. Saida: uma linha JSON por consulta"
   task buscar: :environment do
@@ -24,6 +32,13 @@ namespace :x do
     resultados.each { |r| puts JSON.generate(r) }
     falhas = resultados.count { |r| r["erro"] }
     abort "x:buscar: #{falhas} de #{resultados.size} consulta(s) falharam (campo erro)" if falhas.positive?
+  end
+
+  desc "Abre uma pagina da web pelo SafeHttpClient: URL=<url> -> {url,titulo,texto,caracteres_total,truncado}"
+  task ler: :environment do
+    exit Fetcher::XComando.executa {
+      Fetcher::XLer.ler(url: ENV.fetch("URL") { raise ArgumentError, "uso: x:ler URL=<url>" })
+    }
   end
 
   desc "Post + comentarios do X: ID=<id ou link> [LIMITE=40] [FORMATO=texto|json]"
@@ -57,6 +72,49 @@ namespace :x do
     end
   end
 
+  # ── DESFAZER: a saída de um sweep que errou a seleção ─────────────────────────
+  #
+  # `x:descurtir` e `x:deseguir` desfazem o que `x:curtir`/`x:seguir` fizeram. `ID=` aceita id ou
+  # link, como nas outras escritas.
+  #
+  # `USUARIO_ID=` é o ID NUMÉRICO e não o screen_name, e a diferença é deliberada: o `x:seguir`
+  # aceita `USUARIO=` e traduz com o `XConta.perfil`, que é uma LEITURA (gasta cota da conta).
+  # O desfazer é para uso logo depois de um sweep que JÁ sabe o id, e fazer uma leitura a mais
+  # para isso seria gasto sem motivo. Um `@screen_name` colado aqui é recusado pelo canal com
+  # `Recusado` e o valor recusado na mensagem — nada é traduzido por baixo dos panos.
+  desc "Desfaz a curtida de um post: ID=<id|link>"
+  task descurtir: :environment do
+    exit Fetcher::XComando.executa {
+      id = Fetcher::XLeitura.tweet_id(ENV.fetch("ID") { raise ArgumentError, "uso: x:descurtir ID=<id|link>" })
+      Fetcher::Channels::XEscrita.descurtir(id: id)
+    }
+  end
+
+  desc "Desfaz o follow de uma conta: USUARIO_ID=<id numerico do X>"
+  task deseguir: :environment do
+    exit Fetcher::XComando.executa {
+      alvo = ENV.fetch("USUARIO_ID") { raise ArgumentError, "uso: x:deseguir USUARIO_ID=<id numerico do X>" }
+      Fetcher::Channels::XEscrita.deseguir(usuario_id: alvo)
+    }
+  end
+
+  # Edição de post já publicado (conta Premium; janela de 1h e número limitado de alterações
+  # segundo help.x.com/en/using-x/x-premium). ID aceita id ou link como nas outras escritas, e
+  # TEXTO vem de `-` (stdin) ou de arquivo, como no `postar`.
+  #
+  # A edição SAI com id NOVO: o X cria uma versão nova do post e esconde a antiga do feed. Por
+  # isso a linha de saída traz `id` (o texto novo, dono da `url`) e `id_anterior` (o id pedido) —
+  # quem salva a `url` precisa da nova, e quem precisa conferir o post antigo tem a outra.
+  desc "Edita um post publicado (Premium): ID=<id|link> TEXTO=-|arquivo"
+  task editar: :environment do
+    exit Fetcher::XComando.executa {
+      uso = "uso: x:editar ID=<id|link> TEXTO=-|arquivo"
+      alvo = Fetcher::XLeitura.tweet_id(ENV.fetch("ID") { raise ArgumentError, uso })
+      texto = Fetcher::XComando.le_texto(ENV.fetch("TEXTO") { raise ArgumentError, uso })
+      Fetcher::Channels::XEditar.editar(id: alvo, texto: texto)
+    }
+  end
+
   desc "Segue uma conta: USUARIO=<screen_name>"
   task seguir: :environment do
     exit Fetcher::XComando.executa {
@@ -85,6 +143,59 @@ namespace :x do
     exit Fetcher::XComando.executa {
       Fetcher::Channels::XFeed.ler(tipo: ENV.fetch("TIPO", "para_voce"), cursor: ENV["CURSOR"].presence,
                                    limite: ENV.fetch("LIMITE", "20"))
+    }
+  end
+
+  desc "Menções à conta lidas das notificações (aba Menções): [LIMITE=40]"
+  task mencoes: :environment do
+    exit Fetcher::XComando.executa {
+      { "posts" => Fetcher::Channels::XNotificacoes.mencoes(limite: Integer(ENV.fetch("LIMITE", "40"))) }
+    }
+  end
+
+  # Artigo longo (X Article). Título e corpo vêm de `-` (stdin) ou de arquivo, como nas outras
+  # escritas; o corpo é markdown de um subconjunto (parágrafo, #/##, - , > , link, **negrito**,
+  # *itálico*, ~~riscado~~) e o que não é suportado (código, tabela, imagem) é recusado com erro
+  # tipado, sem chegar ao X. Salvar o artigo com o comando é decisão de quem roda: é escrita
+  # pública na conta.
+  #
+  # SÓ UM dos dois pode ser `-`: o stdin é um único fluxo, e `le_texto` o consome inteiro. Com os
+  # dois em `-` o título viria com o corpo dentro e o corpo sairia vazio — um artigo publicado com o
+  # texto trocado. Por isso a recusa é explícita, e não um combinado calado.
+  #
+  # RASCUNHO=<id> RETOMA um rascunho que já existe no X (é o id que a falha anterior devolveu na
+  # linha de erro). TITULO e CORPO continuam obrigatórios: o rascunho é reescrito com eles, e sem
+  # eles a retomada publicaria o rascunho antigo com título vazio.
+  desc "Publica artigo: TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=Public] [CONVERSA=ByInvitation] " \
+       "[RASCUNHO=<id>]"
+  task artigo: :environment do
+    exit Fetcher::XComando.executa {
+      uso = "uso: x:artigo TITULO=-|arquivo CORPO=-|arquivo [VISIBILIDADE=] [CONVERSA=] [RASCUNHO=<id>]"
+      # A retomada NÃO abre exceção de uso: quem re-executa depois de uma falha tem TITULO e CORPO
+      # na mão de novo, e a mensagem de erro mandou colar os dois com o RASCUNHO=<id>.
+      #
+      # `RASCUNHO=` VAZIO é recusado, e não apagado com `presence`: ausente é o caminho normal
+      # (cria rascunho novo), mas presente-e-vazio é o sinal de que a pessoa colou o comando de
+      # retomada sem o id. Deixar passar criava OUTRO rascunho — a duplicação que a retomada
+      # existe para impedir, agora silenciosa. Ausente segue ausente; só o vazio é erro.
+      raise ArgumentError, "#{uso} (RASCUNHO= vazio: use um id de artigo ou omita para criar rascunho novo)" if
+        ENV.key?("RASCUNHO") && ENV["RASCUNHO"].to_s.strip.empty?
+      retomada = ENV["RASCUNHO"].presence
+      origem_titulo = ENV.fetch("TITULO") { raise ArgumentError, "#{uso} (com RASCUNHO= informe TITULO e CORPO)" }
+      origem_corpo = ENV.fetch("CORPO") { raise ArgumentError, "#{uso} (com RASCUNHO= informe TITULO e CORPO)" }
+      raise ArgumentError, "#{uso} (so um dos dois pode ser '-': o stdin e um fluxo so)" if
+        origem_titulo == "-" && origem_corpo == "-"
+
+      argumentos = {
+        titulo: Fetcher::XComando.le_texto(origem_titulo),
+        corpo: Fetcher::XComando.le_texto(origem_corpo),
+        visibilidade: ENV.fetch("VISIBILIDADE", Fetcher::Channels::XArtigo::VISIBILIDADE_PADRAO),
+        conversa: ENV.fetch("CONVERSA", Fetcher::Channels::XArtigo::CONVERSA_PADRAO)
+      }
+      # `:rascunho` só entra quando existe: sem RASCUNHO= a chamada é a de sempre, e quem chama o
+      # canal por fora não precisa conhecer a palavra nova.
+      argumentos[:rascunho] = retomada if retomada
+      Fetcher::Channels::XArtigo.publicar(**argumentos)
     }
   end
 end

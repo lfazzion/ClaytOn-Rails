@@ -18,8 +18,18 @@ module Fetcher
       erro!(saida, e)
     end
 
+    # `XLer::Bloqueado` responde se o bloqueio veio depois de a rede ter sido usada
+    # (`apos_rede`). A pergunta "a requisição saiu?" decide se o porteiro devolve a
+    # vaga da cota, então o nome precisa atravessar o envelope — ver `ServicoX.ler`.
+    #
+    # Qualquer OUTRA recusa da SsrfGuard segue igual, sem o campo: a resposta honesta
+    # para as outras rotas (que contam erro como erro) continua sendo a mesma.
     def erro!(saida, erro)
-      saida.puts JSON.generate("erro" => erro.message, "tipo" => erro.class.name.to_s.split("::").last)
+      corpo = { "erro" => erro.message, "tipo" => erro.class.name.to_s.split("::").last }
+      if erro.respond_to?(:bloqueado_apos_rede)
+        corpo["bloqueado_apos_rede"] = erro.bloqueado_apos_rede ? true : false
+      end
+      saida.puts JSON.generate(corpo)
       1
     end
 

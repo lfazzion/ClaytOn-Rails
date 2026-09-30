@@ -1,0 +1,50 @@
+{
+  "responseContext": {
+    "serviceTrackingParams": [
+      {
+        "service": "GFEEDBACK",
+        "params": [
+          {
+            "key": "logged_in",
+            "value": "1"
+          }
+        ]
+      }
+    ],
+    "mainAppWebResponseContext": {
+      "loggedOut": false
+    }
+  },
+  "actions": [
+    {
+      "runAttestationCommand": {
+        "ids": [
+          {
+            "encryptedVideoId": "ZELPNFXJ4_o"
+          }
+        ],
+        "engagementType": "ENGAGEMENT_TYPE_VIDEO_LIKE"
+      }
+    }
+  ],
+  "frameworkUpdates": {
+    "entityBatchUpdate": {
+      "mutations": [
+        {
+          "entityKey": "EgtaRUxQTkZYSjRfbyA-KAE%3D",
+          "type": "ENTITY_MUTATION_TYPE_REPLACE",
+          "payload": {
+            "likeStatusEntity": {
+              "key": "EgtaRUxQTkZYSjRfbyA-KAE%3D",
+              "likeStatus": "LIKE"
+            }
+          }
+        }
+      ],
+      "timestamp": {
+        "seconds": "1790710202",
+        "nanos": 13319677
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@ require_relative "../cookie_jar"
 require_relative "../host_rate_limiter"
 require_relative "../safe_http_client"
 require_relative "x_graphql"
+require_relative "x_formato"
 
 module Fetcher
   module Channels
@@ -97,8 +98,10 @@ module Fetcher
       # versionada `test/fixtures/files/x/tweet_detail.json`; os flags vieram
       # da fonte primária, o `tmp/` era só a área de captura efêmera,
       # não versionado). COPY — não inventar nenhuma flag.
+      # Única troca de valor: `articles_preview_enabled` ligado (29/09/2026) — desligado, o X não manda o
+      # bloco `article` e o post de Article chega como um t.co solto (ver XFormato).
       FEATURES = {
-        "articles_preview_enabled" => false,
+        "articles_preview_enabled" => true,
         "c9s_tweet_anatomy_moderator_badge_enabled" => true,
         "communities_web_enable_tweet_community_results_fetch" => true,
         "creator_subscriptions_quote_tweet_preview_enabled" => false,
@@ -509,11 +512,11 @@ module Fetcher
           {
             "id"         => result["rest_id"] || legacy["id_str"],
             "author"     => resolve_author(result),
-            "text"       => legacy["full_text"].to_s,
+            "text"       => XFormato.texto(result),
             "created_at" => parse_created_at(legacy["created_at"]),
             "likes"      => legacy["favorite_count"],
             "replies"    => legacy["reply_count"]
-          }
+          }.merge(XFormato.campos(result))
         end
 
         # `legacy.screen_name` primeiro; fallback `core.screen_name` —

@@ -121,6 +121,11 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
                 # Requisito (cenário 4): sem enable efetivo, não habilita eventos.
                 if os.environ.get("DOC_NO_ENABLE") != "1":
                     self.network_enabled = True
+            # Chrome real entrega ResponseReceived durante o await de Page.enable,
+            # antes de o script registrar o listener de FrameNavigated.
+            if isinstance(command, PageEnableCommand) and os.environ.get("DOC_EARLY_EVENT") == "1":
+                for handler in list(self.resp_handlers):
+                    handler(FakeParams("9.9.9.9", frame_id="EARLY_FRAME"))
 
         async def get(self, url):
             # Requisito 2: emite eventos ResponseReceived SÓ se enable foi chamado.
@@ -289,6 +294,20 @@ class NodriverFetchScriptTest < ActiveSupport::TestCase
     json = JSON.parse(stdout)
     assert_equal "1.2.3.4", json["document_ip"],
       "iframe privado (10.0.0.1) NAO deve sobrescrever o IP do frame principal (1.2.3.4): vazaria bloqueio falso"
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  test "ResponseReceived antes do FrameNavigated (durante Page.enable) nao derruba o script com NameError" do
+    # Regressao: main_frame_id era atribuido DEPOIS de `await page.send(page.enable())`,
+    # mas o listener de rede ja estava registrado. Um ResponseReceived entregue nessa
+    # janela lia a variavel sem valor -> NameError no callback e o fetch falhava.
+    dir, env = build_fake_env("DOC_EARLY_EVENT" => "1")
+    stdout, stderr, status = Open3.capture3(env, "python3", "-u", SCRIPT_PATH, "https://example.com/initial")
+
+    assert status.success?, "script falhou com status #{status.exitstatus}: #{stderr}"
+    refute_match(/NameError|main_frame_id/, stderr)
+    assert JSON.parse(stdout)["document_ip"].present?
   ensure
     FileUtils.remove_entry(dir) if dir
   end

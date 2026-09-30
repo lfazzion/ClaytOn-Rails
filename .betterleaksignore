@@ -1,0 +1,3 @@
+# entityKey do YouTube na fixture da curtida: base64 do id PUBLICO do video + flags (nao e segredo).
+test/fixtures/x/yt_like_ok.json:generic-api-key:34
+test/fixtures/x/yt_like_ok.json:generic-api-key:38

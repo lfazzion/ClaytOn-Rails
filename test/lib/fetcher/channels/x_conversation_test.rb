@@ -173,7 +173,8 @@ class Fetcher::Channels::XConversationTest < ActiveSupport::TestCase
     conv = Fetcher::Channels::XConversation.parse_conversation(fixture_data, focal_id: ROOT_ID)
 
     conv["replies"].each do |r|
-      assert_equal %w[author created_at id likes replies text].sort, r.keys.sort
+      assert_equal %w[author created_at formato id likes replies text].sort, r.keys.sort
+      assert_includes %w[curto longo], r["formato"]
       assert_kind_of String, r["id"]
       assert_kind_of Integer, r["likes"], "likes = legacy.favorite_count (int)"
       assert_kind_of Integer, r["replies"], "replies = legacy.reply_count (int)"

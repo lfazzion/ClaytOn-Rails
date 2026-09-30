@@ -28,11 +28,16 @@ class RefreshXQueryIdsJob < ApplicationJob
 
   # Uma descoberta por operação (lock e cache por operação no resolver). A falha de uma não
   # impede as outras.
+  #
+  # `UnfavoriteTweet` (o `descurtir`) entra aqui pelo MESMO motivo das outras escritas: o canal
+  # resolve o `queryId` por NOME em runtime, e sem refresh proativo o redescovery de 404/422
+  # fica fora do ciclo — a rotação de `queryId` do X só seria percebida na primeira chamada de
+  # cada 24 h de uso, já depois do erro.
   OPERATIONS = %w[
     SearchTimeline
-    CreateTweet FavoriteTweet CreateRetweet DeleteTweet
+    CreateTweet FavoriteTweet CreateRetweet DeleteTweet UnfavoriteTweet
     UserByScreenName UserTweetsAndReplies
-    HomeTimeline HomeLatestTimeline
+    HomeTimeline HomeLatestTimeline NotificationsTimeline
   ].freeze
 
   def perform

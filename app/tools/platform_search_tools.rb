@@ -45,18 +45,33 @@ class PlatformSearchTool < ToolBase
   param :limit,    type: :integer, desc: "Número máximo de resultados (1-25, padrão 10)", required: false
 
   # O modelo não escolhe classe: o nome vem dele, o canal vem daqui.
+  #
+  # Guardar a CLASSE aqui era o que quebrava x e reddit em produção (27/09,
+  # `NameError: uninitialized constant #<Class:Fetcher::Channels::X>::XGraphql`):
+  # esta tool mora em `app/tools/`, que o Zeitwerk não gerencia e que o
+  # initializer carrega com `require` UMA vez só, então ela não é recarregada
+  # junto com o resto. Já `lib/fetcher/` é watchable: o reloader troca
+  # `Fetcher::Channels::X` por um módulo NOVO em runtime e esta constante
+  # continuaria apontando para o módulo DESCARREGADO — cujos corpos de método
+  # (`class << self`) guardam o cref de um namespace que o reloader já trocou,
+  # e qualquer constante do corpo (XGraphql, HostRateLimiter, CookieJar) deixa
+  # de resolver.
+  #
+  # Guardar o NOME resolve na hora da chamada, e é o mesmo desenho em todos os
+  # canais: um caso por canal seria o mesmo conserto repetido seis vezes.
   PLATFORMS = {
-    "youtube"     => Fetcher::Channels::Youtube,
-    "reddit"      => Fetcher::Channels::Reddit,
-    "x"           => Fetcher::Channels::X,
-    "hackernews"  => Fetcher::Channels::Hackernews,
-    "github"      => Fetcher::Channels::Github,
-    "polymarket"  => Fetcher::Channels::Polymarket
+    "youtube"     => "Youtube",
+    "reddit"      => "Reddit",
+    "x"           => "X",
+    "hackernews"  => "Hackernews",
+    "github"      => "Github",
+    "polymarket"  => "Polymarket"
   }.freeze
 
-  # Plataformas em que `query` pode ser perfil. Uma lista em vez de um `if
-  # nome == "x"` porque a pergunta ("este canal lê perfil?") vai ser feita em
-  # três pontos, e espalhar o nome literal é como se esquece um deles.
+  # `PLATFORMS` guarda nomes, não classes, então o que esta lista mede é o
+  # conjunto de NOMES — e ela é a única lista de canais de que `query` pode ser
+  # perfil. O nome da plataforma já é string nos dois lugares, então as duas
+  # estruturas comparam pela mesma chave.
   POR_PERFIL = %w[x].freeze
 
   DEFAULT_LIMIT = 10
@@ -72,13 +87,13 @@ class PlatformSearchTool < ToolBase
     return error("query vazia") if q.empty?
     return error("query muito longa (máx #{MAX_QUERY} chars)") if q.length > MAX_QUERY
 
-    nome  = platform.to_s.strip.downcase
-    canal = PLATFORMS[nome]
+    nome = platform.to_s.strip.downcase
     # Não adivinha: chutar a plataforma devolveria resultado de outro lugar com
     # cara de resposta ao que foi pedido.
-    if canal.nil?
+    if !PLATFORMS.key?(nome)
       return error("plataforma desconhecida: #{platform.inspect} — válidas: #{PLATFORMS.keys.join(', ')}")
     end
+    canal = canal_para(nome)
 
     handle = por_perfil?(nome) ? perfil(q) : nil
     alvo   = handle || q
@@ -108,6 +123,12 @@ class PlatformSearchTool < ToolBase
   end
 
   private
+
+  # Resolve o canal na HORA da chamada, e não na carga do arquivo — é o que
+  # sobrevive ao reloader. Ver a nota longa em `PLATFORMS`.
+  def canal_para(nome)
+    Fetcher::Channels.const_get(PLATFORMS.fetch(nome), false)
+  end
 
   def por_perfil?(nome)
     POR_PERFIL.include?(nome)

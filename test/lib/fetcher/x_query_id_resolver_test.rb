@@ -328,6 +328,24 @@ module Fetcher
       assert_empty @resolver.send(:lazy_chunk_urls, '<html>sem mapa</html>', 'HomeTimeline')
     end
 
+    test 'descoberta de ponta a ponta: NotificationsTimeline sai do chunk bundle.Notifications (filtro de bundles permitidos)' do
+      base = 'https://abs.twimg.com/responsive-web/client-web/'
+      html = '<link rel="preload" as="script" crossorigin="anonymous" href="https://abs.twimg.com/responsive-web/client-web/main.132b4bba.js">' \
+             '<script>p.u=e=>""+(({7:"bundle.Notifications"})[e]||e)+"."+({7:"39f37ae04c94b71b"})[e]+"a.js"</script>'
+      stub_request(:get, 'https://x.com/home').to_return(status: 200, body: html)
+      stub_request(:get, "#{base}main.132b4bba.js").to_return(status: 200, body: @bundle_js)
+      stub_request(:get, "#{base}bundle.Notifications.39f37ae04c94b71ba.js")
+        .to_return(status: 200, body: 'e.exports={queryId:"NOTIF789",operationName:"NotificationsTimeline",operationType:"query"}')
+
+      assert_equal 'NOTIF789', @resolver.resolve('NotificationsTimeline', force: true)
+    end
+
+    test 'NotificationsTimeline e achada no chunk bundle.Notifications do mapa (medido em 29/09/2026)' do
+      html = '<script>p.u=e=>""+(({7:"bundle.Notifications",8:"loader.NotificationHandler"})[e]||e)+"."+({7:"39f37ae04c94b71b",8:"cccc"})[e]+"a.js"</script>'
+      urls = @resolver.send(:lazy_chunk_urls, html, 'NotificationsTimeline')
+      assert_equal ['bundle.Notifications.39f37ae04c94b71ba.js'], urls.map { |u| u.split('/').last }
+    end
+
     # ── RESPOSTA TRUNCADA PELO TETO TOTAL NÃO VIRA PIN DE 25h (achado 3) ─────
     #
     # O `HTTP_TOTAL_TIMEOUT` de 8s corta a requisição INTEIRA, e o corte chega

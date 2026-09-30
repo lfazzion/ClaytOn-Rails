@@ -18,6 +18,7 @@ module Fetcher
       ondemand.HoverCard
       bundle.UserProfile
       bundle.HomeTimeline
+      bundle.Notifications
       bundle.TrendTimeline
       bundle.SettingsAccount
       bundle.SettingsSecurity
@@ -53,7 +54,9 @@ module Fetcher
     # chunks cujo nome a contém (hoje 2: o `shared~...~bundle.HomeTimeline~...` e o próprio).
     LAZY_CHUNK_HINTS = {
       'HomeTimeline' => 'bundle.HomeTimeline',
-      'HomeLatestTimeline' => 'bundle.HomeTimeline'
+      'HomeLatestTimeline' => 'bundle.HomeTimeline',
+      # Aba Menções das notificações (medido em 29/09/2026): o chunk `bundle.Notifications`.
+      'NotificationsTimeline' => 'bundle.Notifications'
     }.freeze
     # `p.u=e=>""+(({id:"nome",...})[e]||e)+"."+({id:"hash",...})[e]+"a.js"` (medido em 28/09/2026).
     CHUNK_MAP_REGEX = /\(\{([^{}]*)\}\)\[(\w+)\]\|\|\2\)\+"\."\+\(\{([^{}]*)\}\)\[\2\]\+"(\w*)\.js"/.freeze

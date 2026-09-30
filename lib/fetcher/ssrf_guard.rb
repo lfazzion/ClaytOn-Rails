@@ -46,9 +46,20 @@ module Fetcher
 
     class Blocked < StandardError
       attr_reader :reason
+      # `apos_rede` diz se o bloqueio veio DEPOIS de a rede ter sido usada — o pedido já
+      # saiu e o que foi recusado foi o salto seguinte (o `Location` de um 302, por
+      # exemplo) — em vez de antes de qualquer conexão. É a distinção de que a COTA
+      # depende: um pedido que SAIU já perturbou o site, então a vaga não volta
+      # (ver `Fetcher::XLer` e o porteiro, `x.py`).
+      #
+      # Fica `false` por padrão: o caso comum é a URL ser recusada antes de sair, e é
+      # esse que devolve a vaga. Quem está no laço de redirects marca `true` no
+      # primeiro `perform` bem-sucedido.
+      attr_accessor :apos_rede
 
       def initialize(reason)
         @reason = reason
+        @apos_rede = false
         super("fetch bloqueado: #{reason}")
       end
     end
