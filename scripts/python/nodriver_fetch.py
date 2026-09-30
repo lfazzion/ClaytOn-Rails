@@ -111,6 +111,10 @@ async def fetch(url, proxy=None):
         # assinar antes de navegar para não perder o evento do documento.
         ip_holder = {"value": None}
         captured = asyncio.Event()
+        # Definido ANTES de registrar o listener de rede: o Chrome pode entregar
+        # ResponseReceived durante o await de Page.enable, antes do
+        # FrameNavigated. Atribuir depois causava NameError no callback.
+        main_frame_id = None
 
         def on_response_received(params, *args, **kwargs):
             if params is None:
@@ -158,8 +162,6 @@ async def fetch(url, proxy=None):
 
         # Captura o frame_id da navegacao principal para que o listener so
         # aceite documentos desse frame (ignora subframes/iframes — Achado B).
-        main_frame_id = None
-
         def on_frame_navigated(params, *args, **kwargs):
             nonlocal main_frame_id
             # API real (nodriver 0.50.3): FrameNavigated.params.frame é um
