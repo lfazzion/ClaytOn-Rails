@@ -4,6 +4,8 @@ require "timeout"
 require "uri"
 require_relative "cookie_jar"
 require_relative "session_cookies"
+require_relative "bot_detection"
+require_relative "document_status"
 require_relative "page_fetcher"
 require_relative "ssrf_guard"
 require_relative "rebinding_guard"
@@ -63,6 +65,59 @@ module Fetcher
       end
     end
 
+    # Regra 4 do AGENTS.md no caminho que NAVEGA. Antes estas duas condições não
+    # existiam aqui, e nenhuma das duas era possível ver: o cooldown por alvo
+    # (BotDetection) só era lido por `PageFetcher#call` — que o canal não usa —
+    # e o 403 real chegava como RenderTimeout, que não casa com nenhum padrão de
+    # backoff (medido no card t_f63b3613: 6/6 chamadas reais, cooldown nil).
+    #
+    # Herdam de `Channels::Error` por uma razão prática: o `ExtractService` e o
+    # `PlatformSearchTool` já convertem essa raiz em campo `error`/`error(...)`
+    # com a mensagem limpa. Um erro novo fora dela subiria como StandardError
+    # genérico e o modelo receberia "falha inesperada" — que é convite a repetir.
+    class TargetInCooldown < Channels::Error
+      attr_reader :host, :entry
+
+      def initialize(host, entry)
+        @host = host
+        @entry = entry
+        restante = restante_em(remaining_seconds(entry))
+        super("alvo #{host} está em cooldown de bloqueio (#{entry[:reason]}) — " \
+              "volte em #{restante}; não repita a leitura antes disso")
+      end
+
+      private
+
+      def remaining_seconds(entry)
+        expires = entry[:expires_at]
+        return 0 if expires.blank?
+
+        [expires.to_time - Time.current, 0].max
+      end
+
+      def restante_em(segundos)
+        h = (segundos / 3600).to_i
+        m = ((segundos % 3600) / 60).to_i
+        h.positive? ? "#{h}h#{m}m" : "#{m}m"
+      end
+    end
+
+    class TargetBlocked < Channels::Error
+      attr_reader :host, :status
+
+      def initialize(host, status)
+        @host = host
+        @status = status
+        super("alvo #{host} respondeu HTTP #{status} (bloqueio por bot/IP) — " \
+              "cooldown de 6-12h gravado; não repita a leitura antes de expirar")
+      end
+    end
+
+    # Status que a regra 4 nomeia como "nunca repetir". 403 é bloqueio de
+    # bot/IP; 429 é o limite do próprio site. Os dois contam na tentativa, não
+    # só o 403 — repetir um 429 é o que produz a escalada.
+    BLOCKING_STATUSES = [403, 429].freeze
+
     class << self
       def remaining
         deadline = Thread.current[:fetcher_deadline]
@@ -82,6 +137,25 @@ module Fetcher
         # host for privado; o cheque pós-navegação garante que o Chrome não
         # conectou em IP bloqueado (rebinding).
         SsrfGuard.resolve!(url.to_s)
+        # Regra 4 do AGENTS.md, lado (a): o backoff por ALVO, consultado ANTES
+        # de gastar browser — e antes até de LER a sessão do domínio, que é
+        # leitura de CDP. O mecanismo já existia (`BotDetection.cooldown!`, TTL
+        # de 6-12h) e funcionava; só que `PageFetcher#call` era o único que o
+        # lia, e o caminho de canal entra por aqui. Medido no card t_f63b3613:
+        # o cooldown de old.reddit.com continuava nil depois de 6 chamadas reais
+        # que receberam 403 — o backoff tinha mecanismo e não tinha caller.
+        #
+        # O alvo é o HOST QUE O CHROME VAI ABRIR, que é o da URL reescrita
+        # (old.reddit.com na busca e na thread). Gravar e ler pela MESMA chave é
+        # o que faz a segunda tentativa respeitar o backoff: o cooldown vive no
+        # cache compartilhado, então vale para qualquer processo e qualquer
+        # chamador do mesmo alvo.
+        #
+        # Ordem deliberada: SsrfGuard antes do cooldown (a URL precisa ser
+        # válida para ter host) e cooldown antes de `SessionCookies.for` (que
+        # gasta CDP). A porta é o que impede a navegação; o custo é o que ela
+        # evita.
+        check_cooldown!(host)
         # Levanta `CookieJar::Expired` nomeando o domínio quando não há sessão em
         # fonte nenhuma — antes de gastar browser. ROLANDO ANTES do contexto do
         # fetch (laudo r3 Item 4): a leitura usa o default_context do Ferrum, que
@@ -122,25 +196,48 @@ module Fetcher
                     # Instrumentação de diagnóstico só para Reddit (Achado 4):
                     # nos outros canais (YouTube, X) cada evaluate extra custa
                     # tempo de CDP e arrisca pendurar em página de erro.
+                    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC) if host.match?(REDDIT_HOSTS)
                     if host.match?(REDDIT_HOSTS)
-                      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
                       Rails.logger.info "[Fetcher::BrowserSession:diag] navegando host=#{host} " \
                                      "goto_limit=#{goto_limit}s timeout_efetivo=#{page.timeout rescue '?'}"
                     end
-                    begin
-                      page.go_to(uri.to_s)
-                    rescue Ferrum::TimeoutError, Ferrum::PendingConnectionsError
-                      body_check = (page.evaluate("document.body ? document.body.innerText : ''") rescue "").to_s.strip
-                      raise RenderTimeout if body_check.empty?
-                    ensure
-                      if host.match?(REDDIT_HOSTS)
-                        t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-                        status = (page.network.response&.status rescue nil)
-                        url_final = (page.current_url rescue nil) || uri.to_s
-                        Rails.logger.info "[Fetcher::BrowserSession:diag] navegou " \
-                                       "duracao=#{(t1 - t0).round(3)}s status=#{status} url_final=#{url_final}"
+                    # Regra 4, lado (b): o status do DOCUMENTO, do mesmo evento que
+                    # o rebinding usa. `page.network.response` é o último
+                    # exchange da sessão e saiu vazio em 53 de 65 navegações
+                    # medidas — ler dali era ler o exchange errado.
+                    #
+                    # O `goto` estourando NÃO é absorvido aqui: o `DocumentStatus`
+                    # precisa devolver o status, e devolver exige que o bloco
+                    # termine. Por isso o estourão vira uma BANDEIRA, avaliada
+                    # logo abaixo, com o status em mãos.
+                    goto_estourou = false
+                    body_check = nil
+                    status_documento = DocumentStatus.capture(page) do
+                      begin
+                        page.go_to(uri.to_s)
+                      rescue Ferrum::TimeoutError, Ferrum::PendingConnectionsError
+                        goto_estourou = true
+                        body_check = (page.evaluate("document.body ? document.body.innerText : ''") rescue "").to_s.strip
                       end
                     end
+                    if host.match?(REDDIT_HOSTS)
+                      t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+                      url_final = (page.current_url rescue nil) || uri.to_s
+                      status_log = status_documento || (page.network.response&.status rescue nil)
+                      Rails.logger.info "[Fetcher::BrowserSession:diag] navegou " \
+                                     "duracao=#{(t1 - t0).round(3)}s status=#{status_log} " \
+                                     "status_documento=#{status_documento.inspect} goto_estourou=#{goto_estourou} " \
+                                     "url_final=#{url_final}"
+                    end
+
+                    # Ordem importa: o bloqueio é um FATO do servidor (o 403 já
+                    # saiu) e o timeout é apenas a falha de quem esperou; com as
+                    # duas coisas presentes, o bloqueio é a informação. Classificar
+                    # depois do RenderTimeout — que é o que o código fazia — é o
+                    # que mantinha a regra 4 inerte: o 403 chegava como timeout,
+                    # que não casa com nenhum padrão de backoff.
+                    bloquear_se_necessario!(host, status_documento)
+                    raise RenderTimeout if goto_estourou && body_check.to_s.empty?
                   end
                 ensure
                   if original_timeout && page.respond_to?(:timeout=)
@@ -179,6 +276,36 @@ module Fetcher
       end
 
       private
+
+      # Regra 4, lado (a): recusa o alvo em cooldown ANTES de qualquer gasto. O
+      # `HostInCooldown` do `PageFetcher` é irmão deste — a diferença é o tipo:
+      # este herda de `Channels::Error` porque quem entra por aqui é um CANAL, e
+      # o `ExtractService`/`PlatformSearchTool` convertem `Channels::Error` em
+      # campo de erro limpo. Um `FetchError` novo subiria como exceção crua.
+      def check_cooldown!(host)
+        entry = BotDetection.cooldown_for(host)
+        raise TargetInCooldown.new(host, entry) if entry
+      end
+
+      # Regra 4, lado (b): o 403 (e o 429) que o servidor devolveu é gravado como
+      # cooldown do ALVO e levantado como erro nomeado.
+      #
+      # Gravar e levantar juntos é deliberado: levantar sem gravar deixa a
+      # próxima chamada repetir (que era o defeito medido — 65 navegações), e
+      # gravar sem levantar devolve ao modelo um `PageFailed` que ele lê como
+      # "página ruim" e tenta de novo com outro termo.
+      #
+      # `status` nil (CDP sem o campo, ou sessão que não emite o evento) não
+      # bloqueia: fail-open, como o resto da casa. Um bloqueio inventado a
+      # partir de status desconhecido derrubaria o alvo por 6-12h sem prova.
+      def bloquear_se_necessario!(host, status)
+        return unless BLOCKING_STATUSES.include?(status)
+
+        BotDetection.cooldown!(host, reason: "HTTP #{status}")
+        Rails.logger.warn "[Fetcher::BrowserSession] #{host} respondeu HTTP #{status} — " \
+                          "cooldown de bloqueio gravado (regra 4); leitura deste alvo suspensa"
+        raise TargetBlocked.new(host, status)
+      end
 
       # O `go_to` re-resolve o hostname sozinho. A validação pré-navegação
       # (`SsrfGuard.resolve!`) já garantiu que TODOS os IPs do host são
