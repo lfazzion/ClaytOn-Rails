@@ -1,7 +1,7 @@
 nodriver>=0.50.3
 camoufox==0.5.6
 httpx>=0.28.1
-aiohttp>=3.14.3
+aiohttp>=3.14.5
 playwright==1.62.0
 yt-dlp
 curl_cffi>=0.16.3
